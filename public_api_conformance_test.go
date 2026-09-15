@@ -12,7 +12,7 @@ import (
 func TestPublicAPI(t *testing.T) {
 	eachBackend(t, func(t *testing.T, b monty.Backend) {
 		coreARunMontyAPITests(t, b.String()+" public API", func(ctx context.Context) (*monty.Pool, error) {
-			return monty.New(ctx, monty.Options{Backend: b})
+			return openPool(ctx, b, monty.Options{})
 		})
 	})
 }

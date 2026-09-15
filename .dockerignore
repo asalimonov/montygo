@@ -1,0 +1,7 @@
+*
+!server/
+server/target/
+!docker/
+!tests/network/pyclient/
+!LICENSE
+!THIRD_PARTY_NOTICES.md

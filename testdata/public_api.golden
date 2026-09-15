@@ -32,6 +32,7 @@ const UnlimitedPrintCollect
 const UpstreamRev
 const Version
 func Async
+func CheckWebSocketHealth
 func DateTimeFromTime
 func DurationPtr
 func Equal

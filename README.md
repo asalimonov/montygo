@@ -10,7 +10,8 @@ TypeScript package `@pydantic/monty`. Code runs in crash-isolated Monty workers:
   protobuf wire protocol, exactly like the Python and JavaScript bindings;
 - **wasm**: the same worker compiled to WebAssembly and embedded in the Go
   module, run in-process by [wazero](https://wazero.io) — nothing to install;
-- **websocket**: a remote worker behind a WebSocket relay or Monty server.
+- **websocket**: a remote worker behind a WebSocket relay, Full Monty, or the
+  bundled [`monty-server` image](#dockerized-server).
 
 It tracks Monty `0.0.23` plus upstream `main@f8acf4fa` (wire protocol version 3).
 
@@ -275,17 +276,59 @@ All sandbox errors implement `monty.Error`.
 ## WebSocket workers
 
 ```go
-pool, _ := monty.NewWebSocket(ctx, monty.WebSocketOptions{
-	URL: "ws://127.0.0.1:8799",
+opts := monty.WebSocketOptions{
+	URL:       "wss://monty.example.com/",
+	TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 	ConnectHeaders: func(ctx context.Context) (map[string]string, error) {
 		return map[string]string{"authorization": "Bearer ..."}, nil
 	},
-})
+}
+if err := monty.CheckWebSocketHealth(ctx, opts); err != nil {
+	fmt.Println("server unavailable:", err)
+	return
+}
+pool, _ := monty.NewWebSocket(ctx, opts)
 ```
 
-Each checkout dials a single-use worker. A dropped connection raises
+Each checkout dials a single-use worker. `TLSConfig` configures `wss://` dials
+and `DialContext` replaces the TCP dialer. `CheckWebSocketHealth` sends
+`GET <path>/health` through the same transport with the connect headers. A dropped connection raises
 `*monty.DisconnectError`; a draining server raises `*monty.ShutdownError` whose
 `Dump` restores the session elsewhere.
+
+## Dockerized server
+
+`monty-server` is an open WebSocket server for Monty workers, compatible with
+[Full Monty](https://github.com/pydantic/monty/blob/main/docs/server.md). The
+`server/` crate builds it, and `docker/Dockerfile` packages it with the pinned
+`monty` worker in a `scratch` image for `linux/amd64` and `linux/arm64`.
+
+```bash
+make docker-build                         # both platforms; needs Docker's containerd image store
+make docker-build PLATFORMS=linux/arm64   # one platform
+docker run --rm \
+  -e MONTY_SERVER_DUMP_KEY="$(openssl rand -hex 16)" \
+  -p 8000:8000 \
+  monty-server:latest
+```
+
+The server prints `ws://0.0.0.0:8000/` when it is ready. Connect with
+`monty.NewWebSocket(ctx, monty.WebSocketOptions{URL: "ws://127.0.0.1:8000/"})`,
+and probe readiness first with `monty.CheckWebSocketHealth`. The REPL example
+connects with `go run ./repl -ws ws://127.0.0.1:8000/` from `examples/`.
+
+Each session runs in a fresh worker process. The server clamps client limits to
+its ceilings (`MONTY_SERVER_MAX_MEMORY_MIB`, `MONTY_SERVER_MAX_DURATION`,
+`MONTY_SERVER_MAX_RECURSION_DEPTH`) and signs every dump with the dump key, so a
+dump restores on any server that shares the key. `GET /metrics` serves
+Prometheus metrics, and `OTEL_EXPORTER_OTLP_ENDPOINT` exports traces over
+OTLP/HTTP.
+
+The listener has no authentication and speaks plain `ws://`. Terminate TLS at an
+ingress or reverse proxy and dial it with a `wss://` URL and `TLSConfig`, as in
+[WebSocket workers](#websocket-workers). See
+[docs/architecture/server.md](docs/architecture/server.md) and
+[docs/architecture/docker.md](docs/architecture/docker.md).
 
 ## Observability
 
@@ -325,9 +368,14 @@ Inputs also accept Go integer and float kinds, slices, arrays and maps (keys sor
 make build-worker   # native worker in ../monty (MONTY_SRC)
 make build-wasm     # rebuild the embedded wasm worker (Rust + wasm32-wasip1)
 make test           # both backends
+make server-check   # clippy and tests for server/
+make docker-build   # monty-server image
+make test-docker    # root suite on the websocket backend against the image
+make test-network   # tests/network against the image
 ```
 
-On macOS with a beta SDK, `make` selects the 26.5 SDK for cargo (`SDKROOT`).
+On macOS with a beta SDK, `make` selects the 26.5 SDK for cargo and for the
+`tests/network` build (`SDKROOT`).
 
 ## License
 

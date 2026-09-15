@@ -2,6 +2,7 @@ package monty_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,6 +15,8 @@ import (
 
 	monty "github.com/asalimonov/montygo"
 )
+
+const wsURLEnv = "MONTY_TEST_WS_URL"
 
 type poolKey struct {
 	backend monty.Backend
@@ -33,6 +36,12 @@ func TestMain(m *testing.M) {
 			_ = os.Setenv("MONTY_BIN", candidate)
 		}
 	}
+	for _, b := range testBackends() {
+		if b == monty.BackendWebSocket && os.Getenv(wsURLEnv) == "" {
+			fmt.Fprintln(os.Stderr, "MONTY_TEST_BACKENDS names websocket but "+wsURLEnv+" is unset")
+			os.Exit(2)
+		}
+	}
 	code := m.Run()
 	poolsMu.Lock()
 	for _, p := range pools {
@@ -42,22 +51,62 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// testBackends lists the backends from MONTY_TEST_BACKENDS (default native,wasm).
+// testBackends lists the backends from MONTY_TEST_BACKENDS (default native,wasm,
+// plus websocket when MONTY_TEST_WS_URL is set).
 func testBackends() []monty.Backend {
 	spec := os.Getenv("MONTY_TEST_BACKENDS")
 	if spec == "" {
 		spec = "native,wasm"
+		if os.Getenv(wsURLEnv) != "" {
+			spec += ",websocket"
+		}
 	}
 	var out []monty.Backend
 	for _, name := range strings.Split(spec, ",") {
-		switch strings.TrimSpace(name) {
-		case "native":
-			out = append(out, monty.BackendNative)
-		case "wasm":
-			out = append(out, monty.BackendWasm)
+		if b, ok := backendByName(strings.TrimSpace(name)); ok {
+			out = append(out, b)
 		}
 	}
 	return out
+}
+
+// backendByName maps a Backend.String() value back to the Backend.
+func backendByName(name string) (monty.Backend, bool) {
+	for _, b := range []monty.Backend{monty.BackendNative, monty.BackendWasm, monty.BackendWebSocket} {
+		if b.String() == name {
+			return b, true
+		}
+	}
+	return 0, false
+}
+
+// openPool builds a pool for b; websocket maps Options onto WebSocketOptions,
+// where RequestTimeout 0 keeps its "disabled" meaning.
+func openPool(ctx context.Context, b monty.Backend, opts monty.Options) (*monty.Pool, error) {
+	if b != monty.BackendWebSocket {
+		opts.Backend = b
+		return monty.New(ctx, opts)
+	}
+	timeout := opts.RequestTimeout
+	if timeout == 0 {
+		timeout = monty.NoRequestTimeout
+	}
+	return monty.NewWebSocket(ctx, monty.WebSocketOptions{
+		URL:             os.Getenv(wsURLEnv),
+		MaxProcesses:    opts.MaxProcesses,
+		CheckoutTimeout: opts.CheckoutTimeout,
+		RequestTimeout:  timeout,
+	})
+}
+
+// poolUnavailable skips a local backend that cannot start; a configured
+// websocket server that cannot be reached fails the test.
+func poolUnavailable(t testing.TB, b monty.Backend, err error) {
+	t.Helper()
+	if b == monty.BackendWebSocket {
+		t.Fatalf("backend %s unavailable: %v", b, err)
+	}
+	t.Skipf("backend %s unavailable: %v", b, err)
 }
 
 func testCtx(t testing.TB) context.Context {
@@ -81,13 +130,13 @@ func sharedPool(t testing.TB, b monty.Backend) *monty.Pool {
 	if p, ok := pools[key]; ok {
 		return p
 	}
-	opts := monty.Options{Backend: b, MaxProcesses: 8}
+	opts := monty.Options{MaxProcesses: 8}
 	if b == monty.BackendWasm {
 		opts.MaxCheckoutsPerWorker = 1
 	}
-	p, err := monty.New(context.Background(), opts)
+	p, err := openPool(context.Background(), b, opts)
 	if err != nil {
-		t.Skipf("backend %s unavailable: %v", b, err)
+		poolUnavailable(t, b, err)
 	}
 	pools[key] = p
 	return p
@@ -107,8 +156,7 @@ func closeTestPools(test string) {
 // newPool creates a pool closed at test end.
 func newPool(t testing.TB, b monty.Backend, opts monty.Options) *monty.Pool {
 	t.Helper()
-	opts.Backend = b
-	p, err := monty.New(testCtx(t), opts)
+	p, err := openPool(testCtx(t), b, opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = p.Close(context.Background()) })
 	return p

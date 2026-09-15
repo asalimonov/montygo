@@ -3,7 +3,9 @@ package monty_test
 import (
 	"context"
 	"errors"
+	"net"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -40,7 +42,7 @@ func wsCheckout(t *testing.T, ctx context.Context, p *monty.Pool) *monty.Session
 
 func TestWebSocket(t *testing.T) {
 	t.Run("feed_run_over_websocket", func(t *testing.T) {
-		relay := wsStartRelay(t)
+		relay := wsStartRelay(t, false)
 		ctx := testCtx(t)
 		p := wsNewPool(t, monty.WebSocketOptions{URL: relay.URL, RequestTimeout: 30 * time.Second})
 		require.Equal(t, monty.BackendWebSocket, p.Backend())
@@ -56,7 +58,7 @@ func TestWebSocket(t *testing.T) {
 	})
 
 	t.Run("inputs_and_async_external_function_over_websocket", func(t *testing.T) {
-		relay := wsStartRelay(t)
+		relay := wsStartRelay(t, false)
 		ctx := testCtx(t)
 		double := func(x int) *monty.Future {
 			return monty.Async(func() (any, error) { return x * 2, nil })
@@ -72,7 +74,7 @@ func TestWebSocket(t *testing.T) {
 	})
 
 	t.Run("separate_checkouts_are_isolated", func(t *testing.T) {
-		relay := wsStartRelay(t)
+		relay := wsStartRelay(t, false)
 		ctx := testCtx(t)
 		p := wsNewPool(t, monty.WebSocketOptions{URL: relay.URL, RequestTimeout: 30 * time.Second})
 		first, err := p.Checkout(ctx, monty.CheckoutOptions{})
@@ -88,7 +90,7 @@ func TestWebSocket(t *testing.T) {
 	})
 
 	t.Run("connect_headers_sent_per_checkout", func(t *testing.T) {
-		relay := wsStartRelay(t)
+		relay := wsStartRelay(t, false)
 		ctx := testCtx(t)
 		var calls atomic.Int32
 		p := wsNewPool(t, monty.WebSocketOptions{
@@ -132,7 +134,7 @@ func TestWebSocket(t *testing.T) {
 	})
 
 	t.Run("connect_headers_accepts_any_mapping", func(t *testing.T) {
-		relay := wsStartRelay(t)
+		relay := wsStartRelay(t, false)
 		ctx := testCtx(t)
 		type headerMap map[string]string
 		source := headerMap{"x-token": "t"}
@@ -155,7 +157,7 @@ func TestWebSocket(t *testing.T) {
 	})
 
 	t.Run("connect_headers_failure_leaves_the_pool_usable", func(t *testing.T) {
-		relay := wsStartRelay(t)
+		relay := wsStartRelay(t, false)
 		ctx := testCtx(t)
 		errNoToken := errors.New("no token yet")
 		var attempts atomic.Int32
@@ -253,7 +255,7 @@ func TestWebSocket(t *testing.T) {
 	})
 
 	t.Run("trace_context_headers_precede_connect_headers", func(t *testing.T) {
-		relay := wsStartRelay(t)
+		relay := wsStartRelay(t, false)
 		ctx := testCtx(t)
 		state, err := trace.ParseTraceState("vendor=a")
 		require.NoError(t, err)
@@ -305,5 +307,74 @@ func TestWebSocket(t *testing.T) {
 
 	t.Run("checkout_rejects_unknown_limits", func(t *testing.T) {
 		t.Skip("ResourceLimits is a struct; an unknown limits key does not compile in Go")
+	})
+
+	t.Run("wss_through_tls_relay", func(t *testing.T) {
+		relay := wsStartRelay(t, true)
+		ctx := testCtx(t)
+		untrusted := wsNewPool(t, monty.WebSocketOptions{URL: relay.URL, RequestTimeout: 30 * time.Second})
+		_, err := untrusted.Checkout(ctx, monty.CheckoutOptions{})
+		var se *monty.SpawnError
+		require.ErrorAs(t, err, &se)
+
+		opts := monty.WebSocketOptions{URL: relay.URL, RequestTimeout: 30 * time.Second, TLSConfig: relay.TLS}
+		p := wsNewPool(t, opts)
+		s := wsCheckout(t, ctx, p)
+		v, err := s.FeedRun(ctx, "1 + 1", nil)
+		require.NoError(t, err)
+		require.Equal(t, int64(2), v)
+		require.NoError(t, monty.CheckWebSocketHealth(ctx, opts))
+		require.Len(t, relay.healthChecks(), 1)
+	})
+
+	t.Run("health_check_against_relay", func(t *testing.T) {
+		relay := wsStartRelay(t, false)
+		ctx := testCtx(t)
+		opts := monty.WebSocketOptions{
+			URL: relay.URL,
+			ConnectHeaders: func(context.Context) (map[string]string, error) {
+				return map[string]string{"x-token": "t"}, nil
+			},
+		}
+		require.NoError(t, monty.CheckWebSocketHealth(ctx, opts))
+		checks := relay.healthChecks()
+		require.Len(t, checks, 1)
+		require.Equal(t, "t", checks[0].Get("x-token"))
+		require.Empty(t, relay.captured())
+
+		errNoToken := errors.New("no token yet")
+		opts.ConnectHeaders = func(context.Context) (map[string]string, error) { return nil, errNoToken }
+		err := monty.CheckWebSocketHealth(ctx, opts)
+		require.ErrorIs(t, err, errNoToken)
+		require.Equal(t, "no token yet", err.Error())
+
+		err = monty.CheckWebSocketHealth(ctx, monty.WebSocketOptions{URL: "ftp://127.0.0.1:9"})
+		require.EqualError(t, err, `ftp://127.0.0.1:9: unsupported URL scheme "ftp"`)
+
+		err = monty.CheckWebSocketHealth(ctx, monty.WebSocketOptions{URL: wsUnreachableURL})
+		require.Error(t, err)
+		require.True(t, strings.HasPrefix(err.Error(), "http://127.0.0.1:9/health: "), err.Error())
+	})
+
+	t.Run("dial_context_is_used", func(t *testing.T) {
+		relay := wsStartRelay(t, false)
+		ctx := testCtx(t)
+		var dials atomic.Int32
+		opts := monty.WebSocketOptions{
+			URL:            relay.URL,
+			RequestTimeout: 30 * time.Second,
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				dials.Add(1)
+				return (&net.Dialer{}).DialContext(ctx, network, addr)
+			},
+		}
+		p := wsNewPool(t, opts)
+		s := wsCheckout(t, ctx, p)
+		v, err := s.FeedRun(ctx, "1 + 1", nil)
+		require.NoError(t, err)
+		require.Equal(t, int64(2), v)
+		require.Equal(t, int32(1), dials.Load())
+		require.NoError(t, monty.CheckWebSocketHealth(ctx, opts))
+		require.Equal(t, int32(2), dials.Load())
 	})
 }

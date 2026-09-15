@@ -1,6 +1,6 @@
 # montygo
 
-montygo is a Go binding for [Monty](https://github.com/pydantic/monty), a sandboxed Python interpreter. It is a pure-Go protocol parent for Monty workers, with the feature set of the official TypeScript package `@pydantic/monty`. It also ports two Python-binding features: the WebSocket transport and the in-memory OS helpers.
+montygo is a Go binding for [Monty](https://github.com/pydantic/monty), a sandboxed Python interpreter. It is a pure-Go protocol parent for Monty workers, with the feature set of the official TypeScript package `@pydantic/monty`. It also ports two Python-binding features: the WebSocket transport and the in-memory OS helpers. The repository also builds `monty-server`, an open Full Monty-compatible WebSocket server, and its Docker image.
 
 - Module: `github.com/asalimonov/montygo`, Go 1.25, no cgo. MIT licence.
 - Baseline: Monty `0.0.23` plus upstream `main@f8acf4fa`, wire protocol 3.
@@ -23,6 +23,9 @@ montygo is a Go binding for [Monty](https://github.com/pydantic/monty), a sandbo
 | `montypb/` | generated protobuf types, used only as a test oracle |
 | `proto/` | vendored `monty.proto` and `PROTO_REV` |
 | `worker-wasm/` | Rust crate building the worker for `wasm32-wasip1` |
+| `server/` | Rust crate `monty-server`: WebSocket server on `monty-pool` `Checkout::turn_raw` |
+| `docker/` | `Dockerfile` for the `monty-server` image, `pyclient.Dockerfile` for the Python client test image |
+| `tests/network/` | separate Go module: testcontainers tests of the server image |
 | `examples/` | separate Go module with ports of upstream `examples/` and the `monty` CLI REPL |
 | `changelogs/` | one release note per version |
 | `testdata/public_api.golden` | exported API snapshot |
@@ -30,9 +33,10 @@ montygo is a Go binding for [Monty](https://github.com/pydantic/monty), a sandbo
 ## Prerequisites
 
 - Go 1.25. Always run Go with `GOTOOLCHAIN=local`.
-- Rust stable with the `wasm32-wasip1` target, and `zstd`, to rebuild workers.
+- Rust stable with the `wasm32-wasip1` target, and `zstd`, to rebuild workers. `server/` needs Rust 1.95 or newer.
 - `protoc` with `protoc-gen-go` v1.36.x, only to regenerate `montypb`.
-- On macOS with a beta SDK, cargo linking fails. The Makefile sets `SDKROOT` to the 26.5 SDK. Export it yourself when running cargo directly.
+- Docker with buildx, for the image and `tests/network`. Loading a multi-platform build needs Docker's containerd image store; without it, set `PLATFORMS` to one platform.
+- On macOS with a beta SDK, cargo linking fails, and the Go tests in `tests/network` link through clang because of testcontainers dependencies. `SDKROOT` MUST point at the 26.5 SDK. The Makefile exports it on Darwin. Export it yourself when running cargo or `go test` in `tests/network` directly.
 
 ## Commands
 
@@ -47,17 +51,34 @@ GOTOOLCHAIN=local go test -race -count=1 ./...
 golangci-lint run ./...
 UPDATE_GOLDEN=1 GOTOOLCHAIN=local go test -run TestPublicAPISurface .
 make examples                # examples module tests
-GOTOOLCHAIN=local go mod tidy -diff               # in the root and in examples/
+GOTOOLCHAIN=local go mod tidy -diff               # in the root, examples/ and tests/network/
+make server-check            # clippy -D warnings and cargo test in server/ (set MONTY_BIN for session tests)
+make docker-build            # monty-server image for PLATFORMS (default linux/amd64,linux/arm64)
+make docker-build-pyclient   # Python client test image, host architecture
+make test-docker             # root suite on the websocket backend against the image
+make test-network            # tests/network against the images
+make test-network-clean      # remove leaked test containers
 ```
 
 ## Environment variables
 
 | Variable | Effect |
 |---|---|
-| `MONTY_BIN` | native worker binary; tests default it to `../monty/target/debug/monty` |
-| `MONTY_TEST_BACKENDS` | backends for root tests, default `native,wasm` |
+| `MONTY_BIN` | native worker binary; tests default it to `../monty/target/debug/monty`; `server/tests/session.rs` skips without it |
+| `MONTY_TEST_BACKENDS` | backends for root tests: `native`, `wasm`, `websocket`; default `native,wasm`, plus `websocket` when `MONTY_TEST_WS_URL` is set |
+| `MONTY_TEST_WS_URL` | URL of a running `monty-server`; enables the `websocket` backend for root tests |
 | `MONTY_EXAMPLES_BACKEND` | forces `native` or `wasm` in the examples |
-| `MONTY_SRC` | upstream checkout used by `make build-worker` and `make build-wasm`, default `../monty` |
+| `MONTY_SRC` | upstream checkout used by `make build-worker`, `make build-wasm` and the image builds, default `../monty` |
+| `MONTY_DOCKER_SRC` | `auto` (default) stages `MONTY_SRC` into the image build when present; any other value builds from the pinned git fetch |
+| `PLATFORMS` | buildx platforms for `make docker-build` and `make docker-push`, default `linux/amd64,linux/arm64` |
+| `IMAGE`, `PYCLIENT_IMAGE`, `IMAGE_TAG`, `REGISTRY` | image names, the tag (default `<Version>-<UpstreamRev>`) and the push registry |
+| `MONTYGO_NETWORK_TESTS` | MUST be `1` for `tests/network` to run |
+| `MONTYGO_TEST_PARALLEL` | `tests/network` units and `-parallel` budget, default `4` |
+| `MONTYGO_TEST_IMAGE` | server image for `tests/network`, default `monty-server:latest` |
+| `MONTYGO_PYCLIENT_IMAGE` | Python client image for `tests/network`, default `monty-pyclient:latest`; absent image skips `TestPyClient_*` |
+| `MONTYGO_PYTHON_IMAGE` | image of the OTLP receiver container in `TestTelemetry_*`, default `python:3.13-slim-bookworm` |
+| `MONTYGO_DUMP_CONTAINER_LOGS` | `0` disables container log files in `tests/network/output/containers/` |
+| `MONTYGO_SLOW_TESTS_ENABLE` | enables the slow session and keepalive timeout tests |
 | `MONTY_FS_SOAK` | enables the mount race soak tests |
 | `UPDATE_GOLDEN` | rewrites `testdata/public_api.golden` |
 
@@ -68,10 +89,14 @@ GOTOOLCHAIN=local go mod tidy -diff               # in the root and in examples/
 - The worker is untrusted. Code that reads worker output MUST validate it and MUST NOT let a reported limit loosen a configured one.
 - Backends MUST only implement `worker.Worker`. Pool, session, mount and telemetry code MUST NOT branch on the transport, except to classify how a worker ended.
 - The root module MUST build without cgo. New dependencies MUST support Go 1.25.
+- Server texts (close reasons, HTTP bodies, the info page) MUST be defined in `server/src/texts.rs` and listed in `docs/architecture/server.md`. The protocol version refusal and `PoolError` texts MUST come from upstream verbatim.
+- Deviations of `monty-server` from Full Monty (upstream `docs/server.md`) MUST be listed in `docs/parity/server.md`.
+- Server variables use the `MONTY_SERVER_*` prefix. `tests/network` variables use `MONTYGO_*`.
 - Comments explain only what the code cannot say. Concepts belong in `docs/architecture/`, not in code comments.
 - Docs use short sentences and RFC 2119 keywords for obligations.
 - Commit subjects are imperative. A body holds only facts the diff cannot show.
 - Every change MUST pass vet, tests on both backends, the race detector and golangci-lint before it is called done.
+- Every change to code MUST also pass `make server-check`, `make docker-build`, `make test-docker`, `make test-network`, and `go vet ./...` and `go mod tidy -diff` in `tests/network/`.
 
 ## Upstream sources of each port
 
@@ -86,6 +111,8 @@ GOTOOLCHAIN=local go mod tidy -diff               # in the root and in examples/
 | package `monty` API | `crates/monty-js/ts/` |
 | root `*_test.go` | `crates/monty-js/__test__/*.spec.ts` |
 | `websocket.go`, `internal/pool/websocket_test.go` | `crates/monty-python` WebSocket client and tests, `crates/monty-pool/tests/websocket.rs` |
+| `server/` | `docs/server.md` (Full Monty behaviour, flags, defaults), `Checkout::turn_raw` in `crates/monty-pool/src/checkout.rs` |
+| `docker/pyclient.Dockerfile`, `tests/network/pyclient/` | `crates/monty-python` (`pydantic-monty-client` wheel, `AsyncMontyWebsocket`) |
 | `osaccess/` | `crates/monty-python/python/pydantic_monty/os_access.py`, `crates/monty-python/tests/test_os_access*.py` |
 | `examples/` | `examples/` |
 | `examples/repl` | REPL loop in `crates/monty-runtime/src/run.rs`, continuation in `crates/monty/src/repl.rs` |
@@ -96,7 +123,7 @@ GOTOOLCHAIN=local go mod tidy -diff               # in the root and in examples/
 
 - Keep `docs/architecture/` in step with design changes, and `docs/parity/` in step with test and API changes.
 - A change to exported API MUST update the golden file, `docs/parity/api.md` and the README. README snippets live in `example_test.go`.
-- Keep dependencies current with `go get -u` in both modules, then run the full verification.
+- Keep dependencies current with `go get -u` in the root, `examples/` and `tests/network/`, and `cargo update` in `server/`, then run the full verification.
 
 ### Supporting a new Monty release
 
@@ -105,18 +132,23 @@ Let `OLD` be the current pin (`proto/PROTO_REV`) and `NEW` the target tag or com
 1. **Survey upstream.**
    - Update `../monty` and check out `NEW`.
    - Read `git -C ../monty log --oneline OLD..NEW` and the release notes.
-   - Diff every source in the table above, for example `git -C ../monty diff OLD NEW --stat -- crates/monty-proto crates/monty-pool crates/monty-fs crates/monty-js crates/monty-python examples`.
+   - Diff every source in the table above, for example `git -C ../monty diff OLD NEW --stat -- crates/monty-proto crates/monty-pool crates/monty-fs crates/monty-js crates/monty-python examples docs/server.md`.
    - List the changes per area before editing. Protocol changes come first, because everything else depends on them.
 2. **Move the pins.** Update every place that names the old revision or version:
    - `proto/PROTO_REV`
    - `monty.go`: `Version` and `UpstreamRev`
    - `worker-wasm/Cargo.toml`: package version and the three git `rev` values, then `cargo update` in `worker-wasm/`
-   - `.github/workflows/ci.yml`: `MONTY_REV`, as a full 40-character SHA, because `actions/checkout` looks up a short SHA as a branch or tag
+   - `server/Cargo.toml`: package version and the three git `rev` values, then `cargo update` in `server/`
+   - `server/src/version.rs`: `MONTY_REV`, as a full SHA; `monty_rev_matches_lockfile` checks it against `server/Cargo.lock`
+   - `docker/Dockerfile`: `ARG MONTY_REV` and the `org.opencontainers.image.version` label
+   - `docker/pyclient.Dockerfile`: `ARG MONTY_REV`
+   - `.github/workflows/ci.yml`: `MONTY_REV`, as a full 40-character SHA, because `actions/checkout` looks up a short SHA as a branch or tag. The Makefile reads the image build revision from this line.
    - `internal/worker/websocket.go`: `DefaultUserAgent`
    - `README.md` and `THIRD_PARTY_NOTICES.md`
    - tests that assert the version: `internal/wire/codec_test.go`, `internal/worker/wasm_test.go`, `internal/pool/websocket_test.go`
+   - the protocol-rejection client: the PyPI `pydantic-monty-client` version and its `/opt/pypi-<version>` venv in `docker/pyclient.Dockerfile`, `pythonPyPI` in `tests/network/pyclient.go`, and the refusal text in `TestPyClient_PyPIProtocol2IsRejected`. It MUST stay a release whose protocol is older than the pin's.
 
-   Find leftovers with `grep -rn "OLD\|<old version>" --exclude-dir=target --exclude-dir=docs --exclude-dir=changelogs .`.
+   Find leftovers with `grep -rn "OLD\|<old version>" --exclude-dir=target --exclude-dir=docs --exclude-dir=changelogs --exclude-dir=output .`.
 3. **Update the protocol.**
    - Copy the upstream `monty.proto` into `proto/monty/v1/` and run `make generate`.
    - Port new or changed fields into the hand-written codec in `internal/wire`. `montypb` alone is not used at runtime.
@@ -132,7 +164,8 @@ Let `OLD` be the current pin (`proto/PROTO_REV`) and `NEW` the target tag or com
    - telemetry names, attributes and state machines from `monty-pool/src/telemetry`;
    - mounts from `monty-fs`;
    - public API from `monty-js/ts`, keeping Go naming;
-   - WebSocket and OS helper changes from `monty-python`.
+   - WebSocket and OS helper changes from `monty-python`;
+   - server flags, defaults and behaviour from `docs/server.md`, and `turn_raw` or `CheckoutOptions` changes in `monty-pool`, into `server/`, updating `docs/architecture/server.md` and `docs/parity/server.md`.
 6. **Port tests.**
    - Port new and changed spec files in `crates/monty-js/__test__` one file at a time, keeping titles.
    - Port changes in `monty-fs/tests`, `monty-pool/tests/websocket.rs` and the Python tests that montygo mirrors.
@@ -149,7 +182,11 @@ Let `OLD` be the current pin (`proto/PROTO_REV`) and `NEW` the target tag or com
     - `go vet ./...` and `golangci-lint run ./...`
     - `go test -count=1 ./...` on both backends, and again with `-race`
     - `make examples` with `MONTY_EXAMPLES_BACKEND=native` and with `MONTY_EXAMPLES_BACKEND=wasm`
-    - `go mod tidy -diff` in the root and in `examples/`
+    - `go mod tidy -diff` in the root, `examples/` and `tests/network/`, and `go vet ./...` in `tests/network/`
+    - `make server-check` with `MONTY_BIN` pointing at the new native worker
+    - `make docker-build` and `make docker-build-pyclient`
+    - `make test-docker`
+    - `make test-network`
 
 ### Known upstream quirks
 
@@ -157,3 +194,4 @@ Let `OLD` be the current pin (`proto/PROTO_REV`) and `NEW` the target tag or com
 - `monty-runtime` cannot build for `wasm32-wasip1`, which is why `worker-wasm` exists.
 - Upstream `examples/sql_playground/sandbox_code.py` imports stubs as `type_stubs`, while session type checking names them `repl_type_stubs`. The Go port skips that type check by default. Re-test this on each upgrade and drop the workaround once upstream fixes it.
 - A worker that ran the type checker keeps its caches after `Reset`. Tests with tight memory limits use their own pools, and wasm test pools recycle workers after every checkout.
+- BuildKit honours only a `.dockerignore` inside a named context's directory, and `../monty` has none that excludes `target/`. `make docker-stage-src` therefore stages tracked files into `build/monty-src`.

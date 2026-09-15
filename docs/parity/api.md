@@ -48,6 +48,9 @@
 | Feature | Go | Origin |
 |---|---|---|
 | WebSocket workers | `monty.NewWebSocket`, `*DisconnectError`, `*ShutdownError` | Python `AsyncMontyWebsocket` |
+| TLS settings for WebSocket dials | `WebSocketOptions.TLSConfig` | montygo; Python has no equivalent |
+| Custom TCP dialer for WebSocket dials | `WebSocketOptions.DialContext` | montygo; Python has no equivalent |
+| Server health probe | `monty.CheckWebSocketHealth` (`GET <path>/health`) | montygo; Python has no equivalent |
 | In-memory OS helpers | package `osaccess` | Python `AbstractOS`, `OSAccess`, `MemoryFile`, `CallbackFile`, `StatResult` |
 | Mounts on the wasm backend | host-side mount servicing | the TS browser entry has no mounts |
 | Memory-limit classification on wasm | exit code 65 → `MemoryError` | the TS browser worker reports a crash |

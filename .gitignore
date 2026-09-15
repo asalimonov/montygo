@@ -2,3 +2,6 @@
 /examples/**/bin/
 *.test
 /coverage.out
+/server/target/
+/build/
+/tests/network/output/

@@ -231,6 +231,11 @@ func (p *Pool) release(s *slot) {
 		p.total--
 		p.cfg.Metrics.WorkersLive(-1)
 		p.cfg.Metrics.WorkerTerminated(reason)
+		if s.w.Kind() == worker.KindWebSocket {
+			// Nothing is sent to retire a remote worker, so its spans end before release returns.
+			obs.close()
+			obs = nil
+		}
 		go p.retire(s.w, obs)
 	} else {
 		p.idle = append(p.idle, s)

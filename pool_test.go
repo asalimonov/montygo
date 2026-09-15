@@ -58,12 +58,16 @@ func plClose(t *testing.T, s *monty.Session) {
 	require.NoError(t, s.Close(testCtx(t)))
 }
 
-func plRequireMemoryError(t *testing.T, err error) {
+// plRequireMemoryError accepts the interpreter's own MemoryError text on the
+// websocket backend, because the server's memory ceiling fires before the allocator abort.
+func plRequireMemoryError(t *testing.T, b monty.Backend, err error) {
 	t.Helper()
 	var rt *monty.RuntimeError
 	require.ErrorAs(t, err, &rt)
-	require.Equal(t, "MemoryError: the worker exceeded its memory limit and was terminated", rt.Error())
 	require.Equal(t, "MemoryError", rt.Exception().TypeName)
+	if b != monty.BackendWebSocket {
+		require.Equal(t, "MemoryError: the worker exceeded its memory limit and was terminated", rt.Error())
+	}
 }
 
 func plRequireCrashed(t *testing.T, err error) *monty.CrashedError {
@@ -135,7 +139,7 @@ func TestPool(t *testing.T) {
 				code = "x = ' ' * ((1 << 31) - 1)"
 			}
 			_, err := s.FeedRun(testCtx(t), code, nil)
-			plRequireMemoryError(t, err)
+			plRequireMemoryError(t, b, err)
 			next := plCheckout(t, p, monty.CheckoutOptions{})
 			require.Equal(t, int64(2), plFeed(t, next, "1 + 1", nil))
 			plClose(t, next)
@@ -145,7 +149,7 @@ func TestPool(t *testing.T) {
 			p := newPool(t, b, monty.Options{})
 			s := plCheckout(t, p, monty.CheckoutOptions{Limits: &monty.ResourceLimits{MaxMemory: 1024}})
 			_, err := s.FeedRun(testCtx(t), "# "+strings.Repeat("a", 16*1024*1024), nil)
-			plRequireMemoryError(t, err)
+			plRequireMemoryError(t, b, err)
 			next := plCheckout(t, p, monty.CheckoutOptions{})
 			require.Equal(t, int64(2), plFeed(t, next, "1 + 1", nil))
 			plClose(t, next)

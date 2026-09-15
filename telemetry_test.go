@@ -41,9 +41,9 @@ type telCase struct {
 // telRun runs each case in a child test process, because telemetry is installed process-wide.
 func telRun(t *testing.T, test string, cases []telCase) {
 	if title := os.Getenv(telScenarioEnv); title != "" {
-		b := monty.BackendNative
-		if os.Getenv(telBackendEnv) == monty.BackendWasm.String() {
-			b = monty.BackendWasm
+		b, ok := backendByName(os.Getenv(telBackendEnv))
+		if !ok {
+			t.Fatalf("unknown telemetry backend %q", os.Getenv(telBackendEnv))
 		}
 		for _, c := range cases {
 			if c.title == title {
@@ -79,10 +79,9 @@ func telChild(t *testing.T, test, title string, b monty.Backend) {
 
 func telPool(t *testing.T, b monty.Backend, opts monty.Options) *monty.Pool {
 	t.Helper()
-	opts.Backend = b
-	p, err := monty.New(testCtx(t), opts)
+	p, err := openPool(testCtx(t), b, opts)
 	if err != nil {
-		t.Skipf("backend %s unavailable: %v", b, err)
+		poolUnavailable(t, b, err)
 	}
 	t.Cleanup(func() { _ = p.Close(context.Background()) })
 	return p

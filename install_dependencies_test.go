@@ -12,7 +12,7 @@ func TestInstallDependencies(t *testing.T) {
 	eachBackend(t, func(t *testing.T, b monty.Backend) {
 		t.Run("installDependencies is rejected by the sandbox worker, session survives", func(t *testing.T) {
 			ctx := testCtx(t)
-			pool, err := monty.New(ctx, monty.Options{Backend: b})
+			pool, err := openPool(ctx, b, monty.Options{})
 			require.NoError(t, err)
 			defer func() { require.NoError(t, pool.Close(ctx)) }()
 			session, err := pool.Checkout(ctx, monty.CheckoutOptions{})
@@ -28,7 +28,7 @@ func TestInstallDependencies(t *testing.T) {
 
 		t.Run("installDependencies with an empty list is a no-op", func(t *testing.T) {
 			ctx := testCtx(t)
-			pool, err := monty.New(ctx, monty.Options{Backend: b})
+			pool, err := openPool(ctx, b, monty.Options{})
 			require.NoError(t, err)
 			defer func() { require.NoError(t, pool.Close(ctx)) }()
 			session, err := pool.Checkout(ctx, monty.CheckoutOptions{})

@@ -6,6 +6,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -77,7 +79,7 @@ func run(ctx context.Context, c console, args []string) error {
 		return err
 	}
 	defer opts.close()
-	pool, err := monty.New(ctx, montyenv.PoolOptions())
+	pool, err := openPool(ctx, opts)
 	if err != nil {
 		return err
 	}
@@ -109,6 +111,51 @@ type options struct {
 	mounts     []*monty.MountDir
 	cwd        string
 	limits     monty.ResourceLimits
+	ws         wsOptions
+}
+
+type wsOptions struct {
+	url                string
+	caFile             string
+	insecureSkipVerify bool
+}
+
+// openPool dials a remote Monty server when -ws is set, else starts local workers.
+func openPool(ctx context.Context, o *options) (*monty.Pool, error) {
+	if o.ws.url == "" {
+		return monty.New(ctx, montyenv.PoolOptions())
+	}
+	tlsConfig, err := o.ws.tlsConfig()
+	if err != nil {
+		return nil, err
+	}
+	return monty.NewWebSocket(ctx, monty.WebSocketOptions{
+		URL: o.ws.url,
+		// An interrupt checks out the replacement session before the lost one is released.
+		MaxProcesses:   2,
+		RequestTimeout: monty.NoRequestTimeout,
+		TLSConfig:      tlsConfig,
+	})
+}
+
+// tlsConfig is nil unless a CA file or skip-verify customises the system defaults.
+func (w wsOptions) tlsConfig() (*tls.Config, error) {
+	if w.caFile == "" && !w.insecureSkipVerify {
+		return nil, nil
+	}
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: w.insecureSkipVerify}
+	if w.caFile != "" {
+		pem, err := os.ReadFile(w.caFile)
+		if err != nil {
+			return nil, err
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("no certificates found in %s", w.caFile)
+		}
+		cfg.RootCAs = roots
+	}
+	return cfg, nil
 }
 
 func (o *options) close() {
@@ -140,12 +187,22 @@ func parseOptions(args []string, errOut io.Writer) (*options, error) {
 	gcInterval := flags.Uint64("gc-interval", 0, "run garbage collection every N allocations")
 	recursion := flags.Uint64("max-recursion-depth", 0, "maximum call-stack depth (default 1000)")
 	suspensions := flags.Uint64("max-suspensions", 0, "maximum suspensions in one session (default 1000)")
+	wsURL := flags.String("ws", "", "run sessions on a remote Monty server at this ws:// or wss:// URL")
+	wsCA := flags.String("ws-ca", "", "PEM file of CA certificates trusted for a wss:// server")
+	wsInsecure := flags.Bool("ws-insecure-skip-verify", false, "skip TLS certificate verification for a wss:// server")
 	if err := flags.Parse(args); err != nil {
 		return nil, err
 	}
 
-	o := &options{scriptName: "repl.py", initial: *command, cwd: *cwd}
+	o := &options{
+		scriptName: "repl.py",
+		initial:    *command,
+		cwd:        *cwd,
+		ws:         wsOptions{url: *wsURL, caFile: *wsCA, insecureSkipVerify: *wsInsecure},
+	}
 	switch {
+	case *wsURL == "" && (*wsCA != "" || *wsInsecure):
+		return nil, errors.New("-ws-ca and -ws-insecure-skip-verify require -ws")
 	case flags.NArg() > 1:
 		return nil, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args()[1:], " "))
 	case flags.NArg() == 1 && *command != "":

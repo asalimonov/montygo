@@ -1,6 +1,6 @@
 # Test parity
 
-Upstream tests are ported file by file. Subtest names keep the upstream titles, so `go test -run 'TestMount/native/overlay_write_does_not_modify_host'` finds a TS test by its title. Root tests run on the native and wasm backends.
+Upstream tests are ported file by file. Subtest names keep the upstream titles, so `go test -run 'TestMount/native/overlay_write_does_not_modify_host'` finds a TS test by its title. Root tests run on the native and wasm backends, and on the websocket backend against the server image.
 
 - **ported**: same scenario and assertions.
 - **adapted**: same intent, expressed with Go types or APIs.
@@ -72,9 +72,43 @@ Upstream tests are ported file by file. Subtest names keep the upstream titles, 
 
 ## Python WebSocket client (`crates/monty-python/tests/test_websocket.py`, `crates/monty-pool/tests/websocket.rs`)
 
-`websocket_test.go` ports `test_websocket.py` against an in-process relay (`websocket_relay_test.go`, the Go analogue of `scripts/websocket_relay.py`). Seven cases pass. Six skip because Go's types cannot express them: a non-callable header callback, unknown limit keys, and the non-mapping, non-string-key, non-string-value and unencodable-value header results.
+`websocket_test.go` ports `test_websocket.py` against an in-process relay (`websocket_relay_test.go`, the Go analogue of `scripts/websocket_relay.py`). Seven cases pass. Six skip because Go's types cannot express them: a non-callable header callback, unknown limit keys, and the non-mapping, non-string-key, non-string-value and unencodable-value header results. Three montygo subtests have no upstream counterpart: `wss_through_tls_relay`, `health_check_against_relay` and `dial_context_is_used`.
 
 `internal/pool/websocket_test.go` ports `websocket.rs` against a scripted in-process child: 26 pass, 7 skip. Five of the skips test the Rust raw relay path (`turn_raw`), which the Go pool does not have; one tests redacted `Debug` output; one tests dial-time trace headers, which the root pool injects and the root `trace_context_headers_precede_connect_headers` subtest covers.
+
+## Root suite on the `websocket` backend
+
+`make test-docker` runs the root package with `MONTY_TEST_BACKENDS=websocket` against one `monty-server` container, with the test dump key and the per-client quota disabled. Every root test runs, and subtests carry the backend name `websocket`.
+
+- `openPool` maps `Options` onto `WebSocketOptions`. `RequestTimeout` 0 becomes `NoRequestTimeout`.
+- `plRequireMemoryError` checks only the `MemoryError` type on websocket. The server's memory ceiling fires before the allocator abort, so the message is the interpreter's own.
+- Pool tests that observe worker identity through the worker pid skip through `plNativeOnly` with `websocket backend: <reason>`, as on wasm.
+- The crash recovery test forces a timeout with a 500 ms `RequestTimeout` instead of killing the worker pid, as on wasm.
+- A server that cannot be reached fails the test instead of skipping it.
+
+## `tests/network`
+
+A separate module of 56 tests for the server image. They have no upstream test counterpart; upstream `docs/server.md` is the specification, and `docs/parity/server.md` lists the deviations.
+
+| Group | File | Tests |
+|---|---|---|
+| `TestAdmission_` | `server_admission_test.go` | 5 |
+| `TestProtocol_` | `server_protocol_test.go` | 8 |
+| `TestLimits_` | `server_limits_test.go` | 5 |
+| `TestTimeouts_` | `server_timeouts_test.go` | 4 |
+| `TestDumps_` | `server_dumps_test.go` | 6 |
+| `TestDrain_` | `server_drain_test.go` | 6 |
+| `TestTLS_` | `server_tls_test.go` | 3 |
+| `TestParallel_` | `server_parallel_test.go` | 2 |
+| `TestTelemetry_` | `server_telemetry_test.go` | 2 |
+| `TestRepl_` | `repl_session_test.go` | 5 |
+| `TestReplCLI_` | `repl_cli_test.go` | 6 |
+| `TestPyClient_` | `pyclient_test.go` | 4 |
+
+- `TestTimeouts_SessionTimeout` and `TestTimeouts_KeepaliveDropsFrozenClient` are slow. They skip unless `MONTYGO_SLOW_TESTS_ENABLE` is set.
+- `TestProtocol_RemoteDialByContainerIP` runs only on Linux, where container bridge addresses are routable from the host.
+- `TestPyClient_*` skip when the Python client image is absent, as in the `docker-arm64` CI job. They run the `pydantic-monty-client` wheel built at the pin, and the PyPI `0.0.23` client for the protocol refusal.
+- Counter assertions compare deltas from a baseline, because default units are reused across tests.
 
 ## Python OS helpers (`crates/monty-python/tests/test_os_access*.py`)
 

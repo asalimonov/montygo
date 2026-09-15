@@ -76,3 +76,78 @@ jobs:
       - name: Test examples
         working-directory: examples
         run: go test -count=1 -timeout 30m ./...
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check out upstream Monty
+        uses: actions/checkout@v7
+        with:
+          repository: pydantic/monty
+          ref: ${{ env.MONTY_REV }}
+          path: monty-src
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            monty-src
+            server
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: |
+            go.sum
+            tests/network/go.sum
+            examples/go.sum
+      - uses: docker/setup-buildx-action@v3
+      # buildx reads the cache service token only from the environment, which run steps do not get by default.
+      - name: Expose GitHub Actions runtime
+        uses: crazy-max/ghaction-github-runtime@v3
+      - name: Build native worker
+        run: cargo build --locked -p monty-runtime --manifest-path monty-src/Cargo.toml
+      - name: Server checks
+        run: make server-check
+        env:
+          MONTY_BIN: ${{ github.workspace }}/monty-src/target/debug/monty
+      - name: Build image
+        run: make docker-build PLATFORMS=linux/amd64 MONTY_SRC=monty-src
+        env:
+          BUILDX_CACHE_FROM: type=gha,scope=monty-server-amd64
+          BUILDX_CACHE_TO: type=gha,mode=max,scope=monty-server-amd64
+      - name: Build Python client image
+        run: make docker-build-pyclient MONTY_SRC=monty-src
+      - name: Root suite over websocket
+        run: make test-docker
+      - name: Vet network tests
+        working-directory: tests/network
+        run: go vet ./... && go mod tidy -diff
+      - name: Network tests
+        run: make test-network
+
+  docker-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check out upstream Monty
+        uses: actions/checkout@v7
+        with:
+          repository: pydantic/monty
+          ref: ${{ env.MONTY_REV }}
+          path: monty-src
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: |
+            go.sum
+            tests/network/go.sum
+            examples/go.sum
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        run: make docker-build PLATFORMS=linux/arm64 MONTY_SRC=monty-src
+      - name: Network tests
+        run: make test-network

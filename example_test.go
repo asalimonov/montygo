@@ -2,6 +2,7 @@ package monty_test
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"os"
@@ -338,4 +339,31 @@ func Example_wasmBackend() {
 	result, _ := session.FeedRun(ctx, "sum(range(10))", nil)
 	fmt.Println(pool.Backend(), result)
 	// Output: wasm 45
+}
+
+func ExampleCheckWebSocketHealth() {
+	ctx := context.Background()
+	opts := monty.WebSocketOptions{
+		URL:       "wss://monty.example.com/",
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+		ConnectHeaders: func(ctx context.Context) (map[string]string, error) {
+			return map[string]string{"authorization": "Bearer ..."}, nil
+		},
+	}
+	if err := monty.CheckWebSocketHealth(ctx, opts); err != nil {
+		fmt.Println("server unavailable:", err)
+		return
+	}
+	pool, err := monty.NewWebSocket(ctx, opts)
+	if err != nil {
+		panic(err)
+	}
+	defer pool.Close(ctx)
+	session, err := pool.Checkout(ctx, monty.CheckoutOptions{})
+	if err != nil {
+		panic(err)
+	}
+	defer session.Close(ctx)
+	result, err := session.FeedRun(ctx, "1 + 2", nil)
+	fmt.Println(result, err)
 }
