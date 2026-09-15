@@ -18,7 +18,6 @@ const UnlimitedDuration time.Duration = math.MaxInt64
 const (
 	defaultMaxHostObjects    uint64 = 10_000
 	defaultMaxPendingFutures uint64 = 1000
-	defaultInterruptGrace           = 100 * time.Millisecond
 )
 
 // TypeCheckFormat selects how typing diagnostics render.
@@ -76,37 +75,36 @@ type CheckoutOptions struct {
 	MaxHostObjects uint64
 	// MaxPendingFutures bounds unresolved futures per feed: 0 means 1000, Unlimited disables.
 	MaxPendingFutures uint64
-	// InterruptGrace bounds an accepted interruption, including host callbacks: 0 means 100ms.
-	InterruptGrace time.Duration
+	// Stop overrides the pool's stop policy for this session; zero fields inherit.
+	Stop StopPolicy
 }
 
 type sessionLimits struct {
 	hostObjects    uint64
 	pendingFutures uint64
-	interruptGrace time.Duration
+	stop           StopPolicy
 }
 
-func (o CheckoutOptions) sessionLimits() (sessionLimits, error) {
-	l := sessionLimits{hostObjects: o.MaxHostObjects, pendingFutures: o.MaxPendingFutures, interruptGrace: o.InterruptGrace}
+func (o CheckoutOptions) sessionLimits(poolStop StopPolicy) (sessionLimits, error) {
+	l := sessionLimits{hostObjects: o.MaxHostObjects, pendingFutures: o.MaxPendingFutures}
 	if l.hostObjects == 0 {
 		l.hostObjects = defaultMaxHostObjects
 	}
 	if l.pendingFutures == 0 {
 		l.pendingFutures = defaultMaxPendingFutures
 	}
-	if l.interruptGrace < 0 {
-		return l, &OptionError{Message: fmt.Sprintf("invalid interruptGrace: expected a non-negative duration, got %s", l.interruptGrace)}
+	stop, err := effectivePolicy(poolStop, []StopPolicy{o.Stop})
+	if err != nil {
+		return l, err
 	}
-	if l.interruptGrace == 0 {
-		l.interruptGrace = defaultInterruptGrace
-	}
+	l.stop = stop
 	return l, nil
 }
 
 // Uint32 returns a pointer to v, for AssertMessageAnnotations.
 func Uint32(v uint32) *uint32 { return &v }
 
-// DurationPtr returns a pointer to d, for duration options such as InterruptOptions.Grace.
+// DurationPtr returns a pointer to d, for PrintFlushInterval.
 func DurationPtr(d time.Duration) *time.Duration { return &d }
 
 func (o CheckoutOptions) configure() (wire.Configure, error) {

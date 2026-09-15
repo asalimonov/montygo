@@ -67,6 +67,8 @@ type Options struct {
 	MaxPendingBytes int64
 	// Telemetry selects this pool's telemetry; nil uses the process-wide installation.
 	Telemetry *TelemetryComponents
+	// Stop is the default stop policy of this pool's sessions; zero fields inherit DefaultStopPolicy.
+	Stop StopPolicy
 }
 
 // UnlimitedPendingBytes disables the buffered frame bound.
@@ -91,6 +93,7 @@ type Pool struct {
 	connectHeaders func(ctx context.Context) (map[string]string, error)
 	sessionsMu     sync.Mutex
 	sessions       map[*Session]struct{}
+	stop           StopPolicy
 }
 
 // New creates a pool.
@@ -143,8 +146,12 @@ func newPool(ctx context.Context, opts Options, spawner worker.Spawner, backend 
 	if grace == 0 {
 		grace = time.Second
 	}
+	stop, err := effectivePolicy(DefaultStopPolicy, []StopPolicy{opts.Stop})
+	if err != nil {
+		return nil, err
+	}
 	metrics := poolMetrics(rec)
-	p := &Pool{backend: backend, binary: binary, rec: rec, metered: metrics != nil, sessions: map[*Session]struct{}{}}
+	p := &Pool{backend: backend, binary: binary, rec: rec, metered: metrics != nil, sessions: map[*Session]struct{}{}, stop: stop}
 	cfg := pool.Config{
 		Spawner:               spawner,
 		MinProcesses:          minProcs,
@@ -158,7 +165,6 @@ func newPool(ctx context.Context, opts Options, spawner worker.Spawner, backend 
 		MontyVersion:          MontyVersion,
 		ProtocolVersion:       ProtocolVersion,
 		Metrics:               metrics,
-		OnShutdown:            p.closeAllSessions,
 	}
 	inner, err := pool.New(ctx, cfg)
 	if err != nil {
@@ -240,14 +246,60 @@ func (p *Pool) Close(ctx context.Context) error {
 	return p.inner.Close(ctx)
 }
 
-// Shutdown closes the pool and waits for every session to end. When ctx ends
-// first, open sessions are closed with CloseNow and the wait continues for the
-// workers to exit.
-func (p *Pool) Shutdown(ctx context.Context) error {
+// Shutdown ends admission, closes every open session with the stop policy
+// and waits for the workers to exit. ctx bounds only the caller's wait.
+func (p *Pool) Shutdown(ctx context.Context, policy ...StopPolicy) error {
+	if len(policy) > 1 {
+		return &OptionError{Message: "at most one stop policy"}
+	}
 	p.sessionsMu.Lock()
 	p.closed.Store(true)
+	open := make([]*Session, 0, len(p.sessions))
+	for s := range p.sessions {
+		open = append(open, s)
+	}
 	p.sessionsMu.Unlock()
-	return p.inner.Shutdown(ctx)
+	errs := make([]error, len(open))
+	var wg sync.WaitGroup
+	for i, s := range open {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = s.Close(ctx, policy...)
+		}()
+	}
+	wg.Wait()
+	if err := p.inner.Shutdown(ctx); err != nil {
+		return err
+	}
+	for _, err := range errs {
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
+// Run checks out a session, feeds code once and closes the session.
+func (p *Pool) Run(ctx context.Context, code string, opts *RunOptions) (any, error) {
+	if opts == nil {
+		opts = &RunOptions{}
+	}
+	s, err := p.Checkout(ctx, opts.CheckoutOptions)
+	if err != nil {
+		return nil, err
+	}
+	v, err := s.FeedRun(ctx, code, &opts.FeedOptions)
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.limits.stop.Timeout+s.limits.stop.Join)
+	defer cancel()
+	_ = s.Close(cctx)
+	return v, err
+}
+
+// RunOptions configure a one-shot run.
+type RunOptions struct {
+	CheckoutOptions
+	FeedOptions
 }
 
 // Stats counts the pool's workers by state.
@@ -275,18 +327,6 @@ func (p *Pool) untrack(s *Session) {
 	p.sessionsMu.Unlock()
 }
 
-func (p *Pool) closeAllSessions() {
-	p.sessionsMu.Lock()
-	open := make([]*Session, 0, len(p.sessions))
-	for s := range p.sessions {
-		open = append(open, s)
-	}
-	p.sessionsMu.Unlock()
-	for _, s := range open {
-		_ = s.CloseNow()
-	}
-}
-
 // Checkout dedicates a worker to a new session.
 func (p *Pool) Checkout(ctx context.Context, opts CheckoutOptions) (*Session, error) {
 	if p.closed.Load() {
@@ -296,7 +336,7 @@ func (p *Pool) Checkout(ctx context.Context, opts CheckoutOptions) (*Session, er
 	if err != nil {
 		return nil, err
 	}
-	limits, err := opts.sessionLimits()
+	limits, err := opts.sessionLimits(p.stop)
 	if err != nil {
 		return nil, err
 	}
@@ -319,13 +359,13 @@ func (p *Pool) Checkout(ctx context.Context, opts CheckoutOptions) (*Session, er
 	s.attach(co)
 	if opts.Host != nil {
 		if err := opts.Host.register(s.store); err != nil {
-			_ = s.CloseNow()
+			_ = s.Close(ctx, KillNow)
 			return nil, err
 		}
 		s.host = opts.Host
 	}
 	if err := p.track(s); err != nil {
-		_ = s.CloseNow()
+		_ = s.Close(ctx, KillNow)
 		return nil, err
 	}
 	return s, nil

@@ -72,17 +72,12 @@ func (h *Host) Func(name string, fn any, opts ...HostFuncOptions) error {
 	if err != nil {
 		return err
 	}
-	var sig reflect.Type
-	if _, direct := fn.(Function); !direct {
-		if t := reflect.TypeOf(fn); t != nil && t.Kind() == reflect.Func {
-			sig = t
-		}
-	}
+	sig := reflectedSignature(fn)
 	var names []string
 	if len(opts) == 1 {
 		names = opts[0].ParameterNames
 	}
-	if err := validateParameterNames(sig, names); err != nil {
+	if err := validateParameterNames(sig, false, names); err != nil {
 		return err
 	}
 	h.mu.Lock()
@@ -213,7 +208,7 @@ func (h *Host) Stubs() string {
 		fmt.Fprintf(&b, "\nclass %s:\n", ci.Name())
 		wrote := false
 		for _, m := range ci.classType.stubMethods(ci.opts.AllowedMethods) {
-			writeFuncStub(&b, m.name, m.sig, "    ", nil)
+			writeFuncStub(&b, m.name, m.sig, "    ", ci.parameterNames(m.name))
 			wrote = true
 		}
 		if !wrote {
@@ -252,6 +247,34 @@ func (c *ClassType) stubMethods(policy AttrPolicy) []stubMethod {
 	return out
 }
 
+// reflectedSignature returns the Go type of fn unless it is a direct Function.
+func reflectedSignature(fn any) reflect.Type {
+	if _, direct := fn.(Function); direct {
+		return nil
+	}
+	if t := reflect.TypeOf(fn); t != nil && t.Kind() == reflect.Func {
+		return t
+	}
+	return nil
+}
+
+// paramSpan bounds the stub parameters [first, last) of sig: a receiver, a
+// leading context.Context and a trailing Kwargs are outside it.
+func paramSpan(sig reflect.Type, method bool) (first, last int, kwargs bool) {
+	first, last = 0, sig.NumIn()
+	if method {
+		first = 1
+	}
+	if first < last && sig.In(first) == contextType {
+		first++
+	}
+	kwargs = last > first && sig.In(last-1) == kwargsType && !sig.IsVariadic()
+	if kwargs {
+		last--
+	}
+	return first, last, kwargs
+}
+
 // writeFuncStub renders `def name(params) -> result: ...`; a method signature
 // includes its receiver, which becomes `self`.
 func writeFuncStub(b *strings.Builder, name string, sig reflect.Type, indent string, names []string) {
@@ -260,18 +283,11 @@ func writeFuncStub(b *strings.Builder, name string, sig reflect.Type, indent str
 		return
 	}
 	var params []string
-	first, last := 0, sig.NumIn()
-	if indent != "" {
+	method := indent != ""
+	if method {
 		params = append(params, "self")
-		first = 1
 	}
-	if first < last && sig.In(first) == contextType {
-		first++
-	}
-	kwargs := last > first && sig.In(last-1) == kwargsType && !sig.IsVariadic()
-	if kwargs {
-		last--
-	}
+	first, last, kwargs := paramSpan(sig, method)
 	paramName := func(i int, variadic bool) string {
 		if names != nil {
 			return names[i-first]
@@ -289,7 +305,7 @@ func writeFuncStub(b *strings.Builder, name string, sig reflect.Type, indent str
 		t := sig.In(i)
 		params = append(params, fmt.Sprintf("%s: %s", paramName(i, false), pyType(t)))
 	}
-	if len(params) > 0 {
+	if fixed > first {
 		params = append(params, "/")
 	}
 	if sig.IsVariadic() {
@@ -301,7 +317,7 @@ func writeFuncStub(b *strings.Builder, name string, sig reflect.Type, indent str
 	fmt.Fprintf(b, "%sdef %s(%s) -> %s: ...\n", indent, name, strings.Join(params, ", "), pyResult(sig))
 }
 
-func validateParameterNames(sig reflect.Type, names []string) error {
+func validateParameterNames(sig reflect.Type, method bool, names []string) error {
 	if names == nil {
 		return nil
 	}
@@ -311,14 +327,7 @@ func validateParameterNames(sig reflect.Type, names []string) error {
 		}
 		return &ValueError{Message: "parameter names require a reflected Go function"}
 	}
-	first, last := 0, sig.NumIn()
-	if first < last && sig.In(first) == contextType {
-		first++
-	}
-	kwargs := last > first && sig.In(last-1) == kwargsType && !sig.IsVariadic()
-	if kwargs {
-		last--
-	}
+	first, last, kwargs := paramSpan(sig, method)
 	if len(names) != last-first {
 		return &ValueError{Message: fmt.Sprintf("expected %d parameter names, got %d", last-first, len(names))}
 	}
@@ -333,6 +342,39 @@ func validateParameterNames(sig reflect.Type, names []string) error {
 		seen[name] = true
 	}
 	return nil
+}
+
+// validateMethodParameterNames checks names against a method or static under
+// the sandbox name it is exposed as.
+func validateMethodParameterNames(name string, sig reflect.Type, method bool, names []string) error {
+	if err := validateParameterNames(sig, method, names); err != nil {
+		return fmt.Errorf("parameter names for %q: %w", name, err)
+	}
+	return nil
+}
+
+func copyParameterNames(m map[string][]string) map[string][]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string][]string, len(m))
+	for name, names := range m {
+		if names == nil {
+			out[name] = nil
+			continue
+		}
+		out[name] = append(make([]string, 0, len(names)), names...)
+	}
+	return out
+}
+
+func sortedKeys(m map[string][]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 var (

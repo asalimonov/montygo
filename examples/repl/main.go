@@ -1,6 +1,6 @@
 // Command repl is an interactive Monty REPL modelled on the `monty` CLI REPL:
 // snippets run in one persistent session, multi-line input follows CPython's
-// prompts, and Ctrl-C interrupts a running snippet.
+// prompts, and Ctrl-C stops a running snippet.
 package main
 
 import (
@@ -17,7 +17,6 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -132,7 +131,7 @@ func openPool(ctx context.Context, o *options) (*montygo.Pool, error) {
 	}
 	return montygo.NewWebSocket(ctx, montygo.WebSocketOptions{
 		URL: o.ws.url,
-		// An interrupt checks out the replacement session before the lost one is released.
+		// A killed session is replaced before the lost one is released.
 		MaxProcesses:   2,
 		RequestTimeout: montygo.NoRequestTimeout,
 		TLSConfig:      tlsConfig,
@@ -432,26 +431,26 @@ func (r *repl) execute(ctx context.Context, code string) error {
 	return r.report(ctx, value, err)
 }
 
-// feed runs code, cancelling it when an interrupt arrives.
+// interruptTimeout keeps Ctrl-C responsive: a snippet that does not yield is
+// killed after it, as the upstream REPL replaces its session on Ctrl-C.
+const interruptTimeout = 500 * time.Millisecond
+
+// feed runs code and stops it when an interrupt arrives. The session survives
+// a stop that Python yields to; a snippet that never yields is killed.
 func (r *repl) feed(ctx context.Context, code string) (any, error) {
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	var interrupted atomic.Bool
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-r.interrupts:
-			interrupted.Store(true)
-			cancel()
-		case <-done:
+	run := r.session.Go(ctx, code, r.feedOptions())
+	select {
+	case <-run.Done():
+	case <-r.interrupts:
+		stopped, err := run.Stop(ctx, montygo.StopPolicy{Timeout: interruptTimeout})
+		if err != nil {
+			return nil, err
 		}
-	}()
-	value, err := r.session.FeedRun(runCtx, code, r.feedOptions())
-	close(done)
-	if err != nil && interrupted.Load() {
-		return nil, errInterrupted
+		if stopped.How != montygo.StopFinished {
+			return nil, errInterrupted
+		}
 	}
-	return value, err
+	return run.Wait()
 }
 
 // report prints a result or an error, and replaces a session whose worker is gone.
@@ -467,29 +466,22 @@ func (r *repl) report(ctx context.Context, value any, err error) error {
 		if _, werr := fmt.Fprintln(r.errOut, err); werr != nil {
 			return werr
 		}
+		if r.session.Err() == nil {
+			return nil
+		}
 	default:
 		if _, werr := fmt.Fprintf(r.errOut, "error: %s\n", describe(err)); werr != nil {
 			return werr
 		}
-		if !sessionLost(err) {
+		if !errors.Is(err, montygo.ErrSessionLost) {
 			return nil
 		}
 	}
-	_ = r.session.Close(context.Background())
+	_ = r.session.Close(context.Background(), montygo.KillNow)
 	if _, err := io.WriteString(r.errOut, restartNotice); err != nil {
 		return err
 	}
 	return r.checkout(ctx)
-}
-
-func sessionLost(err error) bool {
-	var (
-		crashed    *montygo.CrashedError
-		disconnect *montygo.DisconnectError
-		shutdown   *montygo.ShutdownError
-		protocol   *montygo.ProtocolError
-	)
-	return errors.As(err, &crashed) || errors.As(err, &disconnect) || errors.As(err, &shutdown) || errors.As(err, &protocol)
 }
 
 // display renders a result like upstream MontyObject's Display: strings raw,

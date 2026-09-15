@@ -74,10 +74,44 @@ func (s *Session) Stats() SessionStats {
 	return SessionStats{HostObjects: count, PeakHostObjects: peak, PendingFutures: s.pendingCount()}
 }
 
-// CloseNow fences the session and retires its worker without joining callbacks.
-func (s *Session) CloseNow() error {
-	_ = s.terminateSession(ErrSessionClosed)
-	return nil
+// SessionState is the coarse state of a session.
+type SessionState uint8
+
+const (
+	// SessionIdle: no execution; Go and FeedRun are admitted.
+	SessionIdle SessionState = iota
+	// SessionRunning: an execution or a control operation owns the worker.
+	SessionRunning
+	// SessionPaused: a FeedStart snapshot is pending.
+	SessionPaused
+	// SessionClosed: terminal; Err says why.
+	SessionClosed
+)
+
+var sessionStateNames = [...]string{"idle", "running", "paused", "closed"}
+
+func (s SessionState) String() string {
+	if int(s) < len(sessionStateNames) {
+		return sessionStateNames[s]
+	}
+	return "unknown"
+}
+
+// State reports the session's coarse state.
+func (s *Session) State() SessionState {
+	s.life.mu.Lock()
+	defer s.life.mu.Unlock()
+	switch {
+	case s.life.terminal != nil:
+		return SessionClosed
+	case s.life.closeAttempt != nil || s.life.controlDone != nil:
+		return SessionRunning
+	case s.life.current == nil:
+		return SessionIdle
+	case s.life.current.phase == executionPaused:
+		return SessionPaused
+	}
+	return SessionRunning
 }
 
 // mapError converts a pool failure, poisoning the session when it is lost.
@@ -172,15 +206,17 @@ func (s *Session) feedRun(ctx context.Context, e *execution, code string, opts *
 	if err != nil {
 		return nil, err
 	}
-	pt := newPrintTarget(ctx, s.co, opts.Print)
+	// The feed context ends the run through the stop policy, never the wire.
+	wctx := context.WithoutCancel(ctx)
+	pt := newPrintTarget(wctx, s.co, opts.Print)
 	pt.exec = e
 	e.print = pt
 	ans := s.newAnswerer(e, opts.ExternalLookup, opts.OS, pt)
 	if err := s.beginSend(e); err != nil {
 		return nil, err
 	}
-	ev, err := s.co.Feed(ctx, code, inputs, mounts, first, cwdPtr(opts.Cwd), opts.SkipTypeCheck, pt.onPrint)
-	return s.drive(ctx, e, ev, err, pt, ans)
+	ev, err := s.co.Feed(wctx, code, inputs, mounts, first, cwdPtr(opts.Cwd), opts.SkipTypeCheck, pt.onPrint)
+	return s.drive(wctx, e, ev, err, pt, ans)
 }
 
 func (s *Session) newAnswerer(e *execution, lookup map[string]any, os OSHandler, pt *printTarget) *answerer {
@@ -248,11 +284,12 @@ func (s *Session) FeedStart(ctx context.Context, code string, opts *FeedOptions)
 	if err != nil {
 		return nil, err
 	}
-	d := s.newDriver(e, ctx, opts.Print, opts.ExternalLookup, opts.OS)
+	wctx := context.WithoutCancel(ctx)
+	d := s.newDriver(e, wctx, opts.Print, opts.ExternalLookup, opts.OS)
 	if err = s.beginSend(e); err != nil {
 		return nil, err
 	}
-	ev, err := s.co.Feed(ctx, code, inputs, mounts, first, cwdPtr(opts.Cwd), opts.SkipTypeCheck, d.pt.onPrint)
+	ev, err := s.co.Feed(wctx, code, inputs, mounts, first, cwdPtr(opts.Cwd), opts.SkipTypeCheck, d.pt.onPrint)
 	return d.advance(ev, err)
 }
 
@@ -331,11 +368,12 @@ func (s *Session) LoadSnapshot(ctx context.Context, state []byte, opts *LoadSnap
 	if err != nil {
 		return nil, err
 	}
-	d := s.newDriver(e, ctx, opts.Print, opts.ExternalLookup, opts.OS)
+	wctx := context.WithoutCancel(ctx)
+	d := s.newDriver(e, wctx, opts.Print, opts.ExternalLookup, opts.OS)
 	if err = s.beginSend(e); err != nil {
 		return nil, err
 	}
-	ev, _, err := s.co.Restore(ctx, state, mounts, d.pt.onPrint)
+	ev, _, err := s.co.Restore(wctx, state, mounts, d.pt.onPrint)
 	if err != nil {
 		return nil, s.failedLoad(s.mapError(err))
 	}

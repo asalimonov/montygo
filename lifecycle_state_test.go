@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var hourPolicy = StopPolicy{Timeout: time.Hour}
+
 // These tests own the driver directly to make transition ordering deterministic.
 func TestLifecycleStateTransitions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -21,7 +23,7 @@ func TestLifecycleStateTransitions(t *testing.T) {
 	newSession := func(t *testing.T) *Session {
 		s, err := p.Checkout(ctx, CheckoutOptions{})
 		require.NoError(t, err)
-		t.Cleanup(func() { _ = s.CloseNow() })
+		t.Cleanup(func() { _ = s.Close(ctx, KillNow) })
 		return s
 	}
 	for _, preparing := range []bool{false, true} {
@@ -36,8 +38,8 @@ func TestLifecycleStateTransitions(t *testing.T) {
 			if preparing {
 				require.NoError(t, s.beginExecution(e))
 			}
-			req, _, err := s.requestInterrupt(e, InterruptOptions{Grace: DurationPtr(time.Hour)})
-			require.NoError(t, err)
+			req, _, done := s.requestStop(e, hourPolicy)
+			require.False(t, done)
 			if preparing {
 				err = s.beginSend(e)
 			} else {
@@ -47,10 +49,11 @@ func TestLifecycleStateTransitions(t *testing.T) {
 			require.ErrorAs(t, err, &raised)
 			require.False(t, e.sent)
 			s.finishExecution(e, nil, err)
-			result, err := s.waitInterrupt(ctx, e, req)
+			require.True(t, channelClosed(req.resolved))
+			result, err := (&Run{s: s, exec: e}).Stop(ctx, hourPolicy)
 			require.NoError(t, err)
-			require.Equal(t, InterruptBeforeStart, result.Outcome)
-			require.True(t, result.RunDone)
+			require.Equal(t, StopAborted, result.How)
+			require.True(t, result.SessionKept())
 			require.NoError(t, s.Err())
 		})
 	}
@@ -64,10 +67,10 @@ func TestLifecycleStateTransitions(t *testing.T) {
 			e, err := s.reserveExecution(ctx)
 			require.NoError(t, err)
 			reason := errors.New("original stop")
-			req, _, err := s.requestInterrupt(e, InterruptOptions{Reason: reason, Grace: DurationPtr(time.Hour)})
-			require.NoError(t, err)
+			req, _, done := s.requestStop(e, StopPolicy{Reason: reason, Timeout: time.Hour})
+			require.False(t, done)
 			s.life.mu.Lock()
-			req.deadline = time.Now().Add(-time.Second)
+			req.killAt = time.Now().Add(-time.Second)
 			s.life.mu.Unlock()
 			if forced {
 				require.True(t, s.forceExecution(e, req))
@@ -77,9 +80,9 @@ func TestLifecycleStateTransitions(t *testing.T) {
 			s.finishExecution(e, 42, nil)
 			if forced {
 				require.Same(t, s.Err(), e.err)
-				require.Equal(t, InterruptKilled, req.outcome)
+				require.Equal(t, StopKilled, req.kind)
 			} else {
-				require.Equal(t, InterruptFinished, req.outcome)
+				require.Equal(t, StopFinished, req.kind)
 				next, err := s.reserveExecution(ctx)
 				require.NoError(t, err)
 				require.True(t, s.forceExecution(e, req), "late watchdog exits without touching next execution")
@@ -97,9 +100,8 @@ func TestLifecycleStateTransitions(t *testing.T) {
 		s.life.mu.Lock()
 		s.installStepLocked(e, ctx)
 		s.life.mu.Unlock()
-		req, _, err := s.requestInterruptForStep(e, InterruptOptions{Grace: DurationPtr(0)}, oldStep)
-		require.NoError(t, err)
-		require.Nil(t, req)
+		s.requestStopForStep(e, oldStep)
+		require.Nil(t, e.stop)
 		require.NoError(t, e.callbackCtx.Err())
 		s.finishExecution(e, 1, nil)
 	})
@@ -129,23 +131,23 @@ func TestLifecycleStateTransitions(t *testing.T) {
 		e, err := s.reserveExecution(ctx)
 		require.NoError(t, err)
 		reason := errors.New("first")
-		req, _, err := s.requestInterrupt(e, InterruptOptions{Reason: reason, Grace: DurationPtr(time.Hour)})
-		require.NoError(t, err)
-		deadline := req.deadline
+		req, _, done := s.requestStop(e, StopPolicy{Reason: reason, Timeout: time.Hour})
+		require.False(t, done)
+		deadline := req.killAt
 		var group sync.WaitGroup
 		for range 32 {
 			group.Go(func() {
-				joined, _, err := s.requestInterrupt(e, InterruptOptions{Reason: errors.New("later"), Grace: DurationPtr(2 * time.Hour)})
-				require.NoError(t, err)
+				joined, _, done := s.requestStop(e, StopPolicy{Reason: errors.New("later"), Timeout: 2 * time.Hour})
+				require.False(t, done)
 				require.Same(t, req, joined)
 			})
 		}
 		group.Wait()
-		require.Equal(t, deadline, req.deadline)
-		require.Same(t, reason, req.reason)
-		_, _, err = s.requestInterrupt(e, InterruptOptions{Grace: DurationPtr(time.Minute)})
-		require.NoError(t, err)
-		require.True(t, req.deadline.Before(deadline))
+		require.Equal(t, deadline, req.killAt)
+		require.Same(t, reason, req.policy.Reason)
+		_, _, done = s.requestStop(e, StopPolicy{Timeout: time.Minute})
+		require.False(t, done)
+		require.True(t, req.killAt.Before(deadline))
 		s.finishExecution(e, 1, nil)
 	})
 	t.Run("Dump ownership makes Resume busy without consuming its cursor", func(t *testing.T) {
@@ -158,12 +160,12 @@ func TestLifecycleStateTransitions(t *testing.T) {
 		_, err = call.Resume(ctx, 1)
 		require.ErrorIs(t, err, ErrSessionBusy)
 		require.False(t, call.token.used)
-		req, _, err := s.requestInterrupt(call.token.exec, InterruptOptions{Grace: DurationPtr(time.Hour)})
-		require.NoError(t, err)
+		_, _, done := s.requestStop(call.token.exec, hourPolicy)
+		require.False(t, done)
 		release()
-		result, err := s.waitInterrupt(ctx, call.token.exec, req)
+		result, err := (&Run{s: s, exec: call.token.exec}).Stop(ctx, hourPolicy)
 		require.NoError(t, err)
-		require.Equal(t, InterruptAborted, result.Outcome)
+		require.Equal(t, StopAborted, result.How)
 		_, err = call.Resume(ctx, 1)
 		var raised *RuntimeError
 		require.ErrorAs(t, err, &raised)
@@ -173,16 +175,15 @@ func TestLifecycleStateTransitions(t *testing.T) {
 		s := newSession(t)
 		e, err := s.reserveExecution(ctx)
 		require.NoError(t, err)
-		negative := -time.Nanosecond
-		result, err := (&Run{s: s, exec: e}).Interrupt(ctx, InterruptOptions{Grace: &negative})
+		result, err := (&Run{s: s, exec: e}).Stop(ctx, StopPolicy{Join: -time.Nanosecond})
 		require.Error(t, err)
-		require.Equal(t, InterruptResult{}, result)
+		require.Equal(t, Stopped{}, result)
 		require.Nil(t, e.stop)
 		cancelled, cancel := context.WithCancel(ctx)
 		cancel()
-		result, err = (&Run{s: s, exec: e}).Interrupt(cancelled, InterruptOptions{})
+		result, err = (&Run{s: s, exec: e}).Stop(cancelled)
 		require.ErrorIs(t, err, context.Canceled)
-		require.Equal(t, InterruptResult{}, result)
+		require.Equal(t, StopPending, result.How)
 		require.Nil(t, e.stop)
 		s.finishExecution(e, 1, nil)
 	})
@@ -192,14 +193,14 @@ func TestLifecycleStateTransitions(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, s.beginExecution(e))
 		require.NoError(t, s.beginSend(e))
-		req, _, err := s.requestInterrupt(e, InterruptOptions{Grace: DurationPtr(time.Hour)})
-		require.NoError(t, err)
+		_, _, done := s.requestStop(e, hourPolicy)
+		require.False(t, done)
 		require.True(t, e.sent)
 		require.False(t, e.beforeStart)
 		s.finishExecution(e, 1, nil)
-		result, err := s.waitInterrupt(ctx, e, req)
+		result, err := (&Run{s: s, exec: e}).Stop(ctx, hourPolicy)
 		require.NoError(t, err)
-		require.Equal(t, InterruptFinished, result.Outcome)
+		require.Equal(t, StopFinished, result.How)
 	})
 	t.Run("callback return observes an accepted stop", func(t *testing.T) {
 		s := newSession(t)
@@ -210,17 +211,17 @@ func TestLifecycleStateTransitions(t *testing.T) {
 		s.receivedTurn(e)
 		callback, err := s.beginCallback(e, ctx)
 		require.NoError(t, err)
-		req, _, err := s.requestInterrupt(e, InterruptOptions{Grace: DurationPtr(time.Hour)})
-		require.NoError(t, err)
-		require.ErrorIs(t, callback.Err(), context.Canceled)
+		req, _, done := s.requestStop(e, hourPolicy)
+		require.False(t, done)
+		require.Eventually(t, func() bool { return callback.Err() != nil }, time.Second, time.Millisecond)
 		require.ErrorIs(t, s.endCallback(e), errExecutionInterrupted)
 		s.life.mu.Lock()
 		e.aborted = true
 		s.life.mu.Unlock()
-		s.finishExecution(e, nil, interruptException(req.reason))
-		result, err := s.waitInterrupt(ctx, e, req)
+		s.finishExecution(e, nil, interruptException(req.policy.Reason))
+		result, err := (&Run{s: s, exec: e}).Stop(ctx, hourPolicy)
 		require.NoError(t, err)
-		require.Equal(t, InterruptAborted, result.Outcome)
+		require.Equal(t, StopAborted, result.How)
 	})
 	t.Run("future subscriptions clear on every terminal class", func(t *testing.T) {
 		for _, terminal := range []string{"runtime", "typing", "close now", "force"} {
@@ -236,13 +237,13 @@ func TestLifecycleStateTransitions(t *testing.T) {
 				case "typing":
 					s.finishExecution(e, nil, &TypingError{Diagnostics: "type mismatch"})
 				case "close now":
-					require.NoError(t, s.CloseNow())
+					require.NoError(t, s.Close(ctx, KillNow))
 					s.finishExecution(e, nil, s.Err())
 				case "force":
-					req, _, err := s.requestInterrupt(e, InterruptOptions{Grace: DurationPtr(time.Hour)})
-					require.NoError(t, err)
+					req, _, done := s.requestStop(e, hourPolicy)
+					require.False(t, done)
 					s.life.mu.Lock()
-					req.deadline = time.Now().Add(-time.Second)
+					req.killAt = time.Now().Add(-time.Second)
 					s.life.mu.Unlock()
 					require.True(t, s.forceExecution(e, req))
 					s.finishExecution(e, nil, s.Err())
@@ -288,7 +289,7 @@ func TestCheckoutPublicationRacesShutdown(t *testing.T) {
 	go func() {
 		s, err := p.Checkout(ctx, CheckoutOptions{Host: h})
 		if s != nil {
-			_ = s.CloseNow()
+			_ = s.Close(ctx, KillNow)
 		}
 		checked <- err
 	}()
@@ -339,7 +340,7 @@ func TestLoadSnapshotInterruptionBoundaries(t *testing.T) {
 	h := NewHost()
 	s, err := p.Checkout(ctx, CheckoutOptions{Host: h})
 	require.NoError(t, err)
-	defer s.CloseNow()
+	defer s.Close(ctx, KillNow)
 
 	cancelled, stop := context.WithCancel(ctx)
 	stop()
@@ -366,10 +367,10 @@ func TestLoadSnapshotInterruptionBoundaries(t *testing.T) {
 		return s.life.current != nil
 	}, time.Second, time.Millisecond)
 	wait, waitCancel := context.WithTimeout(ctx, 10*time.Millisecond)
-	result, err := s.Interrupt(wait, InterruptOptions{Grace: DurationPtr(time.Hour)})
+	result, err := s.Stop(wait, hourPolicy)
 	waitCancel()
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.Equal(t, InterruptPending, result.Outcome)
+	require.Equal(t, StopPending, result.How)
 	h.mu.Unlock()
 	locked = false
 	err = <-loaded

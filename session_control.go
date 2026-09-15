@@ -63,9 +63,18 @@ func (s *Session) reserveControlFor(ctx context.Context, allowPaused bool, token
 	}, nil
 }
 
-// Close gracefully ends a session. Its context bounds waiting for the active
-// operation; CloseNow instead terminates without joining a host callback.
-func (s *Session) Close(ctx context.Context) error {
+// Close ends the session. A running execution is stopped with the policy
+// first; a paused snapshot is invalidated; KillNow retires the worker without
+// joining a host callback. ctx bounds only the caller's wait.
+func (s *Session) Close(ctx context.Context, policy ...StopPolicy) error {
+	p, err := effectivePolicy(s.limits.stop, policy)
+	if err != nil {
+		return err
+	}
+	if p.Timeout < 0 {
+		_ = s.terminateSession(ErrSessionClosed)
+		return nil
+	}
 	s.life.mu.Lock()
 	if s.life.terminal != nil {
 		s.life.mu.Unlock()
@@ -88,8 +97,30 @@ func (s *Session) Close(ctx context.Context) error {
 	}
 	a := &closeAttempt{done: make(chan struct{})}
 	s.life.closeAttempt = a
+	e := s.life.current
+	running := e != nil && e.phase != executionPaused
 	s.life.mu.Unlock()
-	err := s.closeOwned(ctx)
+	if running {
+		st, err := (&Run{s: s, exec: e}).Stop(ctx, p)
+		if err != nil && st.How == StopPending {
+			go s.finishClose(a, e, p)
+			return err
+		}
+	}
+	err = s.closeOwned(ctx)
+	s.settleClose(a, err)
+	return err
+}
+
+// finishClose completes a close whose caller stopped waiting.
+func (s *Session) finishClose(a *closeAttempt, e *execution, p StopPolicy) {
+	<-e.done
+	ctx, cancel := context.WithTimeout(context.Background(), p.Timeout+p.Join)
+	defer cancel()
+	s.settleClose(a, s.closeOwned(ctx))
+}
+
+func (s *Session) settleClose(a *closeAttempt, err error) {
 	s.life.mu.Lock()
 	a.err = err
 	if s.life.closeAttempt == a {
@@ -97,7 +128,6 @@ func (s *Session) Close(ctx context.Context) error {
 	}
 	close(a.done)
 	s.life.mu.Unlock()
-	return err
 }
 
 func (s *Session) closeOwned(ctx context.Context) error {

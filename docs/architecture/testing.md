@@ -21,11 +21,13 @@
 ## Lifecycle regressions
 
 Lifecycle regressions run through eachBackend, including 1000 immediate
-Go/Interrupt iterations per backend under -race. `lifecycle_state_test.go` owns
+Go/Stop iterations per backend under -race. `lifecycle_state_test.go` owns
 driver transitions directly to test before-send, completion/force ordering,
 stale timers, stale step cancellation, duplicate call IDs, and ID exhaustion.
 `execution_test.go` covers busy rejection, stale handles/snapshots and a callback
-that outlives worker termination. `execution_future_test.go` covers shared Futures,
+that outlives worker termination. `stop_test.go` covers the stop policy: levels,
+`Drain`, `KillNow`, catchable delivery, repeated stops, `Close` with a policy,
+`Session.State`, `Pool.Run`, `Pool.Shutdown` with `Drain` and `Slot`. `execution_future_test.go` covers shared Futures,
 failure cleanup, snapshot context lifetime and manual settlement. The pool lease
 tests cover blocked Print, release/force races and delayed observed exits.
 

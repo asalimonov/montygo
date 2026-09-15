@@ -70,10 +70,12 @@ Upstream tests are ported file by file. Subtest names keep the upstream titles, 
 
 | Test | Upstream | montygo |
 |---|---|---|
+| `cancel_test.go`: a context deadline mid-turn loses the session and the pool recovers | the worker is killed as soon as the context ends | the cancelled feed context requests a stop with the session policy; Python that never yields is killed when the policy's `Timeout` expires (100 ms in the test) and `FeedRun` returns a `*SessionKilledError` matching `ErrSessionLost` |
 | `cancel_test.go`: cancelling while awaiting a host future interrupts the feed and keeps the session | the worker is killed and the session is poisoned | `AbortFeed(KeyboardInterrupt)` ends the feed; `FeedRun` returns a `*RuntimeError` with `TypeName` `KeyboardInterrupt`, `errors.Is(err, ErrSessionLost)` is false and the next feed runs |
 | `cancel_test.go`: a gathered future wait honours cancellation | same | a cancelled `ResolveFutures` wait is aborted the same way |
+| `stop_test.go`: the feed context ends the run through the policy | same | `FeedRun` returns `KeyboardInterrupt` and `Session.State()` is `SessionIdle` afterwards |
 
-The interrupt cannot be caught by `except KeyboardInterrupt` inside the sandbox, because `AbortFeed` ends the feed (`lifecycle_test.go`: interrupting a host call raises KeyboardInterrupt and keeps the session). Cancelling the context while Python executes still kills the worker, as upstream (`cancel_test.go`: a context deadline mid-turn loses the session and the pool recovers).
+The default stop cannot be caught by `except KeyboardInterrupt` inside the sandbox, because `AbortFeed` ends the feed (`lifecycle_test.go`: stopping a host call raises KeyboardInterrupt and keeps the session). `StopPolicy.Catchable` raises it in the sandbox instead (`stop_test.go`: a catchable stop lets Python clean up with host calls); upstream has no counterpart.
 
 ## montygo-only tests
 
@@ -81,12 +83,13 @@ Tests of behaviour beyond `@pydantic/monty`. Root tests run on every backend thr
 
 | File | Tests | Covers |
 |---|---|---|
-| cancel_test.go | 4 | context cancellation mid-turn, during a host call and a gathered wait, checkout wait |
-| lifecycle_test.go | 11 | `Interrupt` during a host call, with a reason, through `AsyncContext`, while Python runs, on a suspended snapshot; `Go`, `CloseNow`, `Done`, `Err`, `Stats` |
-| execution_test.go | backend regressions | 1000 immediate interrupts per backend; busy admission; stale Run/snapshot; wait-only cancellation; uncooperative callback and capacity recovery |
+| cancel_test.go | 4 | context cancellation mid-turn (kill at `Timeout`), during a host call and a gathered wait, checkout wait |
+| lifecycle_test.go | 11 | `TestStop`: stopping a host call, with a reason, through `AsyncContext`, running Python killed at `Timeout`, a suspended snapshot, nothing running; `TestSessionLifecycle`: `Go`, `Close(ctx, KillNow)`, `Done`, `Err`, `Stats` |
+| stop_test.go | 18 | `TestStopPolicy`: `StopKind` and `SessionState` strings, `SessionKept`, catchable stops (caught, uncaught, awaited future, ignored and killed), `Drain` (natural end, expiry), `KillNow`, a second `Stop` joining and shortening, policy levels (pool, checkout, call), invalid policies, feed-context cancellation through the policy; `TestSessionClose`: `Close` stopping a running feed, `Close` continuing after the caller's context ends, `State` transitions; `TestPoolRunAndSlot`: `Pool.Run`, `Shutdown` with `Drain`, `Slot` re-checkout, busy and closed |
+| execution_test.go | backend regressions | `TestImmediateStop`: 1000 immediate stops per backend; busy admission; stale Run/snapshot; wait-only cancellation; `TestStopUncooperativeCallback`: `StopPending`, `ErrCallbackDetached`, capacity recovery; `TestStopDuringConversion` |
 | execution_future_test.go | backend regressions | call-ID accounting for shared Futures, failed-gather cleanup, cross-session ownership, snapshot context lifetime, manual settlement |
 | lifecycle_state_test.go | deterministic transitions | reservation/preparation stops, completion versus force, stale watchdog/step, ID exhaustion, duplicate call IDs, derived conversion cancellation/panic |
-| host_parameters_test.go, record_conversion_test.go | backend regressions | positional-only labelled stubs, signature/name validation, nullable Record and Future-resolved Record conversion |
+| host_parameters_test.go, record_conversion_test.go | backend regressions | positional-only labelled stubs, the `/` marker after fixed parameters only, method `ParameterNames` on instances and class types, unknown methods and count mismatches, signature/name validation, nullable Record and Future-resolved Record conversion |
 | internal/pool/lease_test.go | lease regressions | idle termination, stale lease, blocked Print, 1000 release/termination races, accounting until observed exit |
 | host_test.go | 10 | `Host` validation, `Stubs`, `Restorable`, host names in feeds, `ExternalLookup` override, stubs under type checking, restore of pinned objects, `LoadSession` refusing unpinned objects; `Expose` (no backend) |
 | resource_test.go | 10 | `Unlimited`, `MaxRecursionDepth`, `MaxHostObjects`, `MaxPendingFutures`, `ResourceError`; `MaxPendingBytes` throttling; `Pool.Stats`, `Pool.Shutdown`; `Lines` |
@@ -122,14 +125,14 @@ Tests of behaviour beyond `@pydantic/monty`. Root tests run on every backend thr
 
 ## `tests/network`
 
-A separate module of 56 tests for the server image. They have no upstream test counterpart; upstream `docs/server.md` is the specification, and `docs/parity/server.md` lists the deviations.
+A separate module of 58 tests for the server image. They have no upstream test counterpart; upstream `docs/server.md` is the specification, and `docs/parity/server.md` lists the deviations.
 
 | Group | File | Tests |
 |---|---|---|
-| `TestAdmission_` | `server_admission_test.go` | 5 |
+| `TestAdmission_` | `server_admission_test.go` | 6 |
 | `TestProtocol_` | `server_protocol_test.go` | 8 |
 | `TestLimits_` | `server_limits_test.go` | 5 |
-| `TestTimeouts_` | `server_timeouts_test.go` | 4 |
+| `TestTimeouts_` | `server_timeouts_test.go` | 5 |
 | `TestDumps_` | `server_dumps_test.go` | 6 |
 | `TestDrain_` | `server_drain_test.go` | 6 |
 | `TestTLS_` | `server_tls_test.go` | 3 |
@@ -158,12 +161,14 @@ Adaptations: `PurePosixPath` checks become `montygo.Path` checks, Python reprs b
 
 ## Examples (`examples/`)
 
-The `examples` module ports all 12 upstream example programs and the `monty` CLI REPL. Each sandbox script and stub file is byte-identical to upstream and embedded. Every program has an end-to-end test that runs on both backends (`MONTY_EXAMPLES_BACKEND=native|wasm`).
+The `examples` module ports all 12 upstream example programs and the `monty` CLI REPL, and adds two montygo-only programs. Each upstream sandbox script and stub file is byte-identical to upstream and embedded. Every program has an end-to-end test that runs on both backends (`MONTY_EXAMPLES_BACKEND=native|wasm`).
 
 | Upstream | Go | Notes |
 |---|---|---|
 | `classes/*.py` (9 programs) | `classes/*` | ported |
 | `expense_analysis` | `expense_analysis` | ported, type checked |
 | `sql_playground` | `sql_playground` | adapted: SQLite (`modernc.org/sqlite`) replaces DuckDB, with `$name` list parameters rewritten for `IN`. The feed skips type checking by default, because upstream imports its stubs as `type_stubs` and the worker names them `repl_type_stubs`; `-type-check` reproduces the upstream failure. |
-| `monty` CLI REPL (`crates/monty-runtime/src/run.rs`) | `repl` | adapted: continuation is read from the syntax error of a trial feed instead of an in-process parse. `TestContinuationModeMatchesUpstream` checks every case of upstream `repl_detects_continuation_mode_for_common_cases` plus more, on both backends. Overlay mounts reset after each snippet, and an interrupt replaces the session. |
+| `monty` CLI REPL (`crates/monty-runtime/src/run.rs`) | `repl` | adapted: continuation is read from the syntax error of a trial feed instead of an in-process parse. `TestContinuationModeMatchesUpstream` checks every case of upstream `repl_detects_continuation_mode_for_common_cases` plus more, on both backends. Overlay mounts reset after each snippet. Ctrl-C calls `Run.Stop` with the default policy; the session is replaced only when the worker was killed. |
+| — | `oneshot` | montygo-only: `Pool.Run`; the test asserts the value |
+| — | `service` | montygo-only: `Slot`, `Host` with `Expose`, `Run.Stop` on SIGINT or `-run-for`, `Slot.Close`, `Pool.Shutdown`; the test runs with `-run-for` and asserts the stop kind `aborted` |
 | `web_scraper` | `web_scraper` | adapted: chromedp and goquery replace Playwright and BeautifulSoup. Agent mode needs `ANTHROPIC_API_KEY`. `-code` runs the embedded `example_code.py` without the model, and browser tests skip without Chrome. |

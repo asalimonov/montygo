@@ -97,6 +97,10 @@ type ClassInstanceOptions struct {
 	// ID pins the instance identity (a canonical uuid).
 	ID        string
 	ClassType *ClassType
+	// ParameterNames labels method parameters in Host.Stubs, by sandbox method
+	// name. Each list excludes context.Context and Kwargs and includes a
+	// variadic parameter. Every key MUST name an allowed method.
+	ParameterNames map[string][]string
 }
 
 // ClassInstance exposes a host object to the sandbox under a policy. When the
@@ -139,6 +143,7 @@ func NewClassInstance(instance any, opts ClassInstanceOptions) (*ClassInstance, 
 		return nil, &ValueError{Message: "ClassInstance expects an object instance"}
 	}
 	c := &ClassInstance{instance: instance, opts: opts}
+	c.opts.ParameterNames = copyParameterNames(opts.ParameterNames)
 	if opts.ID != "" {
 		id, err := normalizeID("ClassInstance", opts.ID)
 		if err != nil {
@@ -164,7 +169,46 @@ func NewClassInstance(instance any, opts ClassInstanceOptions) (*ClassInstance, 
 		}
 		c.classType = ct
 	}
+	if err := c.validateParameterNames(); err != nil {
+		return nil, err
+	}
 	return c, nil
+}
+
+// validateParameterNames checks the instance's labels and the class-level
+// labels of every method the instance exposes.
+func (c *ClassInstance) validateParameterNames() error {
+	methods := c.classType.stubMethods(c.opts.AllowedMethods)
+	sigs := make(map[string]reflect.Type, len(methods))
+	for _, m := range methods {
+		sigs[m.name] = m.sig
+	}
+	for _, name := range sortedKeys(c.opts.ParameterNames) {
+		sig, ok := sigs[name]
+		if !ok {
+			return &ValueError{Message: fmt.Sprintf("parameter names: unknown method %q", name)}
+		}
+		if err := validateMethodParameterNames(name, sig, true, c.opts.ParameterNames[name]); err != nil {
+			return err
+		}
+	}
+	for _, m := range methods {
+		if names, ok := c.classType.opts.ParameterNames[m.name]; ok {
+			if err := validateMethodParameterNames(m.name, m.sig, true, names); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// parameterNames returns the labels of an exposed method: the instance's own,
+// else the class's.
+func (c *ClassInstance) parameterNames(method string) []string {
+	if names, ok := c.opts.ParameterNames[method]; ok {
+		return names
+	}
+	return c.classType.opts.ParameterNames[method]
 }
 
 // MustClassInstance is NewClassInstance that panics on error.
@@ -334,6 +378,9 @@ type ClassTypeOptions struct {
 	InstanceAllowedMethods AttrPolicy
 	// InstanceWrapper customizes how constructed instances are exposed.
 	InstanceWrapper func(classType *ClassType, instance any) (*ClassInstance, error)
+	// ParameterNames labels parameters of allowed statics and instance methods
+	// in Host.Stubs, by sandbox name, as ClassInstanceOptions.ParameterNames.
+	ParameterNames map[string][]string
 }
 
 // ClassType exposes a host class to the sandbox.
@@ -372,6 +419,7 @@ func newClassType(t reflect.Type, opts ClassTypeOptions) (*ClassType, error) {
 		return nil, &ValueError{Message: "ClassType expects a class (constructor function)"}
 	}
 	c := &ClassType{goType: t, opts: opts}
+	c.opts.ParameterNames = copyParameterNames(opts.ParameterNames)
 	if opts.ID != "" {
 		id, err := normalizeID("ClassType", opts.ID)
 		if err != nil {
@@ -382,7 +430,48 @@ func newClassType(t reflect.Type, opts ClassTypeOptions) (*ClassType, error) {
 		id, _ := classIDs.LoadOrStore(t, newUUID())
 		c.id = id.(string)
 	}
+	if err := c.validateParameterNames(); err != nil {
+		return nil, err
+	}
 	return c, nil
+}
+
+// validateParameterNames checks every label against the allowed static or
+// instance method of that name; a name exposed as both MUST fit both.
+func (c *ClassType) validateParameterNames() error {
+	methods := c.stubMethods(c.opts.InstanceAllowedMethods)
+	sigs := make(map[string]reflect.Type, len(methods))
+	for _, m := range methods {
+		sigs[m.name] = m.sig
+	}
+	for _, name := range sortedKeys(c.opts.ParameterNames) {
+		names := c.opts.ParameterNames[name]
+		sig, isMethod := sigs[name]
+		static, isStatic := c.staticMethod(name)
+		if !isMethod && !isStatic {
+			return &ValueError{Message: fmt.Sprintf("parameter names: unknown method %q", name)}
+		}
+		if isMethod {
+			if err := validateMethodParameterNames(name, sig, true, names); err != nil {
+				return err
+			}
+		}
+		if isStatic {
+			if err := validateMethodParameterNames(name, reflectedSignature(static), false, names); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// staticMethod returns the callable static exposed under name.
+func (c *ClassType) staticMethod(name string) (any, bool) {
+	entry, ok := c.opts.Statics[name]
+	if !ok || !c.opts.AllowedMethods.Allows(name) || !isCallable(entry) {
+		return nil, false
+	}
+	return entry, true
 }
 
 // ID returns the class identity.

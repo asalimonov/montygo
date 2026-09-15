@@ -13,19 +13,21 @@ import (
 
 func TestCancellation(t *testing.T) {
 	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+		// Deviation from @pydantic/monty: the feed context ends the run through the
+		// stop policy; Python that never yields is killed when Timeout expires.
 		t.Run("a context deadline mid-turn loses the session and the pool recovers", func(t *testing.T) {
 			p := newPool(t, b, montygo.Options{MaxProcesses: 1})
-			s, err := p.Checkout(testCtx(t), montygo.CheckoutOptions{})
+			s, err := p.Checkout(testCtx(t), montygo.CheckoutOptions{Stop: montygo.StopPolicy{Timeout: 100 * time.Millisecond}})
 			require.NoError(t, err)
 			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 			defer cancel()
 			_, err = s.FeedRun(ctx, "while True:\n    pass", nil)
-			require.ErrorIs(t, err, context.DeadlineExceeded)
+			var killed *montygo.SessionKilledError
+			require.ErrorAs(t, err, &killed, "%v", err)
+			require.ErrorIs(t, err, montygo.ErrSessionLost)
+			require.Equal(t, montygo.SessionClosed, s.State())
 			_, err = s.FeedRun(testCtx(t), "1", nil)
-			var perr *montygo.ProtocolError
-			require.ErrorAs(t, err, &perr)
-			require.Equal(t, "a previous protocol turn was cancelled mid-flight; the worker was discarded", perr.Message)
-			require.ErrorIs(t, err, montygo.ErrTurnCancelled)
+			require.ErrorIs(t, err, montygo.ErrSessionLost)
 			require.NoError(t, s.Close(testCtx(t)))
 			fresh, err := p.Checkout(testCtx(t), montygo.CheckoutOptions{})
 			require.NoError(t, err)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/asalimonov/montygo/internal/pool"
 	"github.com/asalimonov/montygo/internal/worker"
@@ -35,7 +36,9 @@ type execution struct {
 	callbackCtx     context.Context
 	cancelCallbacks context.CancelFunc
 	stopContext     func() bool
-	stop            *interruptRequest
+	stop            *stopRequest
+	// delivered is set once a catchable stop reason was raised in the sandbox.
+	delivered       bool
 	pending         map[uint32]*Future
 	done            chan struct{}
 	operationDone   chan struct{}
@@ -149,9 +152,7 @@ func (s *Session) installStepLocked(e *execution, ctx context.Context) {
 	e.step++
 	e.stepCtx = ctx
 	step := e.step
-	e.stopContext = context.AfterFunc(ctx, func() {
-		_, _, _ = s.requestInterruptForStep(e, InterruptOptions{}, step)
-	})
+	e.stopContext = context.AfterFunc(ctx, func() { s.requestStopForStep(e, step) })
 }
 
 func (s *Session) admissionErrorLocked() error {
@@ -183,15 +184,27 @@ func (s *Session) beginExecution(e *execution) error {
 	if err := s.executionErrorLocked(e); err != nil {
 		return err
 	}
-	if err := e.stepCtx.Err(); err != nil {
+	if err := s.stopBeforeStartLocked(e); err != nil {
 		return err
-	}
-	if e.stop != nil {
-		e.beforeStart = true
-		return interruptException(e.stop.reason)
 	}
 	e.phase = executionPreparing
 	return nil
+}
+
+// stopBeforeStartLocked ends an execution whose stop was requested, or whose
+// context ended, before anything was sent: nothing runs, so nothing drains.
+func (s *Session) stopBeforeStartLocked(e *execution) error {
+	if e.stop == nil && e.stepCtx.Err() != nil {
+		e.stop = newStopRequest(s.limits.stop, time.Now())
+		e.stop.requestAt = time.Now()
+		s.enterRequestLocked(e)
+		go s.watchStop(e, e.stop)
+	}
+	if e.stop == nil || !e.stop.requested {
+		return nil
+	}
+	e.beforeStart = true
+	return interruptException(e.stop.policy.Reason)
 }
 
 func (s *Session) beginSend(e *execution) error {
@@ -200,12 +213,8 @@ func (s *Session) beginSend(e *execution) error {
 	if err := s.executionErrorLocked(e); err != nil {
 		return err
 	}
-	if err := e.stepCtx.Err(); err != nil {
+	if err := s.stopBeforeStartLocked(e); err != nil {
 		return err
-	}
-	if e.stop != nil {
-		e.beforeStart = true
-		return interruptException(e.stop.reason)
 	}
 	e.sent, e.wireInFlight, e.phase = true, true, executionExecuting
 	e.turnDone = make(chan struct{})
@@ -219,26 +228,35 @@ func (s *Session) receivedTurn(e *execution) {
 	s.life.mu.Unlock()
 }
 
+// stopAtBoundary reports a requested stop at a host boundary: an uncatchable
+// stop aborts the feed; a catchable one is delivered by the next resume.
 func (s *Session) stopAtBoundary(e *execution) error {
 	s.life.mu.Lock()
 	if err := s.executionErrorLocked(e); err != nil {
 		s.life.mu.Unlock()
 		return err
 	}
-	cancelled := e.stepCtx.Err() != nil
+	cancelled := e.stepCtx.Err() != nil && e.stop == nil
 	s.life.mu.Unlock()
 	if cancelled {
-		_, _, _ = s.requestInterrupt(e, InterruptOptions{})
+		s.requestStop(e, s.limits.stop)
 	}
 	s.life.mu.Lock()
 	defer s.life.mu.Unlock()
 	if err := s.executionErrorLocked(e); err != nil {
 		return err
 	}
-	if e.stop != nil {
-		return errExecutionInterrupted
+	return s.boundaryStopLocked(e)
+}
+
+func (s *Session) boundaryStopLocked(e *execution) error {
+	if e.stop == nil || !e.stop.requested {
+		return nil
 	}
-	return nil
+	if e.stop.policy.Catchable {
+		return nil
+	}
+	return errExecutionInterrupted
 }
 
 func (s *Session) beginCallback(e *execution, cbCtx context.Context) (context.Context, error) {
@@ -250,8 +268,8 @@ func (s *Session) beginCallback(e *execution, cbCtx context.Context) (context.Co
 	if err := s.executionErrorLocked(e); err != nil {
 		return nil, err
 	}
-	if e.stop != nil {
-		return nil, errExecutionInterrupted
+	if err := s.boundaryStopLocked(e); err != nil {
+		return nil, err
 	}
 	e.phase = executionCallback
 	s.releaseTurnLocked(e)
@@ -274,12 +292,16 @@ func (s *Session) beforeResume(e *execution) error {
 	if err := s.executionErrorLocked(e); err != nil {
 		return err
 	}
-	if e.stop != nil {
-		return errExecutionInterrupted
+	if err := s.boundaryStopLocked(e); err != nil {
+		return err
 	}
+	deliver := e.stop != nil && e.stop.requested && !e.delivered
 	e.phase, e.wireInFlight = executionExecuting, true
 	s.releaseTurnLocked(e)
 	e.turnDone = make(chan struct{})
+	if deliver {
+		return errDeliverStop
+	}
 	return nil
 }
 
@@ -322,13 +344,11 @@ func (s *Session) finishExecution(e *execution, value any, err error) {
 	}
 	s.releaseOperationLocked(e)
 	if e.stop != nil && !e.stop.resolvedOnce && !e.stop.forceClaimed {
-		outcome := InterruptFinished
-		if e.beforeStart {
-			outcome = InterruptBeforeStart
-		} else if e.aborted {
-			outcome = InterruptAborted
+		kind := StopFinished
+		if e.beforeStart || e.aborted || (e.delivered && err != nil) {
+			kind = StopAborted
 		}
-		s.resolveInterruptLocked(e, outcome, nil)
+		s.resolveStopLocked(e, kind)
 	}
 	release := e.releaseObserver
 	e.releaseObserver = nil
@@ -348,6 +368,7 @@ func (s *Session) terminateSession(err error) error {
 	err = s.life.terminal
 	e := s.life.current
 	paused := false
+	var cancel context.CancelFunc
 	if e != nil {
 		e.terminalCause = err
 		clear(e.pending)
@@ -356,10 +377,11 @@ func (s *Session) terminateSession(err error) error {
 			e.phase = executionAborting
 			e.operationDone = make(chan struct{})
 		}
+		cancel = e.cancelCallbacks
 	}
 	s.life.mu.Unlock()
-	if e != nil {
-		e.cancelCallbacks()
+	if cancel != nil {
+		cancel()
 	}
 	s.co.Terminate(err, "session_ended")
 	s.pool.untrack(s)

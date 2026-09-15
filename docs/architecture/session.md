@@ -2,11 +2,12 @@
 
 ## Session state
 
-- A short `life.mu` protects admission, execution identity, snapshot sequence, interrupt requests, and the canonical terminal cause. It MUST NOT be held across I/O or user callbacks.
+- A short `life.mu` protects admission, execution identity, snapshot sequence, stop requests, and the canonical terminal cause. It MUST NOT be held across I/O or user callbacks.
 - One durable execution owns the session, including paused snapshots. A separate owner channel covers each active protocol operation. Conflicting requests return `ErrSessionBusy`; there is no implicit queue.
-- Callbacks MAY observe state or call `CloseNow`. They MUST NOT wait on their own execution's completion or use an unbounded `Close` or `Interrupt` from inside that execution.
+- Callbacks MAY observe state or call `Close(ctx, KillNow)`. They MUST NOT wait on their own execution's completion or use an unbounded `Close` or `Stop` from inside that execution.
 - `driven` makes `LoadSession` and `LoadSnapshot` valid only on a fresh session.
 - Snapshots carry execution identity, sequence and single-use state. Claiming a cursor validates all three and admission in one lock acquisition. Failed busy/cancelled claims do not consume it.
+- `State()` reports a coarse `SessionState` from one lock acquisition: `SessionClosed` when a terminal cause is set; `SessionRunning` while a close attempt or a control operation is in flight, or an execution is not paused; `SessionPaused` while a `FeedStart` snapshot is pending; `SessionIdle` otherwise. `Slot.State` maps a missing or closed session to `SessionIdle` and a closed slot to `SessionClosed`.
 
 ## Lifecycle
 
@@ -14,39 +15,47 @@
 - Loss errors (`*CrashedError`, `*DisconnectError`, `*ShutdownError`, `*ProtocolError`, `*SessionKilledError`, and fatal memory `*RuntimeError`) match `ErrSessionLost`. Deliberate `ErrSessionClosed` does not. The first terminal cause is immutable; `Err()` and late driver results agree.
 - The idle watcher waits for an in-flight protocol owner's reply classification, preserving queued `ShutdownDump` payloads. A turn-completion channel hands classification back to the watcher at callbacks, pauses, and completion.
 - Futures are execution-owned subscriptions keyed by wire call ID. All terminal paths clear them without settling shared caller-owned Futures. The callback context is cancelled before Run.Done is published.
-- `Close(ctx)` coalesces concurrent close attempts and bounds waiting on owner channels. A wait timeout leaves the session open. `CloseNow` fences terminal state first, cancels callbacks and retires the lease without joining Go work. `Close` after terminal state is an immediate no-op, even with an expired context.
-- `Go` reserves execution synchronously, copies FeedOptions and its top-level maps/slice, and starts the driver. Admission failure returns a completed Run. The caller MUST NOT mutate referenced nested values while a run uses them. `WaitContext` is wait-only; a Run can never interrupt a later execution.
+- `Close(ctx, policy...)` resolves the policy over the session's, then: a negative `Timeout` (`KillNow`) fences terminal state, cancels callbacks and retires the lease without joining Go work; a terminal session is an immediate no-op, even with an expired context; concurrent close attempts coalesce; a running execution is stopped through `Run.Stop` with the policy; a paused snapshot is reclaimed and its token invalidated; then one `Finish` turn ends the session with `ErrSessionClosed`. When the caller's context ends during the stop, `Close` returns `ctx.Err()` and a background goroutine finishes the close after the run ends, bounded by `Timeout + Join`.
+- `Go` reserves execution synchronously, copies FeedOptions and its top-level maps/slice, and starts the driver. Admission failure returns a completed Run. The caller MUST NOT mutate referenced nested values while a run uses them. `WaitContext` is wait-only; a Run can never stop a later execution.
 
 ### Feed context and host calls
 
-- Each execution owns a cancellable callback root independent of successful snapshot step returns. Step-context watchers are generation-checked atomically with interruption admission. Callbacks take values from their current turn so caller values, baggage and Monty spans reach them (see `telemetry.md`).
+- Each execution owns a cancellable callback root independent of successful snapshot step returns. Turns run under `context.WithoutCancel` of the step context; a `context.AfterFunc` on the step context requests a stop with the session policy instead, and a stale step is ignored. Callbacks take values from their current turn so caller values, baggage and Monty spans reach them (see `telemetry.md`).
 - `AsyncContext(ctx, fn)` derives from the context the host function received, so its goroutine observes the same cancellation. `Async` cannot be cancelled.
-- When a host call returns and its context is cancelled, the answerer does not resume the worker. It sends `AbortFeed` with `KeyboardInterrupt`, or the interrupt reason, under `context.WithoutCancel` bounded by 5 s. The worker MUST reply with `Error`; the feed returns a `*RuntimeError` with `TypeName` `KeyboardInterrupt` and the session stays usable. A `ResolveFutures` wait is cancelled the same way.
-- The interrupt cannot be caught by `except KeyboardInterrupt` in the sandbox, because `AbortFeed` ends the feed. This deviates from `@pydantic/monty`, which kills the worker; see `docs/parity/tests.md`.
+- When a host call returns and a stop has been requested, the answerer does not resume the worker with the result. Without `Catchable` it sends `AbortFeed` with the stop reason under `context.WithoutCancel`, bounded by the kill deadline. The worker MUST reply with `Error`; the feed returns a `*RuntimeError` with the reason's type and the session stays usable. A `ResolveFutures` wait is ended the same way.
+- The default stop cannot be caught by `except KeyboardInterrupt` in the sandbox, because `AbortFeed` ends the feed. `@pydantic/monty` kills the worker on a cancelled context instead; see `docs/parity/tests.md`.
 - An uncooperative callback can outlive worker termination. Its Run.Done MUST remain open until the synchronous driver returns. Independent Async work is not joined.
 
-### Interrupt
+### Stop policy
 
-`Session.Interrupt(ctx, InterruptOptions)` captures the current execution once;
-`Run.Interrupt` uses its stored identity. Both return `(InterruptResult, error)`.
-Nil Reason means KeyboardInterrupt. Grace nil inherits the checkout default;
-zero forces immediately; a negative grace is rejected. The first reason wins and
-later callers can only shorten the absolute deadline. One watchdog continues
-after any caller times out. The waiter receives InterruptPending and ctx.Err().
+`StopPolicy{Drain, Timeout, Join, Reason, Catchable}` describes how an execution ends. Zero fields inherit: call → `CheckoutOptions.Stop` → `Options.Stop` / `WebSocketOptions.Stop` → `DefaultStopPolicy` (`Timeout` 3 s, `Join` 3 s). The pool resolves its policy at `New`/`NewWebSocket`, the session at `Checkout`, and each call over the session's. A nil `Reason` is `KeyboardInterrupt`. `Drain` and `Join` MUST be non-negative; a negative `Timeout` (`KillNow`) kills at the request instant. `Catchable` and `Drain` inherit like every other field, so a call cannot switch them off.
 
-| State | Effect |
-|---|---|
-| before first send | `InterruptBeforeStart`, no wire effect, session reusable |
-| suspended or cooperative callback | cancel callback context, then one `AbortFeed`; `InterruptAborted` preserves the session |
-| grace expires in Python, print, mount or host callback | fence terminal state under life.mu, then kill/retire outside the lock; `InterruptKilled` and `SessionKilledError` |
-| old completed Run | `InterruptAlreadyFinished`, no effect on a newer run |
-| nothing is running | `InterruptNotRunning` |
-| natural completion wins | `InterruptFinished`; inspect `SessionErr` for reusability |
+One timeline serves `Run.Stop`, `Session.Stop`, `Session.Close`, `Pool.Shutdown` and feed-context cancellation:
 
-`RunDone` reports actual driver completion, independently of the stop outcome.
-`InterruptUnknown` is reserved for a zero/unaccepted result. A force owner retains
-the right to publish Killed even if its driver exits before termination dispatch
-returns. Old timers MUST verify identity and terminal state before acting.
+```
+t0                  Stop called; with Drain > 0 the run may end on its own
+t0+Drain            request: callbacks cancelled; Reason delivered at the next host call, await or suspension
+                    Catchable=false → AbortFeed (uncatchable, session kept)
+                    Catchable=true  → resume with the exception; callback context rotated
+t0+Drain+Timeout    run not ended → worker killed (SessionKilledError, session lost)
++Join               Go callback still running → Stop returns ErrCallbackDetached
+```
+
+An execution has at most one `stopRequest`. The first caller creates it and starts one watchdog; later callers, including the feed-context hook, join it and can only move `requestAt` and `killAt` earlier. The first `Reason` and `Catchable` win. The watchdog enters the request phase at `requestAt` and calls `forceExecution` at `killAt`, which fences terminal state under `life.mu` and kills the worker outside the lock. Old timers MUST verify identity and terminal state before acting.
+
+| Phase | Request, uncatchable | Request, catchable | Kill |
+|---|---|---|---|
+| Starting / Preparing | the run ends with the reason before the first send (`StopAborted`) | same | n/a |
+| Executing (Python runs, no suspension) | wait for the next suspension | wait | at `killAt` |
+| Callback (host call running) | callback context cancelled; at return → `AbortFeed` | callback context cancelled; at return → resume with the exception, rotate the callback context | at `killAt` |
+| Paused (`FeedStart` snapshot) | `AbortFeed` now; the next `Resume*` returns the error | falls back to `AbortFeed` | at `killAt` |
+| Control (`Close` / `Dump` in flight) | after the operation | after the operation | at `killAt` |
+| Aborting | already in progress | — | at `killAt` |
+| Finished | `StopFinished` with the run's own result | same | — |
+
+`Stop` returns `Stopped{How, Err, SessionErr}` once the kind is final and the run has ended: `StopAborted` when the reason ended it and the session is kept; `StopKilled` after a kill, with `Err` and `SessionErr` the same `*SessionKilledError`; `StopFinished` when the run ended on its own, including a caught catchable stop that completed and a worker or server that ended the run first (`Err` is then the loss error and `SessionErr` is set); `StopNotRunning` from `Session.Stop` on an idle session. The caller's context bounds only its wait: on expiry `Stop` returns `StopPending` with `ctx.Err()` and the request keeps its deadlines. After a kill, `Stop` waits up to `Join` for the driver and returns `ErrCallbackDetached` when a Go callback still runs. A stop never returns `ErrSnapshotStale`; a `Run` whose execution is no longer current reports `StopFinished`.
+
+Catchable delivery: at the boundary the answerer marks the reason delivered, replaces the execution's callback context with a live one (`context.WithCancel(context.WithoutCancel(stepCtx))`) and resumes the worker with the exception. Pending futures registered before the delivery stay cancelled with the old context. Python that catches the exception can make further host calls until it completes (`StopFinished`) or until `killAt`. An uncaught exception ends the run as `StopAborted`. A catchable request on a paused snapshot falls back to `AbortFeed`, because the application owns the snapshot chain (N10 in the design record).
 
 ### Bounds
 
@@ -54,12 +63,16 @@ returns. Old timers MUST verify identity and terminal state before acting.
 - `MaxPendingFutures` (default 1000, `Unlimited` disables) bounds unresolved wire call IDs per execution as `pending future limit N exceeded`. Shared Future pointers count separately. Duplicate call IDs are protocol errors.
 - `Session.Stats` reports `HostObjects`, `PeakHostObjects` and `PendingFutures`.
 
+## Slot
+
+`Pool.Slot(opts)` returns a `Slot` that owns at most one session checked out with `opts`. Under its own mutex, `Go`, `FeedRun` and `FeedStart` acquire the session: a closed slot returns `ErrSessionClosed`; a session whose state is not `SessionClosed` is reused; otherwise a new checkout replaces it, and sandbox state is not restored. A session that is not `SessionIdle` returns `ErrSessionBusy` (or its terminal error). `Slot.Stop` delegates to `Session.Stop`, or reports `StopNotRunning` without a session. `Slot.Close` marks the slot closed, drops the session and closes it with the policy; it is idempotent. A terminal old session needs no close, because `terminateSession` already retired its worker.
+
 ## Host registry
 
 - `NewHost()` builds a `Host`. `Func(name, fn, ...HostFuncOptions)` and `Object(name, v, opts)` validate at registration: identifiers MUST be unique and not hard Python keywords; an object class and exposed method names are validated too. Configure the host before checkout. Runtime resolution performs one O(1) lookup, not a registry copy.
 - `CheckoutOptions.Host` exposes the registry to every feed of the session. Its objects are put into the instance store at checkout. `FeedOptions.ExternalLookup` is consulted first, so its entries override host names.
 - `Stubs()` renders Python stubs for `TypeCheckStubs`: one `def` per function from its Go signature (a leading `context.Context` and a trailing `Kwargs` are mapped, unknown types are `Any`), one class per object with its allowed methods, and one typed name per object.
-- Fixed reflected arguments, including method self, are positional-only (`/`). Optional ParameterNames are copied, exclude context/Kwargs and include variadic arguments. Direct Function implementations retain generic args/kwargs stubs. Labels MUST NOT imply keyword binding that runtime does not support.
+- Fixed reflected arguments, including method self, are positional-only. The `/` marker is written only after at least one fixed parameter; `self` does not count. Optional labels are copied, exclude context/Kwargs and include variadic arguments: `HostFuncOptions.ParameterNames` for functions, `ClassInstanceOptions.ParameterNames` and `ClassTypeOptions.ParameterNames` by sandbox method name for instance methods and statics. Every key MUST name an exposed method and every list MUST match its signature, checked at `NewClassInstance`, `NewClassType` and `Host.Object`; instance names override class names. Direct Function implementations retain generic args/kwargs stubs. Labels MUST NOT imply keyword binding that runtime does not support.
 - `Restorable()` reports the first object registered without a pinned `ClassInstanceOptions.ID` as `ErrHostObjectNotRestorable`. Pinned ids are what let a dump reference the same objects after `LoadSession` on another checkout with the same `Host`; `LoadSession` on a session with a `Host` returns that error before sending `Load`.
 
 ## Drive loop
@@ -75,7 +88,7 @@ returns. Old timers MUST verify identity and terminal state before acting.
 
 Every suspension and every Resume variant checks stop/terminal state, including
 name lookups, OS calls and manual snapshots. Mount handling computes a result
-without sending; the owner checks cancellation before Resume. A stopped old
+without sending; the owner checks the stop request before Resume. A stopped old
 snapshot returns its saved execution error and MUST NOT poison a later feed.
 Future-resolved class-method conversion uses a cancellable derived future and
 recovers conversion panics; it never settles its source Future.

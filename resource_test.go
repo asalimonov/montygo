@@ -145,9 +145,11 @@ func TestPoolLifecycle(t *testing.T) {
 			defer cancel()
 			require.NoError(t, p.Shutdown(shutdownCtx))
 			_, err = run.Wait()
-			require.ErrorIs(t, err, montygo.ErrSessionClosed)
-			require.NotErrorIs(t, err, montygo.ErrSessionLost)
+			var re *montygo.RuntimeError
+			require.ErrorAs(t, err, &re, "%v", err)
+			require.Equal(t, "KeyboardInterrupt", re.TypeName)
 			<-s.Done()
+			require.ErrorIs(t, s.Err(), montygo.ErrSessionClosed)
 			require.Equal(t, montygo.PoolStats{}, p.Stats())
 			_, err = p.Checkout(ctx, montygo.CheckoutOptions{})
 			require.ErrorIs(t, err, montygo.ErrPoolClosed)

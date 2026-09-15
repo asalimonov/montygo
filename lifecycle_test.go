@@ -21,37 +21,39 @@ func blockingLookup(started chan<- struct{}) map[string]any {
 	}}
 }
 
-func TestInterrupt(t *testing.T) {
+func TestStop(t *testing.T) {
 	eachBackend(t, func(t *testing.T, b montygo.Backend) {
-		t.Run("interrupting a host call raises KeyboardInterrupt and keeps the session", func(t *testing.T) {
+		t.Run("stopping a host call raises KeyboardInterrupt and keeps the session", func(t *testing.T) {
 			ctx := testCtx(t)
 			s := newSession(t, b, montygo.CheckoutOptions{})
 			started := make(chan struct{})
 			run := s.Go(ctx, "x = 'before'\ntry:\n    wait()\nexcept KeyboardInterrupt:\n    x = 'caught'", &montygo.FeedOptions{ExternalLookup: blockingLookup(started)})
 			<-started
-			interruptResult, interruptErr := s.Interrupt(ctx, montygo.InterruptOptions{})
-			require.NoError(t, interruptErr)
-			require.NotEqual(t, montygo.InterruptUnknown, interruptResult.Outcome)
-			_, err := run.Wait()
+			stopped, err := s.Stop(ctx)
+			require.NoError(t, err)
+			require.Equal(t, montygo.StopAborted, stopped.How)
+			require.True(t, stopped.SessionKept())
+			_, err = run.Wait()
+			require.Same(t, stopped.Err, err)
 			var re *montygo.RuntimeError
 			require.ErrorAs(t, err, &re, "%v", err)
 			require.Equal(t, "KeyboardInterrupt", re.TypeName)
 			require.NoError(t, s.Err())
 			v, err := s.FeedRun(ctx, "x", nil)
 			require.NoError(t, err)
-			require.Equal(t, "before", v, "an aborted feed cannot catch the interrupt")
+			require.Equal(t, "before", v, "an aborted feed cannot catch the stop")
 		})
 
-		t.Run("the interrupt reason becomes the raised exception", func(t *testing.T) {
+		t.Run("the stop reason becomes the raised exception", func(t *testing.T) {
 			ctx := testCtx(t)
 			s := newSession(t, b, montygo.CheckoutOptions{})
 			started := make(chan struct{})
 			run := s.Go(ctx, "wait()", &montygo.FeedOptions{ExternalLookup: blockingLookup(started)})
 			<-started
-			interruptResult, interruptErr := run.Interrupt(ctx, montygo.InterruptOptions{Reason: montygo.Raise("TimeoutError", "budget spent")})
-			require.NoError(t, interruptErr)
-			require.Equal(t, montygo.InterruptAborted, interruptResult.Outcome)
-			_, err := run.Wait()
+			stopped, err := run.Stop(ctx, montygo.StopPolicy{Reason: montygo.Raise("TimeoutError", "budget spent")})
+			require.NoError(t, err)
+			require.Equal(t, montygo.StopAborted, stopped.How)
+			_, err = run.Wait()
 			var re *montygo.RuntimeError
 			require.ErrorAs(t, err, &re)
 			require.Equal(t, "TimeoutError", re.TypeName)
@@ -59,7 +61,7 @@ func TestInterrupt(t *testing.T) {
 			require.NoError(t, s.Err())
 		})
 
-		t.Run("an AsyncContext future observes the interrupt", func(t *testing.T) {
+		t.Run("an AsyncContext future observes the stop", func(t *testing.T) {
 			ctx := testCtx(t)
 			s := newSession(t, b, montygo.CheckoutOptions{})
 			started := make(chan struct{})
@@ -72,36 +74,37 @@ func TestInterrupt(t *testing.T) {
 			}}
 			run := s.Go(ctx, "await wait()", &montygo.FeedOptions{ExternalLookup: lookup})
 			<-started
-			interruptResult, interruptErr := s.Interrupt(ctx, montygo.InterruptOptions{})
-			require.NoError(t, interruptErr)
-			require.NotEqual(t, montygo.InterruptUnknown, interruptResult.Outcome)
-			_, err := run.Wait()
+			stopped, err := s.Stop(ctx)
+			require.NoError(t, err)
+			require.Equal(t, montygo.StopAborted, stopped.How)
+			_, err = run.Wait()
 			var re *montygo.RuntimeError
 			require.ErrorAs(t, err, &re)
 			require.Equal(t, "KeyboardInterrupt", re.TypeName)
 			require.NoError(t, s.Err())
 		})
 
-		t.Run("interrupting running Python kills the worker after the grace period", func(t *testing.T) {
+		t.Run("stopping running Python kills the worker when Timeout expires", func(t *testing.T) {
 			ctx := testCtx(t)
 			p := newPool(t, b, montygo.Options{MaxProcesses: 1})
-			s, err := p.Checkout(ctx, montygo.CheckoutOptions{InterruptGrace: 50 * time.Millisecond})
+			s, err := p.Checkout(ctx, montygo.CheckoutOptions{Stop: montygo.StopPolicy{Timeout: 50 * time.Millisecond}})
 			require.NoError(t, err)
 			run := s.Go(ctx, "while True:\n    pass", nil)
 			time.Sleep(100 * time.Millisecond)
-			interruptResult, interruptErr := s.Interrupt(ctx, montygo.InterruptOptions{})
-			require.NoError(t, interruptErr)
-			require.NotEqual(t, montygo.InterruptUnknown, interruptResult.Outcome)
+			stopped, err := s.Stop(ctx)
+			require.NoError(t, err)
+			require.Equal(t, montygo.StopKilled, stopped.How)
+			require.False(t, stopped.SessionKept())
 			_, err = run.Wait()
 			require.ErrorIs(t, err, montygo.ErrSessionLost)
 			var killed *montygo.SessionKilledError
 			require.ErrorAs(t, err, &killed)
-			require.Equal(t, montygo.InterruptKilled, interruptResult.Outcome)
+			require.Same(t, stopped.Err, err)
 			<-s.Done()
 			require.ErrorIs(t, s.Err(), montygo.ErrSessionLost)
 		})
 
-		t.Run("interrupting a suspended snapshot aborts it", func(t *testing.T) {
+		t.Run("stopping a suspended snapshot aborts it", func(t *testing.T) {
 			ctx := testCtx(t)
 			s := newSession(t, b, montygo.CheckoutOptions{})
 			snap, err := s.FeedStart(ctx, "try:\n    pending()\nexcept KeyboardInterrupt:\n    x = 'aborted'\nx", nil)
@@ -109,9 +112,9 @@ func TestInterrupt(t *testing.T) {
 			fn, ok := snap.(*montygo.FunctionSnapshot)
 			require.True(t, ok, "%T", snap)
 			require.Equal(t, "pending", fn.FunctionName)
-			interruptResult, interruptErr := s.Interrupt(ctx, montygo.InterruptOptions{})
-			require.NoError(t, interruptErr)
-			require.NotEqual(t, montygo.InterruptUnknown, interruptResult.Outcome)
+			stopped, err := s.Stop(ctx)
+			require.NoError(t, err)
+			require.Equal(t, montygo.StopAborted, stopped.How)
 			_, err = fn.Resume(ctx, 1)
 			var re *montygo.RuntimeError
 			require.ErrorAs(t, err, &re)
@@ -122,12 +125,13 @@ func TestInterrupt(t *testing.T) {
 			require.Equal(t, int64(4), v)
 		})
 
-		t.Run("Interrupt with nothing running is a no-op", func(t *testing.T) {
+		t.Run("Stop with nothing running reports StopNotRunning", func(t *testing.T) {
 			ctx := testCtx(t)
 			s := newSession(t, b, montygo.CheckoutOptions{})
-			interruptResult, interruptErr := s.Interrupt(ctx, montygo.InterruptOptions{})
-			require.NoError(t, interruptErr)
-			require.NotEqual(t, montygo.InterruptUnknown, interruptResult.Outcome)
+			stopped, err := s.Stop(ctx)
+			require.NoError(t, err)
+			require.Equal(t, montygo.StopNotRunning, stopped.How)
+			require.Equal(t, "not running", stopped.How.String())
 			v, err := s.FeedRun(ctx, "1", nil)
 			require.NoError(t, err)
 			require.Equal(t, int64(1), v)
@@ -147,7 +151,7 @@ func TestSessionLifecycle(t *testing.T) {
 			require.Equal(t, int64(42), v)
 		})
 
-		t.Run("CloseNow ends a running feed with ErrSessionClosed", func(t *testing.T) {
+		t.Run("Close with KillNow ends a running feed with ErrSessionClosed", func(t *testing.T) {
 			ctx := testCtx(t)
 			p := newPool(t, b, montygo.Options{MaxProcesses: 1})
 			s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
@@ -155,7 +159,7 @@ func TestSessionLifecycle(t *testing.T) {
 			started := make(chan struct{})
 			run := s.Go(ctx, "wait()", &montygo.FeedOptions{ExternalLookup: blockingLookup(started)})
 			<-started
-			require.NoError(t, s.CloseNow())
+			require.NoError(t, s.Close(ctx, montygo.KillNow))
 			_, err = run.Wait()
 			require.ErrorIs(t, err, montygo.ErrSessionClosed)
 			require.NotErrorIs(t, err, montygo.ErrSessionLost)

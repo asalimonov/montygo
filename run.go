@@ -53,18 +53,6 @@ func (r *Run) WaitContext(ctx context.Context) (any, error) {
 	}
 }
 
-// Interrupt stops the feed; see Session.Interrupt.
-func (r *Run) Interrupt(ctx context.Context, opts InterruptOptions) (InterruptResult, error) {
-	if err := ctx.Err(); err != nil {
-		return InterruptResult{}, err
-	}
-	req, immediate, err := r.s.requestInterrupt(r.exec, opts)
-	if err != nil || req == nil {
-		return immediate, err
-	}
-	return r.s.waitInterrupt(ctx, r.exec, req)
-}
-
 func copyFeedOptions(opts *FeedOptions) *FeedOptions {
 	if opts == nil {
 		return &FeedOptions{}

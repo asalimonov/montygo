@@ -30,6 +30,19 @@ func Example() {
 	// Output: 3 <nil>
 }
 
+func Example_oneShot() {
+	ctx := context.Background()
+	pool, _ := montygo.New(ctx, montygo.Options{})
+	defer pool.Shutdown(ctx)
+
+	// Run checks out a session, feeds once and closes it.
+	result, err := pool.Run(ctx, "sum(range(n))", &montygo.RunOptions{
+		FeedOptions: montygo.FeedOptions{Inputs: map[string]any{"n": 10}},
+	})
+	fmt.Println(result, err)
+	// Output: 45 <nil>
+}
+
 func Example_sessionState() {
 	ctx := context.Background()
 	pool, _ := montygo.New(ctx, montygo.Options{})
@@ -151,30 +164,95 @@ func Example_classType() {
 	// TypeError: cannot instantiate host class 'exampleWallet'
 }
 
-func Example_interrupt() {
+func Example_stop() {
 	ctx := context.Background()
 	pool, _ := montygo.New(ctx, montygo.Options{})
-	defer pool.Close(ctx)
+	defer pool.Shutdown(ctx)
 	session, _ := pool.Checkout(ctx, montygo.CheckoutOptions{})
 	defer session.Close(ctx)
 
 	lookup := map[string]any{"wait": func(ctx context.Context) error {
-		<-ctx.Done() // the host call's context ends on Interrupt
+		<-ctx.Done() // the host call's context ends on Stop
 		return ctx.Err()
 	}}
 	run := session.Go(ctx, "wait()", &montygo.FeedOptions{ExternalLookup: lookup})
-	stop, stopErr := run.Interrupt(ctx, montygo.InterruptOptions{Grace: montygo.DurationPtr(250 * time.Millisecond)})
-	fmt.Println(stopErr == nil, stop.Outcome == montygo.InterruptBeforeStart || stop.Outcome == montygo.InterruptAborted, stop.RunDone)
-	_, err := run.Wait()
+	stopped, err := run.Stop(ctx) // KeyboardInterrupt now, kill after 3 s, join the callback
 	var runtimeErr *montygo.RuntimeError
-	fmt.Println(errors.As(err, &runtimeErr), runtimeErr.TypeName, errors.Is(err, montygo.ErrSessionLost))
+	fmt.Println(err, stopped.How, stopped.SessionKept(), errors.As(stopped.Err, &runtimeErr), runtimeErr.TypeName)
 
 	result, _ := session.FeedRun(ctx, "1 + 1", nil) // the session is still usable
 	fmt.Println(result)
 	// Output:
-	// true true true
-	// true KeyboardInterrupt false
+	// <nil> aborted true true KeyboardInterrupt
 	// 2
+}
+
+func Example_catchableStop() {
+	ctx := context.Background()
+	pool, _ := montygo.New(ctx, montygo.Options{})
+	defer pool.Shutdown(ctx)
+	session, _ := pool.Checkout(ctx, montygo.CheckoutOptions{})
+	defer session.Close(ctx)
+
+	started := make(chan struct{})
+	lookup := map[string]any{
+		"wait": func(ctx context.Context) error {
+			close(started)
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		"cleanup": func(ctx context.Context) (string, error) { // runs after the stop was delivered
+			if err := ctx.Err(); err != nil {
+				return "", err // host calls made during cleanup get a live context
+			}
+			return "cleaned up", nil
+		},
+	}
+	script := `try:
+    wait()
+except KeyboardInterrupt:
+    result = cleanup()
+result`
+	run := session.Go(ctx, script, &montygo.FeedOptions{ExternalLookup: lookup})
+	<-started
+	stopped, err := run.Stop(ctx, montygo.StopPolicy{Catchable: true}) // raised in the sandbox, not AbortFeed
+	result, _ := run.Wait()
+	fmt.Println(err, stopped.How, stopped.SessionKept(), result)
+	// Output: <nil> finished true cleaned up
+}
+
+func Example_slot() {
+	ctx := context.Background()
+	pool, _ := montygo.New(ctx, montygo.Options{})
+	defer pool.Shutdown(ctx)
+	slot := pool.Slot(montygo.CheckoutOptions{})
+	defer slot.Close(ctx)
+
+	fmt.Println(slot.State())               // no session yet
+	_, _ = slot.FeedRun(ctx, "x = 21", nil) // checks out lazily
+	result, _ := slot.FeedRun(ctx, "x * 2", nil)
+	fmt.Println(result, slot.State())
+
+	started := make(chan struct{})
+	lookup := map[string]any{"wait": func(ctx context.Context) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	run, _ := slot.Go(ctx, "wait()", &montygo.FeedOptions{ExternalLookup: lookup})
+	<-started
+	_, busy := slot.Go(ctx, "1", nil)            // one execution at a time
+	stopped, _ := run.Stop(ctx, montygo.KillNow) // the worker is killed; the session is lost
+	fmt.Println(errors.Is(busy, montygo.ErrSessionBusy), stopped.How, stopped.SessionKept(), slot.State())
+
+	_, err := slot.FeedRun(ctx, "x", nil) // a fresh session: sandbox state is not restored
+	var runtimeErr *montygo.RuntimeError
+	fmt.Println(errors.As(err, &runtimeErr), runtimeErr.TypeName)
+	// Output:
+	// idle
+	// 42 idle
+	// true killed false idle
+	// true NameError
 }
 
 type payer interface {
@@ -239,15 +317,17 @@ func Example_poolShutdown() {
 	session, _ := pool.Checkout(ctx, montygo.CheckoutOptions{})
 	fmt.Printf("%+v\n", pool.Stats())
 
-	go func() {
-		_, _ = session.FeedRun(ctx, "1 + 1", nil)
-		_ = session.Close(ctx)
-	}()
-	fmt.Println(pool.Shutdown(ctx)) // waits for the session and every worker
+	run := session.Go(ctx, "sum(range(10))", nil)
+	// Drain lets the run end on its own; without it Shutdown stops it at once.
+	// Every open session is closed and every worker has exited when Shutdown returns.
+	fmt.Println(pool.Shutdown(ctx, montygo.StopPolicy{Drain: 5 * time.Second}))
+	result, err := run.Wait()
+	fmt.Println(result, err, session.State())
 	fmt.Printf("%+v\n", pool.Stats())
 	// Output:
 	// {Starting:0 Active:1 Idle:0 Retiring:0}
 	// <nil>
+	// 45 <nil> closed
 	// {Starting:0 Active:0 Idle:0 Retiring:0}
 }
 

@@ -11,23 +11,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestImmediateInterrupt(t *testing.T) {
+func TestImmediateStop(t *testing.T) {
 	eachBackend(t, func(t *testing.T, b montygo.Backend) {
 		ctx := testCtx(t)
 		p := newPool(t, b, montygo.Options{MaxProcesses: 1})
 		s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
 		require.NoError(t, err)
-		t.Cleanup(func() { _ = s.CloseNow() })
+		t.Cleanup(func() { _ = s.Close(ctx, montygo.KillNow) })
 		for i := range 1000 {
 			r := s.Go(ctx, "wait()", &montygo.FeedOptions{ExternalLookup: map[string]any{
 				"wait": func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() },
 			}})
 			waitCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-			result, err := r.Interrupt(waitCtx, montygo.InterruptOptions{})
+			result, err := r.Stop(waitCtx)
 			require.NoError(t, err, "iteration %d", i)
-			require.Contains(t, []montygo.InterruptOutcome{montygo.InterruptBeforeStart, montygo.InterruptAborted}, result.Outcome, "iteration %d", i)
-			require.True(t, result.RunDone)
-			require.NoError(t, result.SessionErr)
+			require.Equal(t, montygo.StopAborted, result.How, "iteration %d", i)
+			require.True(t, result.SessionKept())
 			_, err = r.WaitContext(waitCtx)
 			cancel()
 			var raised *montygo.RuntimeError
@@ -62,17 +61,18 @@ func TestExecutionOwnership(t *testing.T) {
 			}
 			_, err = busy.Wait()
 			require.ErrorIs(t, err, montygo.ErrSessionBusy)
-			result, err := busy.Interrupt(ctx, montygo.InterruptOptions{})
+			result, err := busy.Stop(ctx)
 			require.NoError(t, err)
-			require.Equal(t, montygo.InterruptAlreadyFinished, result.Outcome)
+			require.Equal(t, montygo.StopFinished, result.How)
+			require.ErrorIs(t, result.Err, montygo.ErrSessionBusy)
 			waitCtx, cancel := context.WithCancel(ctx)
 			cancel()
 			_, err = r.WaitContext(waitCtx)
 			require.ErrorIs(t, err, context.Canceled)
 			require.NoError(t, s.Err())
-			result, err = r.Interrupt(ctx, montygo.InterruptOptions{})
+			result, err = r.Stop(ctx)
 			require.NoError(t, err)
-			require.Equal(t, montygo.InterruptAborted, result.Outcome)
+			require.Equal(t, montygo.StopAborted, result.How)
 		})
 		t.Run("old Run cannot stop the next execution", func(t *testing.T) {
 			ctx := testCtx(t)
@@ -83,12 +83,11 @@ func TestExecutionOwnership(t *testing.T) {
 			started := make(chan struct{})
 			r := s.Go(ctx, "wait()", &montygo.FeedOptions{ExternalLookup: blockingLookup(started)})
 			<-started
-			zero := time.Duration(0)
-			result, err := old.Interrupt(ctx, montygo.InterruptOptions{Grace: &zero})
+			result, err := old.Stop(ctx, montygo.KillNow)
 			require.NoError(t, err)
-			require.Equal(t, montygo.InterruptAlreadyFinished, result.Outcome)
+			require.Equal(t, montygo.StopFinished, result.How)
 			require.NoError(t, s.Err())
-			_, err = r.Interrupt(ctx, montygo.InterruptOptions{})
+			_, err = r.Stop(ctx)
 			require.NoError(t, err)
 		})
 		t.Run("aborted snapshot cannot answer a later paused call", func(t *testing.T) {
@@ -99,7 +98,7 @@ func TestExecutionOwnership(t *testing.T) {
 			old := snap.(*montygo.FunctionSnapshot)
 			_, err = s.FeedRun(ctx, "1", nil)
 			require.ErrorIs(t, err, montygo.ErrSessionBusy)
-			_, err = s.Interrupt(ctx, montygo.InterruptOptions{})
+			_, err = s.Stop(ctx)
 			require.NoError(t, err)
 			snap, err = s.FeedStart(ctx, "new()", nil)
 			require.NoError(t, err)
@@ -129,13 +128,13 @@ func TestExecutionOwnership(t *testing.T) {
 	})
 }
 
-func TestInterruptUncooperativeCallback(t *testing.T) {
+func TestStopUncooperativeCallback(t *testing.T) {
 	eachBackend(t, func(t *testing.T, b montygo.Backend) {
 		ctx := testCtx(t)
 		p := newPool(t, b, montygo.Options{MaxProcesses: 1})
 		s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
 		require.NoError(t, err)
-		defer s.CloseNow()
+		defer s.Close(ctx, montygo.KillNow)
 		started, release := make(chan struct{}), make(chan struct{})
 		var once sync.Once
 		unblock := func() { once.Do(func() { close(release) }) }
@@ -146,27 +145,20 @@ func TestInterruptUncooperativeCallback(t *testing.T) {
 			return 1
 		}}})
 		<-started
-		short, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
-		err = s.Close(short)
-		cancel()
-		require.ErrorIs(t, err, context.DeadlineExceeded)
-		require.NoError(t, s.Err())
 		firstReason := errors.New("first reason wins")
-		grace := time.Hour
-		short, cancel = context.WithTimeout(ctx, 20*time.Millisecond)
-		result, err := r.Interrupt(short, montygo.InterruptOptions{Reason: firstReason, Grace: &grace})
+		short, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+		result, err := r.Stop(short, montygo.StopPolicy{Reason: firstReason, Timeout: time.Hour})
 		cancel()
 		require.ErrorIs(t, err, context.DeadlineExceeded)
-		require.Equal(t, montygo.InterruptPending, result.Outcome)
-		zero := time.Duration(0)
-		result, err = r.Interrupt(ctx, montygo.InterruptOptions{Reason: errors.New("ignored reason"), Grace: &zero})
-		require.NoError(t, err)
-		require.Equal(t, montygo.InterruptKilled, result.Outcome)
-		require.False(t, result.RunDone)
+		require.Equal(t, montygo.StopPending, result.How)
+		require.NoError(t, s.Err())
+		result, err = r.Stop(ctx, montygo.StopPolicy{Reason: errors.New("ignored reason"), Timeout: -1, Join: 50 * time.Millisecond})
+		require.ErrorIs(t, err, montygo.ErrCallbackDetached)
+		require.Equal(t, montygo.StopKilled, result.How)
 		require.ErrorIs(t, result.SessionErr, firstReason)
 		require.ErrorIs(t, result.SessionErr, montygo.ErrSessionLost)
 		require.Same(t, result.SessionErr, s.Err())
-		require.NoError(t, s.CloseNow())
+		require.NoError(t, s.Close(ctx, montygo.KillNow))
 		cancelled, cancel := context.WithCancel(ctx)
 		cancel()
 		require.NoError(t, s.Close(cancelled))
@@ -191,7 +183,7 @@ func TestForceDuringPrint(t *testing.T) {
 		p := newPool(t, b, montygo.Options{MaxProcesses: 1})
 		s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
 		require.NoError(t, err)
-		defer s.CloseNow()
+		defer s.Close(ctx, montygo.KillNow)
 		entered, release := make(chan struct{}), make(chan struct{})
 		var once sync.Once
 		unblock := func() { once.Do(func() { close(release) }) }
@@ -202,10 +194,9 @@ func TestForceDuringPrint(t *testing.T) {
 			return nil
 		})})
 		<-entered
-		result, err := r.Interrupt(ctx, montygo.InterruptOptions{Grace: montygo.DurationPtr(0)})
-		require.NoError(t, err)
-		require.Equal(t, montygo.InterruptKilled, result.Outcome)
-		require.False(t, result.RunDone)
+		result, err := r.Stop(ctx, montygo.StopPolicy{Timeout: -1, Join: 50 * time.Millisecond})
+		require.ErrorIs(t, err, montygo.ErrCallbackDetached)
+		require.Equal(t, montygo.StopKilled, result.How)
 		fresh, err := p.Checkout(ctx, montygo.CheckoutOptions{})
 		require.NoError(t, err)
 		defer fresh.Close(ctx)
@@ -235,7 +226,7 @@ func TestTerminalPathsReleaseCapacity(t *testing.T) {
 						require.Error(t, err)
 						require.Error(t, s.Err())
 					} else {
-						require.NoError(t, s.CloseNow())
+						require.NoError(t, s.Close(ctx, montygo.KillNow))
 					}
 				}
 				fresh, err := p.Checkout(ctx, montygo.CheckoutOptions{})
@@ -259,9 +250,9 @@ func TestPausedCancellationBoundaries(t *testing.T) {
 				snap, err := s.FeedStart(step, code, nil)
 				require.NoError(t, err)
 				cancel()
-				result, err := s.Interrupt(ctx, montygo.InterruptOptions{})
+				result, err := s.Stop(ctx)
 				require.NoError(t, err)
-				require.Contains(t, []montygo.InterruptOutcome{montygo.InterruptAborted, montygo.InterruptNotRunning}, result.Outcome)
+				require.Contains(t, []montygo.StopKind{montygo.StopAborted, montygo.StopNotRunning}, result.How)
 				var resumeErr error
 				switch call := snap.(type) {
 				case *montygo.FunctionSnapshot:
@@ -282,7 +273,7 @@ func TestPausedCancellationBoundaries(t *testing.T) {
 
 type conversionProbe struct{ Value int }
 
-func TestInterruptDuringConversion(t *testing.T) {
+func TestStopDuringConversion(t *testing.T) {
 	eachBackend(t, func(t *testing.T, b montygo.Backend) {
 		for _, point := range []string{"preparation", "function resume", "name resume"} {
 			t.Run(point, func(t *testing.T) {
@@ -327,10 +318,10 @@ func TestInterruptDuringConversion(t *testing.T) {
 					t.Fatal(ctx.Err())
 				}
 				wait, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
-				result, err := s.Interrupt(wait, montygo.InterruptOptions{Grace: montygo.DurationPtr(time.Hour)})
+				result, err := s.Stop(wait, montygo.StopPolicy{Timeout: time.Hour})
 				cancel()
 				require.ErrorIs(t, err, context.DeadlineExceeded)
-				require.Equal(t, montygo.InterruptPending, result.Outcome)
+				require.Equal(t, montygo.StopPending, result.How)
 				unblock()
 				err = <-finished
 				var raised *montygo.RuntimeError

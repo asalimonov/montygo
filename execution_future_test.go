@@ -76,7 +76,7 @@ func TestExecutionFutures(t *testing.T) {
 			<-entered
 			other := second.Go(ctx, "await pending()", opts)
 			<-entered
-			require.NoError(t, first.CloseNow())
+			require.NoError(t, first.Close(ctx, montygo.KillNow))
 			_, err := a.WaitContext(ctx)
 			require.ErrorIs(t, err, montygo.ErrSessionClosed)
 			require.Zero(t, first.Stats().PendingFutures)
@@ -109,10 +109,10 @@ func TestExecutionFutures(t *testing.T) {
 			require.NoError(t, err)
 			require.IsType(t, &montygo.FutureSnapshot{}, snap)
 			require.Equal(t, 1, s.Stats().PendingFutures)
-			result, err := s.Interrupt(ctx, montygo.InterruptOptions{})
+			result, err := s.Stop(ctx)
 			require.NoError(t, err)
-			require.Equal(t, montygo.InterruptAborted, result.Outcome)
-			require.True(t, result.RunDone)
+			require.Equal(t, montygo.StopAborted, result.How)
+			require.True(t, result.SessionKept())
 			require.Zero(t, s.Stats().PendingFutures)
 			select {
 			case <-pending.Done():

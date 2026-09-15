@@ -134,10 +134,10 @@ See `protocol.md` for the codec and `pool.md` for deadlines and failure classifi
 ### Concurrency
 
 - A pool is safe for concurrent use. Checkouts beyond `MaxProcesses` wait up to `CheckoutTimeout`.
-- A session admits one execution, including paused snapshots; conflicting calls return ErrSessionBusy. Its lifecycle mutex covers only state transitions, not callbacks or I/O. Interrupt and CloseNow target the execution identity; bounded waits MUST be used if a callback invokes lifecycle APIs on its own session.
+- A session admits one execution, including paused snapshots; conflicting calls return ErrSessionBusy. Its lifecycle mutex covers only state transitions, not callbacks or I/O. `Run.Stop` and `Close(ctx, KillNow)` target the execution identity; bounded waits MUST be used if a callback invokes lifecycle APIs on its own session.
 - Async host functions return a `*montygo.Future` that settles on its own goroutine. The session collects settled futures at a `ResolveFutures` suspension, or awaits one directly when the worker allows an eager await.
-- Every blocking call takes a `context.Context`. Cancelling it while Python executes ends the worker (a kill, or a close frame for WebSocket) and poisons the session. Cancelling it while the worker waits on a host call aborts the feed with `KeyboardInterrupt` and keeps the session. `Session.Interrupt` and `Session.CloseNow` work from any goroutine; `Session.Done` and `Err` report a lost session. See `session.md`.
-- `Pool.Shutdown` waits for open sessions and retiring workers; `Pool.Close` retires idle workers only. See `pool.md`.
+- Every blocking call takes a `context.Context`. Cancelling a feed context ends the run through the session's stop policy: the stop reason (`KeyboardInterrupt`) is delivered where Python yields and the session is kept; Python that never yields is killed when the policy's `Timeout` expires and the session is lost. `Run.Stop`, `Session.Stop` and `Session.Close` work from any goroutine; `Session.State`, `Done` and `Err` report the session's state and loss. See `session.md`.
+- `Pool.Shutdown` closes open sessions with the stop policy and waits for every worker; `Pool.Close` retires idle workers only. `Pool.Run` is a one-shot checkout, feed and close; `Pool.Slot` holds one re-acquirable session. See `pool.md` and `session.md`.
 
 ## Architectural constraints and principles
 
@@ -158,7 +158,7 @@ See `protocol.md` for the codec and `pool.md` for deadlines and failure classifi
 |---|---|
 | `protocol.md` | framing, codec, value depth, exception rendering |
 | `pool.md` | pool lifecycle, accounting, shutdown, frame byte bound, deadlines, suspension budget, failure classification |
-| `session.md` | lifecycle, interrupt, drive loop, print, value conversion, host objects, host registry |
+| `session.md` | lifecycle, stop policy, session state, slots, drive loop, print, value conversion, host objects, host registry |
 | `versioning.md` | `MontyVersion`, `BindingVersion`, `scripts/version.sh`, pins |
 | `mounts.md` | host filesystem mounts |
 | `wasm.md` | embedded wasm worker |

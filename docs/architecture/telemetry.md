@@ -58,7 +58,7 @@
 ## Callback context
 
 - Host callbacks receive the caller's context with the checkout's innermost open span attached. That context reaches `Function.Call`, `OSHandler`, futures started from them, and `ContextPrintTarget`.
-- Caller values survive, so request-scoped values and baggage reach callbacks. Cancellation follows the feed context, so `Interrupt`, `CloseNow` and a cancelled caller context end the callback's context; see `session.md`.
+- Caller values survive, so request-scoped values and baggage reach callbacks. Cancellation follows the stop request, so `Stop`, `Close` and a cancelled feed context end the callback's context; see `session.md`.
 - A snapshot resumed with another context delivers that context's values.
 - When spans are not recorded, callbacks receive the caller's context unchanged.
 

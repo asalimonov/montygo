@@ -19,7 +19,7 @@
 | `session.loadSession` / `loadSnapshot` / `dump` | `LoadSession` / `LoadSnapshot` / `Dump` | |
 | `session.installDependencies` | `session.InstallDependencies` | |
 | `session.workerPid` | `session.WorkerPID() (int, bool)` | |
-| `session.close()` | `session.Close(ctx)` | `CloseNow` ends a running feed at once |
+| `session.close()` | `session.Close(ctx[, policy])` | a running feed is stopped with the policy first; `Close(ctx, montygo.KillNow)` ends it at once |
 | `FunctionSnapshot` (`resume`, `resumeAuto`, `resumeError`, `resumeNotFound`, `resumeFuture`, `resumeNotHandled`, `dump`) | `*montygo.FunctionSnapshot` (`Resume`, `ResumeAuto`, `ResumeError`, `ResumeNotFound`, `ResumeFuture`, `ResumeNotHandled`, `Dump`) | |
 | `NameLookupSnapshot.resume(name?)` / `resumeValue` / `resumeAuto` | `ResumeFunction(name)`, `ResumeUnresolved()` / `ResumeValue` / `ResumeAuto` | |
 | `FutureSnapshot.resume([{callId, value \| error}])` | `Resume([]montygo.FutureResolution{CallID, Value, Err})` | |
@@ -58,14 +58,17 @@
 | Memory-limit classification on wasm | exit code 65 → `MemoryError` | the TS browser worker reports a crash |
 | Server info | `montygo.FetchServerInfo` (`GET <path>/info`), `ServerInfo`, `ServerLimits`, `ErrNoServerInfo` | montygo; `monty-server` addition, see `server.md` |
 | Binding version | `montygo.BindingVersion()`, `montygo.MontyVersion` | montygo; see `docs/architecture/versioning.md` |
-| Session lifecycle | `Session.Interrupt`, `Session.CloseNow`, `Session.Done`, `Session.Err`, `Session.Stats`, `SessionStats`, `Session.Go`, `*Run` (`Wait`, `WaitContext`, `Done`, `Interrupt`) | montygo; synchronous execution admission, `ErrSessionBusy`, generation-bound snapshots |
+| Session lifecycle | `Session.Stop`, `Session.State`, `SessionState` (`SessionIdle`, `SessionRunning`, `SessionPaused`, `SessionClosed`), `Session.Done`, `Session.Err`, `Session.Stats`, `SessionStats`, `Session.Go`, `*Run` (`Wait`, `WaitContext`, `Done`, `Stop`) | montygo; synchronous execution admission, `ErrSessionBusy`, generation-bound snapshots |
 | Lost-session classification | `ErrSessionLost`; `Is` on `*CrashedError`, `*DisconnectError`, `*ShutdownError`, `*ProtocolError`, `*SessionKilledError` and fatal memory `*RuntimeError`; `DisconnectError.Code`, `Reason` | `ErrSessionClosed` deliberately does not match loss |
-| Interrupt grace and outcomes | `CheckoutOptions.InterruptGrace`, `InterruptOptions`, `InterruptResult`, `InterruptOutcome` | one accepted deadline covers Python and Go callbacks; caller context is wait-only |
+| Stop policy | `StopPolicy` (`Drain`, `Timeout`, `Join`, `Reason`, `Catchable`), `DefaultStopPolicy`, `KillNow`, `Options.Stop`, `WebSocketOptions.Stop`, `CheckoutOptions.Stop`, `Stopped` (`How`, `Err`, `SessionErr`, `SessionKept`), `StopKind` (`StopPending`, `StopNotRunning`, `StopAborted`, `StopKilled`, `StopFinished`), `ErrCallbackDetached` | montygo; one library-owned timeline (request, kill at `Timeout`, join) for `Stop`, `Close`, `Shutdown` and feed-context cancellation; caller context is wait-only |
+| Catchable stop | `StopPolicy.Catchable` | montygo; the reason is raised in the sandbox at the next host call or await; no upstream counterpart |
+| One-shot run | `Pool.Run`, `RunOptions` | montygo; checkout, `FeedRun` and close in one call |
+| Session holder | `Pool.Slot`, `*Slot` (`Session`, `State`, `Go`, `FeedRun`, `FeedStart`, `Stop`, `Close`) | montygo; re-checks out after a loss, one execution at a time |
 | Host-side bounds | `CheckoutOptions.MaxHostObjects`, `MaxPendingFutures`, `*ResourceError`; `Options.MaxPendingBytes`, `UnlimitedPendingBytes` | montygo; TS keeps every wrapper and buffers every frame |
 | Explicit unlimited | `montygo.Unlimited`, `montygo.UnlimitedDuration` | montygo; TS has no unlimited suspensions |
-| Host registry | `montygo.NewHost`, `*Host` (`Func`, `Object`, `Names`, `Stubs`, `Restorable`), `HostFuncOptions`, `CheckoutOptions.Host`, `ErrHostObjectNotRestorable` | fixed reflected parameters are positional-only; optional labels do not enable keyword binding |
+| Host registry | `montygo.NewHost`, `*Host` (`Func`, `Object`, `Names`, `Stubs`, `Restorable`), `HostFuncOptions`, `ClassInstanceOptions.ParameterNames`, `ClassTypeOptions.ParameterNames`, `CheckoutOptions.Host`, `ErrHostObjectNotRestorable` | fixed reflected parameters are positional-only; optional labels do not enable keyword binding; `/` follows a fixed parameter only |
 | Interface-driven exposure | `montygo.Expose[T]()` | montygo |
-| Pool shutdown and accounting | `Pool.Shutdown`, `Pool.Stats`, `PoolStats` | montygo; TS `close()` does not wait for sessions |
+| Pool shutdown and accounting | `Pool.Shutdown(ctx[, policy])`, `Pool.Stats`, `PoolStats` | montygo; TS `close()` does not wait for sessions; `Shutdown` closes every open session with the stop policy and waits for the workers |
 | Per-pool telemetry | `Options.Telemetry`, `WebSocketOptions.Telemetry` | montygo; TS installs process-wide only |
 | Line-oriented print | `montygo.Lines`, `montygo.FlushingPrintTarget` | montygo |
 | Cancellable async host work | `montygo.AsyncContext` | montygo |
@@ -76,16 +79,22 @@
 
 | Behaviour | `@pydantic/monty` | montygo |
 |---|---|---|
-| Cancelling the feed context while the worker waits on a host call | the worker is killed and the session is poisoned | `AbortFeed(KeyboardInterrupt)` ends the feed; `FeedRun` returns a `*RuntimeError` with `TypeName` `KeyboardInterrupt` and the session stays usable. `Session.Interrupt` uses the same path with a chosen reason. The sandbox cannot catch it with `except KeyboardInterrupt`. Cancelling while Python executes still kills the worker. |
+| Cancelling the feed context | the worker is killed and the session is poisoned, whether Python executes or waits on a host call | the run ends through the session's stop policy. Where Python yields (a host call, an `await`, a paused snapshot), `AbortFeed(KeyboardInterrupt)` ends the feed: `FeedRun` returns a `*RuntimeError` with `TypeName` `KeyboardInterrupt` and the session stays usable. Where Python never yields, the worker is killed when the policy's `Timeout` expires and `FeedRun` returns a `*SessionKilledError`. `Run.Stop` and `Session.Stop` use the same path with a chosen reason. |
+| Catching the stop in the sandbox | not applicable | by default the sandbox cannot catch it, because `AbortFeed` ends the feed. `StopPolicy.Catchable` raises the reason as an ordinary exception at the next host call or await instead, so `except KeyboardInterrupt` can run cleanup with further host calls; the kill at `Timeout` still applies. A catchable stop of a paused snapshot falls back to `AbortFeed`. |
+| `session.close()` during a running feed | the caller awaits the feed first | `Session.Close(ctx[, policy])` stops the running feed with the policy, then finishes the session; the context bounds only the caller's wait and the close continues in the background |
+| Pool shutdown | `close()` returns without waiting for checked-out sessions | `Pool.Shutdown(ctx[, policy])` closes every open session with the policy concurrently, running feeds stopped at once unless `Drain` is set, and waits for every worker within `ctx`; there is no separate force grace |
 | `MaxSuspensions` | counted per checkout, no unlimited | counted per checkout (session), reset by `LoadSession` and `LoadSnapshot`; `Unlimited` disables it |
 | `All` | a value | a function, `montygo.All()` |
 
-The v0.2.0 lifecycle is a deliberate Go-only cleanup. `Interrupt(ctx, reason)`
-becomes `Interrupt(ctx, InterruptOptions{Reason: reason}) (InterruptResult, error)`.
-Future subscriptions are per execution/call ID, not per shared Future object.
-Terminal cleanup cancels callback work and drops subscriptions without settling
-caller-owned Futures. Grace expiry can retire a worker while RunDone remains
-false. No wire or server protocol change is required.
+The v0.3.0 lifecycle is a deliberate Go-only design. One `StopPolicy` timeline
+(`Drain`, request, kill at `Timeout`, join) is owned by the library and resolved
+through `DefaultStopPolicy`, `Options.Stop` / `WebSocketOptions.Stop`,
+`CheckoutOptions.Stop` and the call. Future subscriptions are per execution/call
+ID, not per shared Future object. Terminal cleanup cancels callback work and
+drops subscriptions without settling caller-owned Futures. A kill can retire a
+worker while a Go callback still runs; `Stop` then reports `ErrCallbackDetached`
+after `Join`. No wire or server protocol change is required. The README lists
+the v0.2.0 → v0.3.0 renames.
 
 ## Not provided
 

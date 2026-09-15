@@ -70,6 +70,18 @@ func (a *answerer) callHost(ctx, cbCtx context.Context, run func(context.Context
 	return result, nil, callErr
 }
 
+// beforeResume prepares a resume; a catchable stop replaces the payload.
+func (a *answerer) beforeResume(ctx context.Context) (*wire.Exception, error) {
+	err := a.s.beforeResume(a.exec)
+	if errors.Is(err, errDeliverStop) {
+		return a.s.deliverStop(a.exec), nil
+	}
+	if err != nil {
+		return nil, a.stop(ctx, err)
+	}
+	return nil, nil
+}
+
 func (a *answerer) stop(ctx context.Context, err error) error {
 	return &abortedTurn{cause: a.s.abortOrTerminal(ctx, a.exec, a.pt, err)}
 }
@@ -79,22 +91,39 @@ func (a *answerer) registerFuture(callID uint32, fut *Future) error {
 }
 
 func (a *answerer) resumeWire(ctx context.Context, result wire.ExtResult) (*wire.Event, error) {
-	if err := a.s.beforeResume(a.exec); err != nil {
-		return nil, a.stop(ctx, err)
+	exc, err := a.beforeResume(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if exc != nil {
+		result = wire.ExtResult{Kind: wire.ExtError, Error: exc}
 	}
 	return a.s.co.Resume(ctx, result, a.pt.onPrint)
 }
 
 func (a *answerer) resumeLookup(ctx context.Context, result wire.ResumeNameLookup) (*wire.Event, error) {
-	if err := a.s.beforeResume(a.exec); err != nil {
-		return nil, a.stop(ctx, err)
+	exc, err := a.beforeResume(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if exc != nil {
+		result = wire.ResumeNameLookup{Kind: wire.LookupError, Error: exc}
 	}
 	return a.s.co.ResumeNameLookup(ctx, result, a.pt.onPrint)
 }
 
-func (a *answerer) resumeFutures(ctx context.Context, results []wire.FutureResult) (*wire.Event, error) {
-	if err := a.s.beforeResume(a.exec); err != nil {
-		return nil, a.stop(ctx, err)
+// resumeFutures answers the ids the worker waits on; a delivered stop
+// settles every one of them with the reason.
+func (a *answerer) resumeFutures(ctx context.Context, ids []uint32, results []wire.FutureResult) (*wire.Event, error) {
+	exc, err := a.beforeResume(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if exc != nil {
+		results = results[:0]
+		for _, id := range ids {
+			results = append(results, wire.FutureResult{CallID: id, Result: wire.ExtResult{Kind: wire.ExtError, Error: exc}})
+		}
 	}
 	a.s.life.mu.Lock()
 	for _, result := range results {
@@ -196,7 +225,7 @@ func (a *answerer) resumeOutcome(ctx, cbCtx context.Context, callID uint32, eage
 			if aborted != nil || errors.Is(err, errAborted) {
 				return aborted, err
 			}
-			return a.resumeFutures(ctx, []wire.FutureResult{a.settledResult(callID, v, err)})
+			return a.resumeFutures(ctx, []uint32{callID}, []wire.FutureResult{a.settledResult(callID, v, err)})
 		}
 		if err := a.registerFuture(callID, fut); err != nil {
 			var protocol *ProtocolError
@@ -417,7 +446,7 @@ func (a *answerer) answerResolveFutures(ctx context.Context, ids []uint32) (*wir
 			results = append(results, a.settledResult(id, f.value, f.err))
 		}
 	}
-	return a.resumeFutures(ctx, results)
+	return a.resumeFutures(ctx, ids, results)
 }
 
 func hostTypeName(v any) string {

@@ -72,8 +72,6 @@ type Config struct {
 	MontyVersion          string
 	ProtocolVersion       uint32
 	Metrics               Metrics
-	// OnShutdown is called by Shutdown when its context ends with sessions still checked out.
-	OnShutdown func()
 }
 
 type slot struct {
@@ -380,28 +378,15 @@ func (p *Pool) Close(ctx context.Context) error {
 	return nil
 }
 
-// Shutdown closes the pool and waits for every worker. When ctx ends first,
-// OnShutdown runs so the owner can end its sessions, and the wait continues briefly.
+// Shutdown closes the pool and waits for every worker to exit within ctx.
 func (p *Pool) Shutdown(ctx context.Context) error {
 	_ = p.Close(ctx)
-	if p.waitDrained(ctx) == nil {
-		p.stopReapers()
-		return nil
+	if err := p.waitDrained(ctx); err != nil {
+		return err
 	}
-	if p.cfg.OnShutdown != nil {
-		p.cfg.OnShutdown()
-	}
-	fctx, cancel := context.WithTimeout(context.Background(), shutdownForceGrace)
-	defer cancel()
-	err := p.waitDrained(fctx)
-	if err == nil {
-		p.stopReapers()
-		return nil
-	}
-	return ctx.Err()
+	p.stopReapers()
+	return nil
 }
-
-const shutdownForceGrace = 5 * time.Second
 
 func (p *Pool) waitDrained(ctx context.Context) error {
 	for {

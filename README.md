@@ -79,85 +79,173 @@ session.FeedRun(ctx, "x * 2", nil) // int64(42)
 
 `CheckoutOptions.ScriptName` names the script in tracebacks and type-checking diagnostics.
 
-`Session.Close(ctx)` waits within the caller's budget and returns the worker to
-the pool. A timeout while waiting leaves the session open. `CloseNow` kills and
-retires the worker without joining Go callbacks. Later results report
-`ErrSessionClosed`, which does **not** match `ErrSessionLost`. `Session.Done`
-and `Session.Err` report closure or loss, including worker death while idle.
+`Session.Close(ctx)` stops a running feed with the session's [stop policy](#stopping-a-run),
+invalidates a paused snapshot and returns the worker to the pool, so
+`defer session.Close(ctx)` is always safe. The context bounds only the caller's
+wait: when it ends first, `Close` returns `ctx.Err()` and the close continues in
+the background. `Close(ctx, montygo.KillNow)` kills and retires the worker
+without joining Go callbacks. Later results report `ErrSessionClosed`, which
+does **not** match `ErrSessionLost`. `Session.Done` and `Session.Err` report
+closure or loss, including worker death while idle, and `Session.State` reports
+`SessionIdle`, `SessionRunning`, `SessionPaused` or `SessionClosed`.
 
 One execution owns a session, including while a snapshot is paused. Overlapping
 feeds and incompatible control calls return `ErrSessionBusy`; they never queue.
 
-## Interrupting a feed
+## One-shot runs
+
+`Pool.Run` checks out a session, feeds once and closes it:
+
+```go
+result, err := pool.Run(ctx, "sum(range(n))", &montygo.RunOptions{
+	FeedOptions: montygo.FeedOptions{Inputs: map[string]any{"n": 10}},
+}) // int64(45)
+```
+
+`RunOptions` embeds `CheckoutOptions` and `FeedOptions`; a nil pointer uses the
+defaults. The close after the feed is bounded by the session's stop policy
+(`Timeout + Join`), never by a cancelled caller context.
+
+## Stopping a run
 
 `Session.Go` registers a feed before returning its `*Run`, then drives it on a
-goroutine. An immediate interrupt cannot miss it. `Run.Interrupt` always targets
-that run, even after the session starts another execution.
-`Session.Interrupt` (or `Run.Interrupt`) stops it from any goroutine:
+goroutine, so an immediate stop cannot miss it. `Run.Stop` ends that run, and
+only that run, from any goroutine. The library owns the whole procedure:
 
 ```go
 lookup := map[string]any{"wait": func(ctx context.Context) error {
-	<-ctx.Done() // the host call's context ends on Interrupt
+	<-ctx.Done() // the host call's context ends on Stop
 	return ctx.Err()
 }}
 run := session.Go(ctx, "wait()", &montygo.FeedOptions{ExternalLookup: lookup})
-result, stopErr := run.Interrupt(ctx, montygo.InterruptOptions{
-	Grace: montygo.DurationPtr(250 * time.Millisecond),
-})
-if stopErr != nil {
-	return stopErr // InterruptPending means the watchdog still owns the request
-}
-if !result.RunDone {
-	_, _ = run.WaitContext(ctx) // use an application shutdown budget here
-}
-_, err := run.Wait()               // *RuntimeError, TypeName KeyboardInterrupt
-session.FeedRun(ctx, "1 + 1", nil) // the session is still usable after BeforeStart/Aborted
+stopped, err := run.Stop(ctx) // KeyboardInterrupt now, kill after 3 s, join the callback
+// err == nil, stopped.How == montygo.StopAborted, stopped.SessionKept() == true
+// stopped.Err is a *RuntimeError with TypeName KeyboardInterrupt
+session.FeedRun(ctx, "1 + 1", nil) // the session is still usable
 ```
 
-`InterruptOptions.Reason` defaults to `KeyboardInterrupt`; `Raise` selects another
-exception. `Grace` is a `*time.Duration`: nil inherits the checkout default
-(100 ms), zero forces immediately, and negative values are invalid. The first
-accepted reason wins; subsequent requests can shorten, never extend, the deadline.
+A stop follows one timeline, described by a `StopPolicy`:
 
-Before the first send, interruption reports `InterruptBeforeStart`. At a
-suspension, `AbortFeed` reports `InterruptAborted` and preserves the session; Python
-cannot catch it. At grace expiry, the worker is killed and retired, including
-when a Go callback ignores cancellation. The result is `InterruptKilled` and
-`SessionErr` is a `*SessionKilledError` wrapping the reason and matching
-`ErrSessionLost`. `RunDone` stays false until remaining synchronous Go work returns.
+| Time | Phase | Effect |
+|---|---|---|
+| t0 | `Stop` called | with `Drain > 0`, the run may still end on its own |
+| t0 + `Drain` | request | `Reason` (default `KeyboardInterrupt`) is delivered at the next host call, await or suspension; the callback context is cancelled. By default the delivery is an uncatchable `AbortFeed`; with `Catchable` it is an ordinary exception |
+| + `Timeout` | kill | the run has not ended: the worker is killed and the session is lost (`*SessionKilledError`) |
+| + `Join` | join | a Go callback that still runs after the kill makes `Stop` return `ErrCallbackDetached` |
 
-The Interrupt context limits waiting, not the accepted request. Timeout reports
-`InterruptPending`; the watchdog continues. `Run.WaitContext(ctx)` only waits and
-never requests cancellation. Other outcomes are `InterruptNotRunning`,
-`InterruptAlreadyFinished`, and `InterruptFinished` for a completion race;
-`InterruptUnknown` is the zero value. Check `SessionErr` to decide whether to reuse
-the session. Cancelling the feed context during Python execution still kills the
-worker immediately; at a suspension it requests the cooperative abort path.
+Python that never yields (`while True: pass`) is killed at `Timeout`. Python
+that yields, through a host call, an `await` or a paused snapshot, is aborted
+and the session is kept.
+
+`Stop` returns a `Stopped{How, Err, SessionErr}`. `How` is a `StopKind` whose
+`String()` is one of `pending`, `not running`, `aborted`, `killed` or
+`finished`; `Err` is what `Run.Wait` returns; `SessionErr` is the session's
+terminal error, and `SessionKept()` reports whether the session is still usable.
+A run that ended on its own reports `StopFinished` with its own result, also
+when the worker died or the server closed the connection (`Err` is then the
+loss error and `SessionErr` is set, so check `SessionKept`, not the kind). A
+caught catchable stop that then ends normally is `StopFinished`; an uncaught
+one is `StopAborted`. `Session.Stop` targets whatever is running or paused and
+reports `StopNotRunning` on an idle session.
+
+The context bounds only the caller's wait. When it ends first, `Stop` returns
+`Stopped{How: StopPending}` and `ctx.Err()`, and the stop continues to its
+deadlines; `Run.Wait` or `Run.WaitContext` observe the end. A second `Stop` on
+the same run joins the first and can only shorten its deadlines; the first
+`Reason` and `Catchable` win.
+
+### Policy levels
+
+```go
+montygo.DefaultStopPolicy = montygo.StopPolicy{Timeout: 3 * time.Second, Join: 3 * time.Second} // process-wide; set before creating pools
+pool, _ := montygo.New(ctx, montygo.Options{Stop: montygo.StopPolicy{Timeout: time.Second}})        // per pool (also WebSocketOptions.Stop)
+session, _ := pool.Checkout(ctx, montygo.CheckoutOptions{Stop: montygo.StopPolicy{Catchable: true}}) // per session
+stopped, _ := run.Stop(ctx, montygo.StopPolicy{Reason: montygo.Raise("TimeoutError", "budget spent")}) // per call
+```
+
+Zero fields inherit from the level above, so a call only names what it changes.
+`Drain` and `Join` MUST be non-negative (`*OptionError` otherwise), and at most
+one policy may be passed per call. `montygo.KillNow` (`Timeout: -1`) kills at
+once, without a request phase. Because `false` is the zero value, `Catchable`
+cannot be switched off per call once a checkout set it; use `KillNow` or a
+short `Timeout` instead. The same policy ends a run whose feed context is
+cancelled (`Go`, `FeedRun` and `FeedStart` steps): `FeedRun` returns
+`KeyboardInterrupt` with the session kept when Python yields, or a
+`*SessionKilledError` after `Timeout`.
+
+### Catchable stops
+
+With `Catchable`, the reason is raised inside the sandbox at the next host call
+or await, so `except KeyboardInterrupt` can run cleanup that makes further host
+calls. Pending futures registered before the request are cancelled with the old
+callback context; host calls made after the delivery get a live context. The
+run is still killed at `Timeout` if it does not end.
+
+```go
+script := `try:
+    wait()
+except KeyboardInterrupt:
+    result = cleanup()
+result`
+run := session.Go(ctx, script, &montygo.FeedOptions{ExternalLookup: lookup})
+stopped, err := run.Stop(ctx, montygo.StopPolicy{Catchable: true})
+result, _ := run.Wait() // "cleaned up"; stopped.How == montygo.StopFinished
+```
+
+A catchable stop of a paused `FeedStart` snapshot falls back to the uncatchable
+`AbortFeed`, because the application owns the snapshot chain.
 
 `montygo.AsyncContext(ctx, fn)` starts asynchronous host work under the
 callback context, so it observes the same cancellation; `montygo.Async` cannot
 be cancelled.
 
+## Slots
+
+`Pool.Slot` returns a holder that owns at most one session checked out with
+fixed options. It checks out lazily, and again after the session is lost, so a
+long-lived service always has a usable session. Sandbox state is not restored
+after a loss; re-feed the setup.
+
+```go
+slot := pool.Slot(montygo.CheckoutOptions{})
+defer slot.Close(ctx)
+
+slot.State()                        // idle: no session yet
+slot.FeedRun(ctx, "x = 21", nil)    // checks out
+slot.FeedRun(ctx, "x * 2", nil)     // 42, same session
+run, err := slot.Go(ctx, "wait()", &montygo.FeedOptions{ExternalLookup: lookup})
+stopped, _ := run.Stop(ctx, montygo.KillNow) // killed; the session is lost
+slot.FeedRun(ctx, "x", nil)         // a fresh session: NameError
+```
+
+`Slot.Go`, `FeedRun` and `FeedStart` return `ErrSessionBusy` while an execution
+is running or paused, and `ErrSessionClosed` after `Slot.Close`. `Slot.Session`
+is the current session or nil, `Slot.State` its state (`SessionIdle` without
+one, `SessionClosed` after `Close`), and `Slot.Stop` stops whatever it runs.
+
 ### Lifecycle choice
 
 | Need | Use | Completion guarantee |
 |---|---|---|
-| Execute and wait | `FeedRun` | returns after the driver finishes |
+| Run one snippet | `Pool.Run` | checkout, feed and close in one call |
+| Execute and wait | `FeedRun` | returns after the run ends; a cancelled context ends it through the stop policy |
 | Execute in background | `Go` | execution is registered before return; inspect `Wait` for admission errors |
-| Stop one execution | `Run.Interrupt` | outcome identifies abort, kill, or independent completion |
-| Stop the current execution or snapshot | `Session.Interrupt` | captures one owner; idle returns `InterruptNotRunning` |
+| Stop one run | `Run.Stop(ctx[, policy])` | returns when the run has ended: aborted, killed or finished on its own |
+| Stop the current run or snapshot | `Session.Stop(ctx[, policy])` | idle returns `StopNotRunning` |
 | Wait within a budget | `Run.WaitContext` | waiting only; no cancellation |
-| Gracefully return a session | `Session.Close` | context bounds waiting; paused handles are invalidated |
-| End a session immediately | `Session.CloseNow` | worker retirement starts; callbacks can remain active |
+| Return a session | `Session.Close(ctx[, policy])` | stops a running feed first; ctx bounds the wait, the close continues |
+| End a session at once | `Session.Close(ctx, montygo.KillNow)` | worker retirement starts; callbacks can remain active |
+| Inspect a session | `Session.State`, `Session.Err`, `Session.Done` | coarse state; terminal cause; closure |
+| Keep one usable session | `Pool.Slot` | re-checks out after a loss; one execution at a time |
 | End pool admission | `Pool.Close` | checked-out sessions retain their lifecycle |
-| Drain and force at deadline | `Pool.Shutdown` | retains the documented five-second force grace |
+| Stop everything | `Pool.Shutdown(ctx[, policy])` | every open session is closed with the policy; waits for every worker within ctx |
 | Stable host API | `Host` | validate registrations and stubs before checkout |
 | Per-feed override | `ExternalLookup` | an explicitly present entry overrides `Host` |
 
-Successful host-side writes are not rolled back when `AbortFeed` ends Python.
+Successful host-side writes are not rolled back when a stop ends Python.
 Applications remain responsible for transaction and idempotency policy. To
-reuse a session, check `Session.Err()==nil` and handle a concurrent
-`ErrSessionBusy` admission result.
+reuse a session, check `Stopped.SessionKept()` or `Session.Err() == nil` and
+handle a concurrent `ErrSessionBusy` admission result.
 
 ## Backends
 
@@ -177,26 +265,26 @@ checkout. Pin `BinaryPath` when the environment is not trusted.
 ### Pool lifecycle
 
 `MinProcesses` (default 1) workers are prewarmed and `MaxProcesses` caps live
-workers. `Pool.Stats` counts them by state, and `Pool.Shutdown` waits for open
-sessions and retiring workers, where `Pool.Close` only retires idle workers:
+workers. `Pool.Stats` counts them by state. `Pool.Shutdown` ends admission,
+closes every open session with the stop policy concurrently and waits for every
+worker to exit, where `Pool.Close` only retires idle workers:
 
 ```go
 pool, _ := montygo.New(ctx, montygo.Options{MaxProcesses: 2})
 session, _ := pool.Checkout(ctx, montygo.CheckoutOptions{})
 fmt.Printf("%+v\n", pool.Stats()) // {Starting:0 Active:1 Idle:0 Retiring:0}
 
-go func() {
-	session.FeedRun(ctx, "1 + 1", nil)
-	session.Close(ctx)
-}()
-pool.Shutdown(ctx) // waits for the session and every worker
+run := session.Go(ctx, "sum(range(10))", nil)
+pool.Shutdown(ctx, montygo.StopPolicy{Drain: 5 * time.Second}) // lets the run end, closes the session, waits for the workers
+run.Wait()                                                        // 45; session.State() == montygo.SessionClosed
 ```
 
-A worker leaving a session is retired asynchronously and counts toward
-`MaxProcesses` until it has exited. When `Shutdown`'s context ends first, open
-sessions are closed with `CloseNow`, the wait continues for 5 s, and the
-context error is returned when workers remain. `Checkout` after `Shutdown`
-returns `ErrPoolClosed`.
+Without `Drain`, running feeds are stopped at once: `KeyboardInterrupt` where
+Python yields, a kill at `Timeout` where it does not. There is no separate
+force grace. A worker leaving a session is retired asynchronously and counts
+toward `MaxProcesses` until it has exited. The context bounds only the caller's
+wait: `Shutdown` returns `ctx.Err()` when workers remain, and the stops continue.
+`Checkout` after `Shutdown` returns `ErrPoolClosed`.
 
 ## Inputs
 
@@ -269,7 +357,21 @@ host.Func("add", func(a, b int) int { return a + b },
 
 Labels exclude `context.Context` and trailing `Kwargs`, but include a variadic
 parameter. Supplied labels must match the signature, be unique, and not be
-Python keywords. Direct `Function` implementations retain generic stubs.
+Python keywords. Direct `Function` implementations retain generic stubs. The
+`/` marker follows a fixed parameter only, so a parameterless method renders as
+`def reset(self) -> None: ...`.
+
+Methods are labelled by sandbox name through `ClassInstanceOptions.ParameterNames`
+and `ClassTypeOptions.ParameterNames`, which covers statics and instance methods
+of a host class. Every key must name an exposed method, every list must match
+its signature, and instance names override class names:
+
+```go
+host.Object("wallet", &Wallet{Balance: 100}, montygo.ClassInstanceOptions{
+	AllowedMethods: montygo.Expose[Payer](),
+	ParameterNames: map[string][]string{"pay": {"amount"}}, // def pay(self, amount: int, /) -> Any: ...
+})
+```
 
 ## Class instances
 
@@ -521,7 +623,8 @@ var typingErr *montygo.TypingError // errors.As(err, &typingErr); typingErr.Diag
 | `*montygo.ProtocolError` | a protocol violation; the session is lost |
 | `*montygo.ResourceError` | a host-side bound (`MaxHostObjects`, `MaxPendingFutures`) was reached; the session stays usable |
 | `*montygo.ConversionError` | a host value cannot cross into the sandbox |
-| `*montygo.SessionKilledError` | interruption forced worker termination; wraps the first reason |
+| `*montygo.SessionKilledError` | a stop killed the worker at `Timeout`; wraps the stop reason |
+| `montygo.ErrCallbackDetached` | `Stop` returned after a kill, but a Go callback still runs past `Join` |
 | `montygo.ErrSessionBusy` | another execution or incompatible control operation owns the session |
 | `montygo.ErrSessionClosed` | deliberate closure; not session loss |
 
@@ -647,6 +750,27 @@ include source code, inputs, outputs and printed text.
 | class instance | the original host object, or `*montygo.ClassProxy` |
 
 Inputs also accept Go integer and float kinds, slices, arrays and maps (keys sorted).
+
+## Migration from v0.2.0
+
+v0.3.0 replaces the interrupt mechanism with the stop policy. Removed names and
+their replacements:
+
+| v0.2.0 | v0.3.0 |
+|---|---|
+| `Run.Interrupt(ctx, InterruptOptions{...})` | `Run.Stop(ctx[, StopPolicy{...}])` |
+| `Session.Interrupt(ctx, InterruptOptions{...})` | `Session.Stop(ctx[, StopPolicy{...}])` |
+| `InterruptOptions.Reason` / `Grace` | `StopPolicy.Reason` / `Timeout` |
+| `InterruptResult{Outcome, RunDone, SessionErr}` | `Stopped{How, Err, SessionErr}`; `Stop` returns after the run ended |
+| `InterruptOutcome` and `InterruptAborted`, `InterruptKilled`, `InterruptFinished`, `InterruptNotRunning`, `InterruptPending` | `StopKind` and `StopAborted`, `StopKilled`, `StopFinished`, `StopNotRunning`, `StopPending` |
+| `InterruptBeforeStart`, `InterruptAlreadyFinished`, `InterruptUnknown` | `StopAborted`, `StopFinished`; no zero-value outcome |
+| `CheckoutOptions.InterruptGrace` | `CheckoutOptions.Stop.Timeout`; also `Options.Stop`, `WebSocketOptions.Stop`, `DefaultStopPolicy` |
+| `Session.CloseNow()` | `Session.Close(ctx, montygo.KillNow)` |
+| `Session.Close(ctx)` waiting for a running feed and leaving the session open on timeout | `Session.Close(ctx[, policy])` stops the feed first; on timeout it returns `ctx.Err()` and the close continues |
+| `Pool.Shutdown(ctx)` with a 5 s force grace | `Pool.Shutdown(ctx[, policy])` stops sessions with the policy; ctx bounds the wait only |
+| a cancelled feed context killing the worker while Python runs | the session's stop policy: `KeyboardInterrupt`, then a kill at `Timeout` |
+
+`DurationPtr` stays for `PrintFlushInterval`.
 
 ## Development
 

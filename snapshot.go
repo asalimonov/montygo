@@ -102,7 +102,9 @@ func (s *Session) publishPause(e *execution, token *snapshotToken) error {
 	if err := s.executionErrorLocked(e); err != nil {
 		return err
 	}
-	if e.stop != nil {
+	if e.stop != nil && e.stop.requested {
+		// A catchable stop cannot be delivered through an application-driven
+		// snapshot chain; it falls back to AbortFeed.
 		return errExecutionInterrupted
 	}
 	if e.sequence == math.MaxUint64 {
@@ -169,12 +171,13 @@ func (d *snapshotDriver) run(ctx context.Context, token *snapshotToken, fn func(
 	if err := d.s.claimSnapshot(ctx, token); err != nil {
 		return nil, err
 	}
-	d.pt.ctx = ctx
+	d.pt.ctx = context.WithoutCancel(ctx)
 	return d.advance(fn())
 }
 
 func (d *snapshotDriver) resume(ctx context.Context, token *snapshotToken, fn func(context.Context) (*wire.Event, error)) (Snapshot, error) {
-	return d.run(ctx, token, func() (*wire.Event, error) { return fn(ctx) })
+	wctx := context.WithoutCancel(ctx)
+	return d.run(ctx, token, func() (*wire.Event, error) { return fn(wctx) })
 }
 
 func (d *snapshotDriver) resumeValue(ctx context.Context, v any) (*wire.Event, error) {
@@ -200,7 +203,8 @@ func (d *snapshotDriver) dump(ctx context.Context, token *snapshotToken) ([]byte
 }
 
 func (d *snapshotDriver) resumeAuto(ctx context.Context, token *snapshotToken, ev *wire.Event) (Snapshot, error) {
-	return d.run(ctx, token, func() (*wire.Event, error) { return d.ans.answer(ctx, ev) })
+	wctx := context.WithoutCancel(ctx)
+	return d.run(ctx, token, func() (*wire.Event, error) { return d.ans.answer(wctx, ev) })
 }
 
 // FunctionSnapshot is paused at an external function, host method or OS call.
@@ -332,7 +336,7 @@ func (f *FutureSnapshot) Resume(ctx context.Context, results []FutureResolution)
 		for _, r := range results {
 			out = append(out, f.d.ans.settledResult(r.CallID, r.Value, r.Err))
 		}
-		return f.d.ans.resumeFutures(ctx, out)
+		return f.d.ans.resumeFutures(ctx, f.PendingCallIDs, out)
 	})
 }
 

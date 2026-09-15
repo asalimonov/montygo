@@ -33,6 +33,8 @@ type WebSocketOptions struct {
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 	// Telemetry selects this pool's telemetry; nil uses the process-wide installation.
 	Telemetry *TelemetryComponents
+	// Stop is the default stop policy of this pool's sessions; zero fields inherit DefaultStopPolicy.
+	Stop StopPolicy
 }
 
 // NewWebSocket creates a pool whose sessions each dial a fresh, single-use
@@ -49,6 +51,7 @@ func NewWebSocket(ctx context.Context, opts WebSocketOptions) (*Pool, error) {
 		MaxProcesses:    opts.MaxProcesses,
 		CheckoutTimeout: opts.CheckoutTimeout,
 		RequestTimeout:  timeout,
+		Stop:            opts.Stop,
 	}, opts.dialer(timeout), BackendWebSocket, "", true, resolveRecorder(opts.Telemetry))
 	if err != nil {
 		return nil, err

@@ -97,6 +97,7 @@ func openPool(ctx context.Context, b montygo.Backend, opts montygo.Options) (*mo
 		CheckoutTimeout: opts.CheckoutTimeout,
 		RequestTimeout:  timeout,
 		Telemetry:       opts.Telemetry,
+		Stop:            opts.Stop,
 	})
 }
 

@@ -55,6 +55,30 @@ func TestTimeouts_TurnTimeoutIncludesHostCallback(t *testing.T) {
 	s.WaitMetric("monty_server_timeouts_total", map[string]string{"kind": "turn"}, 1, 5*time.Second)
 }
 
+func TestTimeouts_ServerCloseDuringStop(t *testing.T) {
+	t.Parallel()
+	s := SetupServer(t, WithArgs("--turn-timeout", "1"))
+	ctx := testCtx(t)
+	p := s.NewPool(montygo.WebSocketOptions{})
+	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
+
+	started := make(chan struct{})
+	stubborn := func() int {
+		close(started)
+		time.Sleep(2500 * time.Millisecond)
+		return 1
+	}
+	run := session.Go(ctx, "stubborn()", &montygo.FeedOptions{ExternalLookup: map[string]any{"stubborn": stubborn}})
+	<-started
+	stopped, err := run.Stop(ctx, montygo.StopPolicy{Timeout: 10 * time.Second})
+	require.NoError(t, err)
+	require.Equal(t, montygo.StopFinished, stopped.How, "the server ended the run, not the stop")
+	var de *montygo.DisconnectError
+	require.ErrorAs(t, stopped.Err, &de)
+	require.False(t, stopped.SessionKept())
+	require.Equal(t, montygo.SessionClosed, session.State())
+}
+
 func TestTimeouts_SessionTimeout(t *testing.T) {
 	t.Parallel()
 	requireSlowTests(t)
