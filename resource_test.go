@@ -82,7 +82,7 @@ func TestResourceBounds(t *testing.T) {
 
 func TestPendingBytes(t *testing.T) {
 	eachBackend(t, func(t *testing.T, b montygo.Backend) {
-		if b == montygo.BackendWebSocket {
+		if remoteBackend(b) {
 			t.Skip("the byte bound applies to local workers only")
 		}
 		t.Run("a small bound throttles a flood of print frames", func(t *testing.T) {

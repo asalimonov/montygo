@@ -13,6 +13,11 @@ type Run struct {
 
 // Go runs FeedRun on its own goroutine and returns a handle to wait on or interrupt.
 func (s *Session) Go(ctx context.Context, code string, opts *FeedOptions) *Run {
+	if err := s.rotateIfDue(ctx); err != nil {
+		e := &execution{phase: executionFinished, done: make(chan struct{}), err: err}
+		close(e.done)
+		return &Run{s: s, exec: e}
+	}
 	e, err := s.reserveExecution(ctx)
 	if err != nil {
 		e = &execution{phase: executionFinished, done: make(chan struct{}), err: err}

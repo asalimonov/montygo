@@ -45,6 +45,10 @@ type Session struct {
 	host       *Host
 	limits     sessionLimits
 	life       lifecycle
+	// cfg configures every worker this session runs on, including one it rotates to.
+	cfg wire.Configure
+	// conn tracks the current connection's deadline and rotation timer.
+	conn connection
 }
 
 func (s *Session) ensureUsable() error { return s.Err() }
@@ -185,6 +189,9 @@ func cwdPtr(cwd string) *string {
 
 // FeedRun executes one snippet. An overlapping operation returns ErrSessionBusy.
 func (s *Session) FeedRun(ctx context.Context, code string, opts *FeedOptions) (any, error) {
+	if err := s.rotateIfDue(ctx); err != nil {
+		return nil, err
+	}
 	e, err := s.reserveExecution(ctx)
 	if err != nil {
 		return nil, err
@@ -263,6 +270,9 @@ func (s *Session) drive(ctx context.Context, e *execution, ev *wire.Event, err e
 
 // FeedStart starts a snippet and retains ownership across its snapshot chain.
 func (s *Session) FeedStart(ctx context.Context, code string, opts *FeedOptions) (snap Snapshot, err error) {
+	if err := s.rotateIfDue(ctx); err != nil {
+		return nil, err
+	}
 	e, err := s.reserveExecution(ctx)
 	if err != nil {
 		return nil, err
@@ -314,6 +324,9 @@ func (s *Session) failedLoad(err error) error { return s.poison(err) }
 
 // LoadSession restores an idle dump into a fresh session.
 func (s *Session) LoadSession(ctx context.Context, state []byte) error {
+	if err := s.rotateIfDue(ctx); err != nil {
+		return err
+	}
 	release, err := s.reserveControl(ctx, false)
 	if err != nil {
 		return err
@@ -341,6 +354,9 @@ func (s *Session) LoadSession(ctx context.Context, state []byte) error {
 
 // LoadSnapshot restores a suspended dump into a fresh session.
 func (s *Session) LoadSnapshot(ctx context.Context, state []byte, opts *LoadSnapshotOptions) (snap Snapshot, err error) {
+	if err := s.rotateIfDue(ctx); err != nil {
+		return nil, err
+	}
 	e, err := s.reserveExecution(ctx)
 	if err != nil {
 		return nil, err
@@ -385,6 +401,9 @@ func (s *Session) LoadSnapshot(ctx context.Context, state []byte, opts *LoadSnap
 
 // Dump serializes an idle or paused session; a running turn returns ErrSessionBusy.
 func (s *Session) Dump(ctx context.Context) ([]byte, error) {
+	if err := s.rotateIfDue(ctx); err != nil {
+		return nil, err
+	}
 	release, err := s.reserveControl(ctx, true)
 	if err != nil {
 		return nil, err
@@ -399,6 +418,9 @@ func (s *Session) Dump(ctx context.Context) ([]byte, error) {
 
 // InstallDependencies installs packages into a CPython worker's session.
 func (s *Session) InstallDependencies(ctx context.Context, requirements []string) error {
+	if err := s.rotateIfDue(ctx); err != nil {
+		return err
+	}
 	release, err := s.reserveControl(ctx, false)
 	if err != nil {
 		return err

@@ -65,7 +65,7 @@ func plRequireMemoryError(t *testing.T, b montygo.Backend, err error) {
 	var rt *montygo.RuntimeError
 	require.ErrorAs(t, err, &rt)
 	require.Equal(t, "MemoryError", rt.Exception().TypeName)
-	if b != montygo.BackendWebSocket {
+	if !remoteBackend(b) {
 		require.Equal(t, "MemoryError: the worker exceeded its memory limit and was terminated", rt.Error())
 	}
 }

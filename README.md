@@ -257,6 +257,7 @@ handle a concurrent `ErrSessionBusy` admission result.
 | `BackendNative` | `monty subprocess` children | crash isolation by process; unix only |
 | `BackendWasm` | embedded wasip1 worker under wazero | in-process; compiled once per process and cached on disk (`Options.WasmCacheDir`) |
 | `NewWebSocket` | a remote worker per checkout | see [WebSocket workers](#websocket-workers) |
+| `NewDocker` | a `monty-server` container montygo starts and owns | image resolved from this package's version; see [Docker-managed server](#docker-managed-server) |
 
 The native binary resolves from `Options.BinaryPath`, then `MONTY_BIN`, then
 `PATH`, then a cargo `target/` directory in an ancestor or a sibling `monty`
@@ -655,6 +656,12 @@ if err := montygo.CheckWebSocketHealth(ctx, opts); err != nil {
 pool, _ := montygo.NewWebSocket(ctx, opts)
 ```
 
+`Supervisor` replaces `URL` and `ConnectHeaders` when the server's address is not
+fixed: it resolves an endpoint before every dial, `Recovery` retries a failed
+dial, and `RotateSessions` moves a session to a fresh connection before the
+server's session timeout ends it. See
+[docs/architecture/supervisor.md](docs/architecture/supervisor.md).
+
 Each checkout dials a single-use worker. `TLSConfig` configures `wss://` dials
 and `DialContext` replaces the TCP dialer. `CheckWebSocketHealth` sends
 `GET <path>/health` through the same transport with the connect headers. A dropped connection raises
@@ -709,6 +716,55 @@ ingress or reverse proxy and dial it with a `wss://` URL and `TLSConfig`, as in
 [WebSocket workers](#websocket-workers). See
 [docs/architecture/server.md](docs/architecture/server.md) and
 [docs/architecture/docker.md](docs/architecture/docker.md).
+
+### Docker-managed server
+
+`montygo.NewDocker` starts that image for you through the local `docker` CLI and
+returns a pool that dials it:
+
+```go
+pool, err := montygo.NewDocker(ctx, montygo.DockerOptions{MaxProcesses: 8})
+if err != nil {
+	return err
+}
+defer pool.Shutdown(ctx) // stops and removes the container
+```
+
+The image tag comes from this package's own version, so a program built against
+`montygo v0.3.0` runs `ghcr.io/asalimonov/monty-server:0.3.0`:
+
+| `BindingVersion()` | Images tried, in order |
+|---|---|
+| `0.3.0` | `…/monty-server:0.3.0` |
+| `0.3.0-3f2a9c1`, `0.3.0-3f2a9c1-dirty` | that exact tag, then `…/monty-server:0.3.0` |
+| a Go pseudo-version | the release it follows |
+| `(devel)`, `0.0.0-unknown` | none; set an override or stamp `-ldflags "-X github.com/asalimonov/montygo.buildVersion=…"` |
+
+Each candidate is used from the local daemon when present, else pulled.
+`DockerOptions.Image` and `DockerOptions.Version`, or `MONTYGO_DOCKER_IMAGE` and
+`MONTYGO_DOCKER_VERSION`, override the repository and the tag; an option wins
+over a variable, and an explicit version or a pinned `repo:tag` reference is used
+verbatim.
+
+The container runs read-only with no capabilities on an ephemeral loopback port,
+with a random dump key. montygo disables the server's idle timeout and its memory
+and duration ceilings, so `CheckoutOptions.Limits` governs as on the local
+backends; the session and turn timeouts stay at their defaults. `DockerOptions.Env`
+sets any `MONTY_SERVER_*` variable, and `DockerOptions.RunArgs` adds `docker run`
+flags such as `--memory 2g`.
+
+Sessions rotate before the server's one-hour session timeout: montygo dumps the
+session, reconnects and restores it, keeping the same `*Session`. A rotation that
+cannot complete returns `*montygo.RotationError`, whose `Dump` restores the state
+on a new session. `DockerOptions.Recovery` retries a failed dial (3 attempts of
+5 s by default) and, with `RestartServer`, restarts the container once before
+retrying.
+
+`NewDocker` needs a local Docker daemon. For servers on other hosts, implement
+`montygo.ServerSupervisor` and pass it to `NewWebSocket`. A container left by a
+process that died carries the label `io.montygo.supervisor`; remove leftovers
+with `docker rm -f $(docker ps -aq --filter label=io.montygo.supervisor)`. See
+[docs/architecture/supervisor.md](docs/architecture/supervisor.md).
 
 ## Observability
 

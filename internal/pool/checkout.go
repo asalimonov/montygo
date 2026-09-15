@@ -73,24 +73,8 @@ func (p *Pool) Checkout(ctx context.Context, cfg wire.Configure, opts CheckoutOp
 	}
 	cfg.MontyVersion = p.cfg.MontyVersion
 	cfg.ProtocolVersion = p.cfg.ProtocolVersion
-	c := &Checkout{pool: p, lease: checkoutLease{slot: s, worker: s.w}, started: time.Now(), worker: s.w, done: s.w.Done()}
-	if opts.Observe != nil {
-		pid, hasPID := s.w.PID()
-		if o := opts.Observe(pid, hasPID); o != nil {
-			s.obs = &observer{o: o}
-			c.obs = s.obs
-		}
-	}
-	c.budget.suspensionLimit = DefaultMaxSuspensions
-	if cfg.Limits != nil {
-		if cfg.Limits.MaxDurationMicros != nil {
-			d := time.Duration(*cfg.Limits.MaxDurationMicros) * time.Microsecond
-			c.budget.durationBudget = &d
-		}
-		if cfg.Limits.MaxSuspensions != nil {
-			c.budget.suspensionLimit = *cfg.Limits.MaxSuspensions
-		}
-	}
+	c := p.newCheckout(s, opts)
+	c.applyLimits(cfg)
 	ev, err := c.turn(ctx, cfg, true, nil)
 	if err != nil {
 		c.drop("discarded")
@@ -101,6 +85,32 @@ func (p *Pool) Checkout(ctx context.Context, cfg wire.Configure, opts CheckoutOp
 		return nil, protocolError("unexpected reply to Configure: %s", ev.Kind)
 	}
 	return c, nil
+}
+
+func (p *Pool) newCheckout(s *slot, opts CheckoutOptions) *Checkout {
+	c := &Checkout{pool: p, lease: checkoutLease{slot: s, worker: s.w}, started: time.Now(), worker: s.w, done: s.w.Done()}
+	if opts.Observe != nil {
+		pid, hasPID := s.w.PID()
+		if o := opts.Observe(pid, hasPID); o != nil {
+			s.obs = &observer{o: o}
+			c.obs = s.obs
+		}
+	}
+	return c
+}
+
+func (c *Checkout) applyLimits(cfg wire.Configure) {
+	c.budget.suspensionLimit = DefaultMaxSuspensions
+	if cfg.Limits == nil {
+		return
+	}
+	if cfg.Limits.MaxDurationMicros != nil {
+		d := time.Duration(*cfg.Limits.MaxDurationMicros) * time.Microsecond
+		c.budget.durationBudget = &d
+	}
+	if cfg.Limits.MaxSuspensions != nil {
+		c.budget.suspensionLimit = *cfg.Limits.MaxSuspensions
+	}
 }
 
 // PID returns the worker's process id when it has one and no turn is running.

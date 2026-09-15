@@ -3,6 +3,7 @@ package montygo
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"runtime"
 	"sort"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/asalimonov/montygo/internal/pool"
+	"github.com/asalimonov/montygo/internal/wire"
 	"github.com/asalimonov/montygo/internal/telemetry"
 	"github.com/asalimonov/montygo/internal/wasmblob"
 	"github.com/asalimonov/montygo/internal/worker"
@@ -25,6 +27,8 @@ const (
 	BackendNative
 	BackendWasm
 	BackendWebSocket
+	// BackendDocker reaches monty-server in a container montygo runs; see NewDocker.
+	BackendDocker
 )
 
 func (b Backend) String() string {
@@ -35,6 +39,8 @@ func (b Backend) String() string {
 		return "wasm"
 	case BackendWebSocket:
 		return "websocket"
+	case BackendDocker:
+		return "docker"
 	}
 	return "auto"
 }
@@ -94,6 +100,17 @@ type Pool struct {
 	sessionsMu     sync.Mutex
 	sessions       map[*Session]struct{}
 	stop           StopPolicy
+	// recovery retries a supervised dial; supervised marks a pool whose endpoint
+	// comes from a ServerSupervisor rather than a fixed URL.
+	recovery   *recoverer
+	supervised bool
+	// rotation moves a session to a fresh connection before the server's deadline.
+	rotation *rotationPolicy
+	// owned is the supervisor this pool closes with itself; nil for a pool whose
+	// supervisor belongs to the caller.
+	owned     interface{ Close(context.Context) error }
+	ownedOnce sync.Once
+	ownedStop time.Duration
 }
 
 // New creates a pool.
@@ -195,6 +212,9 @@ func resolveSpawner(ctx context.Context, opts Options, rec *telemetry.Recorder) 
 		s, err := wasmSpawner(ctx, opts, pending, observe)
 		return s, BackendWasm, "", err
 	}
+	if opts.Backend == BackendDocker {
+		return nil, 0, "", &OptionError{Message: "use NewDocker for the Docker backend"}
+	}
 	return nil, 0, "", &OptionError{Message: "use NewWebSocket for the WebSocket backend"}
 }
 
@@ -239,11 +259,17 @@ func (p *Pool) BinaryPath() string { return p.binary }
 func (p *Pool) Close(ctx context.Context) error {
 	p.sessionsMu.Lock()
 	alreadyClosed := p.closed.Swap(true)
+	open := len(p.sessions)
 	p.sessionsMu.Unlock()
 	if alreadyClosed {
 		return nil
 	}
-	return p.inner.Close(ctx)
+	err := p.inner.Close(ctx)
+	// Open sessions keep their server: the last one to close stops it.
+	if open == 0 {
+		err = errors.Join(err, p.closeOwned(ctx))
+	}
+	return err
 }
 
 // Shutdown ends admission, closes every open session with the stop policy
@@ -270,6 +296,9 @@ func (p *Pool) Shutdown(ctx context.Context, policy ...StopPolicy) error {
 	}
 	wg.Wait()
 	if err := p.inner.Shutdown(ctx); err != nil {
+		return errors.Join(err, p.closeOwned(ctx))
+	}
+	if err := p.closeOwned(ctx); err != nil {
 		return err
 	}
 	for _, err := range errs {
@@ -324,7 +353,15 @@ func (p *Pool) track(s *Session) error {
 func (p *Pool) untrack(s *Session) {
 	p.sessionsMu.Lock()
 	delete(p.sessions, s)
+	last := p.closed.Load() && len(p.sessions) == 0
 	p.sessionsMu.Unlock()
+	if last && p.owned != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), p.ownedStop+5*time.Second)
+			defer cancel()
+			_ = p.closeOwned(ctx)
+		}()
+	}
 }
 
 // Checkout dedicates a worker to a new session.
@@ -340,23 +377,12 @@ func (p *Pool) Checkout(ctx context.Context, opts CheckoutOptions) (*Session, er
 	if err != nil {
 		return nil, err
 	}
-	s := newSession(p, cfg.ScriptName, limits)
-	headers := traceContextHeaders(p.rec, ctx)
-	if p.connectHeaders != nil {
-		extra, err := p.connectHeaders(ctx)
-		if err != nil {
-			return nil, err
-		}
-		headers = append(headers[:len(headers):len(headers)], sortedHeaders(extra)...)
-	}
-	if len(headers) > 0 {
-		ctx = pool.WithConnectHeaders(ctx, headers)
-	}
-	co, err := p.inner.Checkout(ctx, cfg, pool.CheckoutOptions{Observe: p.observe(ctx)})
+	s := newSession(p, cfg, limits)
+	co, dialStart, err := p.dial(ctx, cfg)
 	if err != nil {
-		return nil, checkoutError(err)
+		return nil, err
 	}
-	s.attach(co)
+	s.attach(co, dialStart)
 	if opts.Host != nil {
 		if err := opts.Host.register(s.store); err != nil {
 			_ = s.Close(ctx, KillNow)
@@ -369,6 +395,69 @@ func (p *Pool) Checkout(ctx context.Context, opts CheckoutOptions) (*Session, er
 		return nil, err
 	}
 	return s, nil
+}
+
+// dial opens one session's connection. A supervised pool resolves its endpoint
+// per attempt and retries under the recovery policy; every other pool dials once.
+// The returned time is taken before the dial, so a session deadline derived from
+// it is never later than the server's.
+func (p *Pool) dial(ctx context.Context, cfg wire.Configure) (*pool.Checkout, time.Time, error) {
+	if !p.supervised {
+		headers := traceContextHeaders(p.rec, ctx)
+		if p.connectHeaders != nil {
+			extra, err := p.connectHeaders(ctx)
+			if err != nil {
+				return nil, time.Time{}, err
+			}
+			headers = append(headers[:len(headers):len(headers)], sortedHeaders(extra)...)
+		}
+		if len(headers) > 0 {
+			ctx = pool.WithConnectHeaders(ctx, headers)
+		}
+		dialStart := time.Now()
+		co, err := p.inner.Checkout(ctx, cfg, pool.CheckoutOptions{Observe: p.observe(ctx)})
+		if err != nil {
+			return nil, time.Time{}, checkoutError(err)
+		}
+		return co, dialStart, nil
+	}
+	res, err := p.inner.Reserve(ctx)
+	if err != nil {
+		return nil, time.Time{}, checkoutError(err)
+	}
+	co, dialStart, err := p.bind(ctx, res, cfg, nil)
+	if err != nil {
+		res.Release()
+		if ctx.Err() != nil {
+			return nil, time.Time{}, ctx.Err()
+		}
+		return nil, time.Time{}, &SpawnError{Message: "monty-server unreachable " + err.Error()}
+	}
+	return co, dialStart, nil
+}
+
+// bind runs the recovery policy over one reservation: a fresh session with a nil
+// state, or a rotated one carrying its dump.
+func (p *Pool) bind(ctx context.Context, res *pool.Reservation, cfg wire.Configure, state []byte) (*pool.Checkout, time.Time, error) {
+	var dialStart time.Time
+	co, attempts, err := p.recovery.do(ctx, func(actx context.Context, _ ServerEndpoint) (*pool.Checkout, error) {
+		dialStart = time.Now()
+		return p.inner.Bind(actx, res, cfg, state, pool.CheckoutOptions{Observe: p.observe(ctx)})
+	})
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("after %d attempts: %w", attempts, err)
+	}
+	return co, dialStart, nil
+}
+
+// closeOwned closes the supervisor this pool owns, exactly once.
+func (p *Pool) closeOwned(ctx context.Context) error {
+	if p.owned == nil {
+		return nil
+	}
+	var err error
+	p.ownedOnce.Do(func() { err = p.owned.Close(ctx) })
+	return err
 }
 
 func sortedHeaders(headers map[string]string) [][2]string {

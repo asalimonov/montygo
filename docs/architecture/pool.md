@@ -6,6 +6,7 @@
 - Acquiring pops the most recently idle worker, skipping dead ones; otherwise it spawns while under the cap, otherwise it waits (bounded by `CheckoutTimeout`).
 - A finished checkout sends `Reset`. A worker that answers `Ok` returns to the idle list unless `MaxCheckoutsPerWorker` is reached.
 - WebSocket workers are single-use: no prewarming, no `Reset`, a close frame on finish.
+- A single-use pool can also `Reserve` capacity without a worker and `Bind` one to it later, so a failed dial is retried without queuing for capacity again. `Checkout.Handoff` turns a live checkout back into a reservation: it closes the connection but keeps the capacity, the session budget and `cwdSet`, which is how a session rotation replaces its worker. A rotation MAY hold one worker above `MaxProcesses` while the old connection retires. See `supervisor.md`.
 - `Close` sends `Shutdown` to idle workers and kills any that do not exit within 500 ms. Checked-out workers finish with their sessions.
 
 ### Accounting

@@ -22,18 +22,19 @@ func (e *HTTPStatusError) Error() string { return fmt.Sprintf("HTTP status %d", 
 // GetJSON performs GET <path> on the dialer's server over its transport, with
 // the upgrade headers, and decodes a 200 JSON body into out.
 func (d *WebSocketDialer) GetJSON(ctx context.Context, path string, headers [][2]string, out any) error {
-	target, err := httpURL(d.URL, path)
+	server, tlsConfig := d.target(ctx)
+	target, err := httpURL(server, path)
 	if err != nil {
-		return fmt.Errorf("%s: %w", d.URL, err)
+		return fmt.Errorf("%s: %w", server, err)
 	}
-	header, host, err := d.upgradeHeader(headers)
+	header, host, err := d.upgradeHeader(server, headers)
 	if err != nil {
 		return err
 	}
 	header.Set("Accept", "application/json")
 	hctx, timeout, cancel := d.bound(ctx)
 	defer cancel()
-	transport := d.transport(nil)
+	transport := d.transport(nil, tlsConfig)
 	defer transport.CloseIdleConnections()
 	req, err := http.NewRequestWithContext(hctx, http.MethodGet, target, nil)
 	if err != nil {

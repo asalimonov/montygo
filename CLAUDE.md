@@ -60,7 +60,7 @@ GOTOOLCHAIN=local go mod tidy -diff               # in the root, examples/ and t
 make server-check            # clippy -D warnings and cargo test in server/ (set MONTY_BIN for session tests)
 make docker-build            # monty-server image for PLATFORMS (default linux/amd64,linux/arm64)
 make docker-build-pyclient   # Python client test image, host architecture
-make test-docker             # root suite on the websocket backend against the image
+make test-docker             # root suite on the docker backend against the image
 make test-network            # tests/network against the images
 make test-network-clean      # remove leaked test containers
 ```
@@ -70,7 +70,9 @@ make test-network-clean      # remove leaked test containers
 | Variable | Effect |
 |---|---|
 | `MONTY_BIN` | native worker binary; tests default it to `../monty/target/debug/monty`; `server/tests/session.rs` skips without it |
-| `MONTY_TEST_BACKENDS` | backends for root tests: `native`, `wasm`, `websocket`; default `native,wasm`, plus `websocket` when `MONTY_TEST_WS_URL` is set |
+| `MONTY_TEST_BACKENDS` | backends for root tests: `native`, `wasm`, `websocket`, `docker`; default `native,wasm`, plus `websocket` when `MONTY_TEST_WS_URL` is set |
+| `MONTYGO_DOCKER_IMAGE` | repository, or pinned reference, of the `monty-server` image `NewDocker` runs; default `ghcr.io/asalimonov/monty-server` |
+| `MONTYGO_DOCKER_VERSION` | image tag for `NewDocker`; unset derives it from `BindingVersion()` |
 | `MONTY_TEST_WS_URL` | URL of a running `monty-server`; enables the `websocket` backend for root tests |
 | `MONTY_EXAMPLES_BACKEND` | forces `native` or `wasm` in the examples |
 | `MONTY_SRC` | upstream checkout used by `make build-worker`, `make build-wasm` and the image builds, default `../monty` |
@@ -97,7 +99,7 @@ make test-network-clean      # remove leaked test containers
 - The root module MUST build without cgo. New dependencies MUST support Go 1.25.
 - Server texts (close reasons, HTTP bodies, the info page) MUST be defined in `server/src/texts.rs` and listed in `docs/architecture/server.md`. The protocol version refusal and `PoolError` texts MUST come from upstream verbatim.
 - Deviations of `monty-server` from Full Monty (upstream `docs/server.md`) MUST be listed in `docs/parity/server.md`.
-- Server variables use the `MONTY_SERVER_*` prefix. `tests/network` variables use `MONTYGO_*`.
+- Server variables use the `MONTY_SERVER_*` prefix. Library and `tests/network` variables use `MONTYGO_*`.
 - Comments explain only what the code cannot say. Concepts belong in `docs/architecture/`, not in code comments.
 - Docs use short sentences and RFC 2119 keywords for obligations.
 - Commit subjects are imperative. A body holds only facts the diff cannot show.

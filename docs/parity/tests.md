@@ -1,6 +1,6 @@
 # Test parity
 
-Upstream tests are ported file by file. Subtest names keep the upstream titles, so `go test -run 'TestMount/native/overlay_write_does_not_modify_host'` finds a TS test by its title. Root tests run on the native and wasm backends, and on the websocket backend against the server image.
+Upstream tests are ported file by file. Subtest names keep the upstream titles, so `go test -run 'TestMount/native/overlay_write_does_not_modify_host'` finds a TS test by its title. Root tests run on the native and wasm backends, on the websocket backend against a configured server, and on the docker backend against the server image.
 
 - **ported**: same scenario and assertions.
 - **adapted**: same intent, expressed with Go types or APIs.
@@ -141,6 +141,7 @@ A separate module of 58 tests for the server image. They have no upstream test c
 | `TestRepl_` | `repl_session_test.go` | 5 |
 | `TestReplCLI_` | `repl_cli_test.go` | 6 |
 | `TestPyClient_` | `pyclient_test.go` | 4 |
+| `TestDockerSupervisor_` | `docker_supervisor_test.go` | 5 |
 
 - `TestTimeouts_SessionTimeout` and `TestTimeouts_KeepaliveDropsFrozenClient` are slow. They skip unless `MONTYGO_SLOW_TESTS_ENABLE` is set.
 - `TestProtocol_RemoteDialByContainerIP` runs only on Linux, where container bridge addresses are routable from the host.
@@ -158,6 +159,19 @@ Package `osaccess` ports all 207 test functions and runs the Monty-driven ones o
 | test_os_access_raw.py | `TestOSAccessRaw`, `TestStatHelpers` | 27 |
 
 Adaptations: `PurePosixPath` checks become `montygo.Path` checks, Python reprs become `String()` or field comparisons, and `exception()` round-trips compare the exception type name with `montygo.IsSubclass`.
+
+## Docker, supervisors and rotation (montygo-only)
+
+Upstream has no equivalent: `@pydantic/monty` is subprocess-only, and the Python client never reconnects or rotates. `docs/parity/api.md` records the API these suites cover.
+
+| File | Tests | Covers |
+|---|---|---|
+| `docker_image_test.go` | 3 | candidate tags derived from `BindingVersion()`, option and variable precedence, pinned references, versions that derive nothing |
+| `docker_supervisor_test.go` | 11 | `DockerSupervisor` against a fake `docker` CLI and an `httptest` server: start sequence, hardening flags, labels, the dump key passed by name only, image fallback, protocol refusal, restart with a new port, close; no daemon needed |
+| `recovery_test.go` | 8 | the attempt loop, non-retryable errors, the opt-in restart, single-flight restarts, caller cancellation |
+| `rotation_test.go` | 5 | real sessions over `wsRelay`: state survives a rotation, an idle session rotates on its timer, a refused reconnect yields `RotationError` with a restorable dump, rotation stays off without `/info` or with unusable limits |
+
+`make test-docker` additionally runs the whole root suite through `NewDocker`, one container per test pool.
 
 ## Examples (`examples/`)
 

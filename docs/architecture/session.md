@@ -65,6 +65,12 @@ Catchable delivery: at the boundary the answerer marks the reason delivered, rep
 
 ## Slot
 
+## Rotation
+
+A session of a rotating pool (`NewDocker`, or `NewWebSocket` with `RotateSessions`) moves to a fresh connection before the server's session timeout closes it. `FeedRun`, `FeedStart`, `Go`, `LoadSession`, `LoadSnapshot`, `Dump` and `InstallDependencies` call `rotateIfDue` first; an idle session is rotated by a timer. The rotation takes a dump, hands off the capacity slot, dials again, loads the dump, and keeps the same `*Session`, its host registry and its stop policy. An operation that arrives while a rotation runs waits for it instead of reporting `ErrSessionBusy`. A failed rotation ends the session with `*RotationError`, whose `Dump` restores the state on a new session. See `supervisor.md`.
+
+## Slots
+
 `Pool.Slot(opts)` returns a `Slot` that owns at most one session checked out with `opts`. Under its own mutex, `Go`, `FeedRun` and `FeedStart` acquire the session: a closed slot returns `ErrSessionClosed`; a session whose state is not `SessionClosed` is reused; otherwise a new checkout replaces it, and sandbox state is not restored. A session that is not `SessionIdle` returns `ErrSessionBusy` (or its terminal error). `Slot.Stop` delegates to `Session.Stop`, or reports `StopNotRunning` without a session. `Slot.Close` marks the slot closed, drops the session and closes it with the policy; it is idempotent. A terminal old session needs no close, because `terminateSession` already retired its worker.
 
 ## Host registry

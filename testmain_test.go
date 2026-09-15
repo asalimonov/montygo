@@ -18,6 +18,9 @@ import (
 
 const wsURLEnv = "MONTY_TEST_WS_URL"
 
+// testDumpKey signs the dumps of every container the docker backend starts.
+const testDumpKey = "montygo-test-dump-key-0123456789"
+
 type poolKey struct {
 	backend montygo.Backend
 	test    string
@@ -70,9 +73,15 @@ func testBackends() []montygo.Backend {
 	return out
 }
 
+// remoteBackend reports a backend whose workers live behind a WebSocket server:
+// single-use sessions, signed dumps and disconnects instead of crashes.
+func remoteBackend(b montygo.Backend) bool {
+	return b == montygo.BackendWebSocket || b == montygo.BackendDocker
+}
+
 // backendByName maps a Backend.String() value back to the Backend.
 func backendByName(name string) (montygo.Backend, bool) {
-	for _, b := range []montygo.Backend{montygo.BackendNative, montygo.BackendWasm, montygo.BackendWebSocket} {
+	for _, b := range []montygo.Backend{montygo.BackendNative, montygo.BackendWasm, montygo.BackendWebSocket, montygo.BackendDocker} {
 		if b.String() == name {
 			return b, true
 		}
@@ -83,13 +92,24 @@ func backendByName(name string) (montygo.Backend, bool) {
 // openPool builds a pool for b; websocket maps Options onto WebSocketOptions,
 // where RequestTimeout 0 keeps its "disabled" meaning.
 func openPool(ctx context.Context, b montygo.Backend, opts montygo.Options) (*montygo.Pool, error) {
-	if b != montygo.BackendWebSocket {
+	if !remoteBackend(b) {
 		opts.Backend = b
 		return montygo.New(ctx, opts)
 	}
 	timeout := opts.RequestTimeout
 	if timeout == 0 {
 		timeout = montygo.NoRequestTimeout
+	}
+	if b == montygo.BackendDocker {
+		// One container per pool; a shared dump key lets dumps move between them.
+		return montygo.NewDocker(ctx, montygo.DockerOptions{
+			MaxProcesses:    opts.MaxProcesses,
+			CheckoutTimeout: opts.CheckoutTimeout,
+			RequestTimeout:  timeout,
+			Telemetry:       opts.Telemetry,
+			Stop:            opts.Stop,
+			Env:             map[string]string{"MONTY_SERVER_DUMP_KEY": testDumpKey},
+		})
 	}
 	return montygo.NewWebSocket(ctx, montygo.WebSocketOptions{
 		URL:             os.Getenv(wsURLEnv),
@@ -105,7 +125,7 @@ func openPool(ctx context.Context, b montygo.Backend, opts montygo.Options) (*mo
 // websocket server that cannot be reached fails the test.
 func poolUnavailable(t testing.TB, b montygo.Backend, err error) {
 	t.Helper()
-	if b == montygo.BackendWebSocket {
+	if remoteBackend(b) {
 		t.Fatalf("backend %s unavailable: %v", b, err)
 	}
 	t.Skipf("backend %s unavailable: %v", b, err)

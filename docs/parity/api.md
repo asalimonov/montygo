@@ -96,6 +96,28 @@ worker while a Go callback still runs; `Stop` then reports `ErrCallbackDetached`
 after `Join`. No wire or server protocol change is required. The README lists
 the v0.2.0 → v0.3.0 renames.
 
+## Go additions: Docker, supervisors and rotation
+
+Upstream has no analogue. `@pydantic/monty` is subprocess-only, and
+`AsyncMontyWebsocket` dials one fixed URL, never reconnects and never rotates a
+session. These additions change no wire or server protocol.
+
+| Go | Purpose |
+|---|---|
+| `montygo.NewDocker(ctx, DockerOptions)` | starts a `monty-server` container through the local `docker` CLI and returns a pool that owns it; `Pool.Backend()` is `BackendDocker` |
+| `montygo.NewDockerSupervisor`, `*DockerSupervisor` | the same container management as a value, for use with `NewWebSocket` |
+| `DockerOptions` | image, version, CLI command, server variables, `docker run` arguments, timeouts, reaper, and the pool's own options |
+| `DefaultDockerImage`, `MONTYGO_DOCKER_IMAGE`, `MONTYGO_DOCKER_VERSION` | the default repository and the overrides; the tag derives from `BindingVersion()` |
+| `ServerEndpoint`, `ServerSupervisor` | where a pool dials, resolved per attempt, and how a server is restarted |
+| `RecoveryPolicy` | attempts, per-attempt timeout and the opt-in server restart |
+| `WebSocketOptions.Supervisor`, `Recovery`, `RotateSessions`, `RotationMargin` | supervised dials and session rotation on a plain WebSocket pool |
+| `OrphanReaper` | removes containers left by a process that died; the default reaps nothing |
+| `*RotationError` | a session that could not move to a fresh connection; `Dump` restores it elsewhere; matches `ErrSessionLost` |
+| `ErrSupervisorClosed` | a supervisor that no longer serves endpoints |
+
+Rotation is off unless it is asked for: `NewWebSocket` keeps upstream behaviour
+until `RotateSessions` is set, and `BackendAuto` never contacts Docker.
+
 ## Not provided
 
 | TypeScript | Reason |

@@ -90,6 +90,10 @@ func seconds(s uint64) time.Duration {
 // RequestTimeout: 0 means 10s, NoRequestTimeout leaves only ctx. A server without
 // the endpoint yields ErrNoServerInfo.
 func FetchServerInfo(ctx context.Context, opts WebSocketOptions) (*ServerInfo, error) {
+	opts, err := opts.resolve(ctx)
+	if err != nil {
+		return nil, err
+	}
 	timeout := opts.RequestTimeout
 	if timeout == 0 {
 		timeout = defaultWebSocketRequestTimeout

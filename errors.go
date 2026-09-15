@@ -173,6 +173,28 @@ func (e *ShutdownError) Display(format DisplayFormat) string {
 	return typeMsg("RuntimeError", e.Message)
 }
 
+// RotationError reports a session that could not be moved to a fresh connection
+// before its server closed the old one. Dump carries the state captured just
+// before the failure, for LoadSession on a new session, or nil when the dump
+// itself failed.
+type RotationError struct {
+	Message string
+	Dump    []byte
+	Cause   error
+}
+
+func (e *RotationError) Error() string            { return typeMsg("RuntimeError", e.Message) }
+func (e *RotationError) Exception() ExceptionInfo { return ExceptionInfo{"RuntimeError", e.Message} }
+func (e *RotationError) Is(target error) bool     { return target == ErrSessionLost }
+func (e *RotationError) Unwrap() error            { return e.Cause }
+
+func (e *RotationError) Display(format DisplayFormat) string {
+	if format == DisplayMsg {
+		return e.Message
+	}
+	return typeMsg("RuntimeError", e.Message)
+}
+
 // ProtocolError reports a protocol violation or misuse; it poisons the session.
 type ProtocolError struct {
 	Message string

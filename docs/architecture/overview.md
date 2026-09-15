@@ -63,7 +63,8 @@ Upstream is pinned in several places, which MUST move together: `proto/PROTO_REV
 - **Wasm** workers are module instances inside the host process. The zstd blob is verified against a pinned digest, compiled once per process and cached on disk. Each instance gets the host's monotonic and wall clocks and a crypto random source.
 - **WebSocket** workers are remote and single-use: one dial per checkout, no prewarming, a close frame at the end. `TLSConfig` and `DialContext` shape the dial. See `websocket.md`.
 - **monty-server** (`server/`, Rust) accepts one WebSocket session per connection. Each session checks out a fresh `monty subprocess` from `monty_pool` and relays every request through `Checkout::turn_raw`. See `server.md` and `docker.md`.
-- `BackendAuto` picks native when a binary resolves, and wasm otherwise.
+- **Docker** workers are the WebSocket backend against a `monty-server` container montygo starts through the local `docker` CLI. `NewDocker` resolves the image from the binding version, owns the container, retries dials and rotates sessions before the server's session timeout. See `supervisor.md` and `docker.md`.
+- `BackendAuto` picks native when a binary resolves, and wasm otherwise. It never starts a container.
 
 All backends implement one `Worker` interface: send a frame, receive a frame, kill, close, wait, and report an exit status. The pool and the session never branch on the transport, except to classify how a worker ended.
 
@@ -163,6 +164,7 @@ See `protocol.md` for the codec and `pool.md` for deadlines and failure classifi
 | `mounts.md` | host filesystem mounts |
 | `wasm.md` | embedded wasm worker |
 | `websocket.md` | remote workers |
+| `supervisor.md` | server supervisors, dial recovery, session rotation |
 | `server.md` | `monty-server`: flags, sessions, timeouts, dumps, drain, metrics |
 | `docker.md` | server image, build, cross-compilation, run recommendations |
 | `osaccess.md` | in-memory OS helpers |

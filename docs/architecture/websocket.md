@@ -3,6 +3,8 @@
 ## Pool and dial
 
 - `montygo.NewWebSocket` builds a pool whose workers are single-use remote children: no prewarming, one dial per checkout, a close frame when the checkout ends.
+- `WebSocketOptions.Supervisor` replaces `URL` and `ConnectHeaders`: the endpoint is resolved before every dial attempt, and the pool MAY ask the supervisor to restart a server. `RecoveryPolicy` bounds the attempts, `RotateSessions` moves a session to a fresh connection before the server's session timeout. See `supervisor.md`; `NewDocker` is the built-in supervisor, in `docker.md`.
+- `RecoveryPolicy.AttemptTimeout` bounds one attempt, that is the dial, `Configure` and a rotation's `Load`. `RequestTimeout` remains the per-turn deadline, and `CheckoutTimeout` still bounds only the wait for capacity.
 - `WebSocketOptions.ConnectHeaders` runs once per checkout, before waiting for capacity and before dialing. Its headers travel to the dialer through the checkout context.
 - The upgrade request carries `User-Agent: monty-pool/<version>` first; caller headers win case-insensitively. Header names and values are validated before any I/O.
 - `TLSConfig` configures `wss://` dials. Each dial clones it into a clone of `http.DefaultTransport`, so the caller's value is never mutated. `nil` keeps the system roots.

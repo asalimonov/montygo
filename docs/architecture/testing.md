@@ -2,7 +2,8 @@
 
 ## Root suite
 
-- Root tests run every scenario on each backend in `MONTY_TEST_BACKENDS` via `eachBackend`. Backend names are `native`, `wasm` and `websocket`. The default is `native,wasm`, plus `websocket` when `MONTY_TEST_WS_URL` is set.
+- Root tests run every scenario on each backend in `MONTY_TEST_BACKENDS` via `eachBackend`. Backend names are `native`, `wasm`, `websocket` and `docker`. The default is `native,wasm`, plus `websocket` when `MONTY_TEST_WS_URL` is set.
+- `websocket` and `docker` are remote backends: `remoteBackend` selects the adaptations they share, such as signed dumps and disconnects instead of crashes.
 - Each top-level test gets its own pools, like one pool per upstream spec file. Wasm pools recycle workers after every checkout. Tests that inspect worker reuse create their own pools.
 - `TestMain` points `MONTY_BIN` at a sibling `../monty/target/debug/monty` when it is unset. It exits 2 when `websocket` is listed without `MONTY_TEST_WS_URL`.
 - The upstream TypeScript suite is ported file by file; titles are kept as subtest names. See `docs/parity/tests.md`.
@@ -15,7 +16,16 @@
 - `openPool` builds every root test pool. For `websocket` it maps `Options` onto `WebSocketOptions` against `MONTY_TEST_WS_URL`: `MaxProcesses`, `CheckoutTimeout` and `RequestTimeout`, where 0 becomes `NoRequestTimeout`.
 - A local backend that cannot start skips its subtests. A configured server that cannot be reached fails them.
 - Telemetry child processes receive the backend by name.
-- `make test-docker` runs the suite against the image. It starts one container on a random loopback port with the test dump key, the per-client quota disabled and the label `montygo.test=docker`. It waits for `/health`, runs `go test -count=1 -timeout 30m .` with `MONTY_TEST_BACKENDS=websocket`, and stops the container.
+- `make test-docker` runs the suite on the `docker` backend with `MONTYGO_DOCKER_IMAGE=$(IMAGE):$(IMAGE_TAG)`. `openPool` calls `NewDocker`, so every test pool starts and stops its own container. Each one gets the same test dump key, so a dump taken from one pool loads into another.
+
+## Supervisors, recovery and rotation
+
+These need no Docker daemon:
+
+- `docker_image_test.go` covers candidate tags, option and variable precedence, pinned references and pseudo-version bases.
+- `docker_supervisor_test.go` drives `DockerSupervisor` against a fake `docker` script and an `httptest` server: the start sequence, hardening flags, labels, the dump key passed by name only, image fallback, protocol refusal, restart with a new port, and close.
+- `recovery_test.go` covers the attempt loop, non-retryable errors, restart only when enabled, and single-flight restarts.
+- `rotation_test.go` drives real sessions over `wsRelay`, which serves `GET /info` with short timeouts and can refuse upgrades: state survives a rotation, an idle session rotates on its timer, a refused reconnect yields `RotationError` whose dump restores, and unusable limits leave rotation off.
 - Adaptations for this backend are listed in `docs/parity/tests.md`.
 
 ## Lifecycle regressions
