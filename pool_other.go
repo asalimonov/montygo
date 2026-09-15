@@ -1,6 +1,6 @@
 //go:build !unix
 
-package monty
+package montygo
 
 import (
 	"context"
@@ -20,4 +20,6 @@ func (unsupportedSpawner) Spawn(context.Context) (worker.Worker, error) {
 func (unsupportedSpawner) Kind() worker.Kind           { return worker.KindSubprocess }
 func (unsupportedSpawner) Close(context.Context) error { return nil }
 
-func newSubprocessSpawner(string, io.Writer) worker.Spawner { return unsupportedSpawner{} }
+func newSubprocessSpawner(string, io.Writer, int64, worker.PendingBytesObserver) worker.Spawner {
+	return unsupportedSpawner{}
+}

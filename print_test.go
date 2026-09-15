@@ -1,4 +1,4 @@
-package monty_test
+package montygo_test
 
 import (
 	"errors"
@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 type prtCollector struct {
@@ -23,8 +23,8 @@ type prtCollector struct {
 
 func prtNewCollector(t *testing.T) *prtCollector { return &prtCollector{t: t} }
 
-func (c *prtCollector) Print(stream monty.Stream, text string) error {
-	assert.Equal(c.t, monty.Stdout, stream)
+func (c *prtCollector) Print(stream montygo.Stream, text string) error {
+	assert.Equal(c.t, montygo.Stdout, stream)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.output = append(c.output, text)
@@ -37,9 +37,9 @@ func (c *prtCollector) Output() []string {
 	return append([]string(nil), c.output...)
 }
 
-func prtErrorCallback(t *testing.T, err error) monty.PrintFunc {
-	return func(stream monty.Stream, _ string) error {
-		assert.Equal(t, monty.Stdout, stream)
+func prtErrorCallback(t *testing.T, err error) montygo.PrintFunc {
+	return func(stream montygo.Stream, _ string) error {
+		assert.Equal(t, montygo.Stdout, stream)
 		return err
 	}
 }
@@ -52,27 +52,27 @@ func prtLines(n int) []string {
 	return out
 }
 
-func prtFeed(p monty.PrintTarget) runOptions {
-	return runOptions{FeedOptions: monty.FeedOptions{Print: p}}
+func prtFeed(p montygo.PrintTarget) runOptions {
+	return runOptions{FeedOptions: montygo.FeedOptions{Print: p}}
 }
 
-func prtLineBuffered(p monty.PrintTarget) runOptions {
+func prtLineBuffered(p montygo.PrintTarget) runOptions {
 	return runOptions{
-		CheckoutOptions: monty.CheckoutOptions{PrintFlushInterval: monty.DurationPtr(0)},
-		FeedOptions:     monty.FeedOptions{Print: p},
+		CheckoutOptions: montygo.CheckoutOptions{PrintFlushInterval: montygo.DurationPtr(0)},
+		FeedOptions:     montygo.FeedOptions{Print: p},
 	}
 }
 
 func prtRequireMemoryError(t *testing.T, err error, message string) {
 	t.Helper()
-	var rt *monty.RuntimeError
+	var rt *montygo.RuntimeError
 	require.ErrorAs(t, err, &rt)
 	require.Equal(t, "MemoryError", rt.TypeName)
 	require.Equal(t, message, rt.Message)
 }
 
 func TestPrint(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b monty.Backend) {
+	eachBackend(t, func(t *testing.T, b montygo.Backend) {
 		t.Run("basic", func(t *testing.T) {
 			c := prtNewCollector(t)
 			mustRun(t, b, `print("hello")`, prtFeed(c))
@@ -96,7 +96,7 @@ func TestPrint(t *testing.T) {
 		t.Run("stderr is labelled, and keeps its place in the output", func(t *testing.T) {
 			var mu sync.Mutex
 			var received [][2]string
-			mustRun(t, b, "import sys\nprint('a')\nprint('b', file=sys.stderr)\nprint('c')", prtFeed(monty.PrintFunc(func(stream monty.Stream, text string) error {
+			mustRun(t, b, "import sys\nprint('a')\nprint('b', file=sys.stderr)\nprint('c')", prtFeed(montygo.PrintFunc(func(stream montygo.Stream, text string) error {
 				mu.Lock()
 				defer mu.Unlock()
 				received = append(received, [2]string{string(stream), text})
@@ -113,8 +113,8 @@ func TestPrint(t *testing.T) {
 
 		t.Run("a negative or non-finite flush interval is rejected", func(t *testing.T) {
 			for _, bad := range []time.Duration{-time.Nanosecond, -time.Second, time.Duration(math.MinInt64)} {
-				_, err := run(t, b, "print(1)", runOptions{CheckoutOptions: monty.CheckoutOptions{PrintFlushInterval: monty.DurationPtr(bad)}})
-				var oe *monty.OptionError
+				_, err := run(t, b, "print(1)", runOptions{CheckoutOptions: montygo.CheckoutOptions{PrintFlushInterval: montygo.DurationPtr(bad)}})
+				var oe *montygo.OptionError
 				require.ErrorAs(t, err, &oe, "expected a named rejection for %s", bad)
 				require.True(t, strings.HasPrefix(oe.Message, "invalid printFlushInterval"), "expected a named rejection for %s, got %s", bad, oe.Message)
 			}
@@ -123,8 +123,8 @@ func TestPrint(t *testing.T) {
 		t.Run("a sub-millisecond flush interval does not become line buffering", func(t *testing.T) {
 			c := prtNewCollector(t)
 			mustRun(t, b, "for i in range(100):\n    print(i)", runOptions{
-				CheckoutOptions: monty.CheckoutOptions{PrintFlushInterval: monty.DurationPtr(400 * time.Microsecond)},
-				FeedOptions:     monty.FeedOptions{Print: c},
+				CheckoutOptions: montygo.CheckoutOptions{PrintFlushInterval: montygo.DurationPtr(400 * time.Microsecond)},
+				FeedOptions:     montygo.FeedOptions{Print: c},
 			})
 			out := c.Output()
 			require.Equal(t, strings.Join(prtLines(100), ""), strings.Join(out, ""))
@@ -169,15 +169,15 @@ func TestPrint(t *testing.T) {
 		t.Run("with limits", func(t *testing.T) {
 			c := prtNewCollector(t)
 			mustRun(t, b, `print("with limits")`, runOptions{
-				CheckoutOptions: monty.CheckoutOptions{Limits: &monty.ResourceLimits{MaxDuration: 5 * time.Second}},
-				FeedOptions:     monty.FeedOptions{Print: c},
+				CheckoutOptions: montygo.CheckoutOptions{Limits: &montygo.ResourceLimits{MaxDuration: 5 * time.Second}},
+				FeedOptions:     montygo.FeedOptions{Print: c},
 			})
 			require.Equal(t, []string{"with limits\n"}, c.Output())
 		})
 
 		t.Run("with inputs", func(t *testing.T) {
 			c := prtNewCollector(t)
-			mustRun(t, b, `print("Input value is", x)`, runOptions{FeedOptions: monty.FeedOptions{Inputs: map[string]any{"x": 99}, Print: c}})
+			mustRun(t, b, `print("Input value is", x)`, runOptions{FeedOptions: montygo.FeedOptions{Inputs: map[string]any{"x": 99}, Print: c}})
 			require.Equal(t, []string{"Input value is 99\n"}, c.Output())
 		})
 
@@ -220,7 +220,7 @@ func TestPrint(t *testing.T) {
 
 		t.Run("print with external function result", func(t *testing.T) {
 			c := prtNewCollector(t)
-			v := mustRun(t, b, "\nprint(\"hello\")\nprint(func())\n", runOptions{FeedOptions: monty.FeedOptions{
+			v := mustRun(t, b, "\nprint(\"hello\")\nprint(func())\n", runOptions{FeedOptions: montygo.FeedOptions{
 				Print:          c,
 				ExternalLookup: map[string]any{"func": func() string { return "world" }},
 			}})
@@ -229,27 +229,27 @@ func TestPrint(t *testing.T) {
 		})
 
 		t.Run("CollectString accumulates", func(t *testing.T) {
-			c := &monty.CollectString{}
+			c := &montygo.CollectString{}
 			v := mustRun(t, b, `print("a"); print("b", 1); 123`, prtFeed(c))
 			require.Equal(t, int64(123), v)
 			require.Equal(t, "a\nb 1\n", c.Output())
 		})
 
 		t.Run("CollectStreams accumulates with labels", func(t *testing.T) {
-			c := &monty.CollectStreams{}
+			c := &montygo.CollectStreams{}
 			v := mustRun(t, b, `print("a"); print("b", 1); 123`, prtLineBuffered(c))
 			require.Equal(t, int64(123), v)
-			require.Equal(t, []monty.CollectedStreamEntry{{Stream: monty.Stdout, Text: "a\n"}, {Stream: monty.Stdout, Text: "b 1\n"}}, c.Output())
+			require.Equal(t, []montygo.CollectedStreamEntry{{Stream: montygo.Stdout, Text: "a\n"}, {Stream: montygo.Stdout, Text: "b 1\n"}}, c.Output())
 		})
 
 		t.Run("CollectStreams preserves stderr stream label", func(t *testing.T) {
-			c := &monty.CollectStreams{}
-			require.NoError(t, c.Print(monty.Stderr, "err\n"))
-			require.Equal(t, []monty.CollectedStreamEntry{{Stream: monty.Stderr, Text: "err\n"}}, c.Output())
+			c := &montygo.CollectStreams{}
+			require.NoError(t, c.Print(montygo.Stderr, "err\n"))
+			require.Equal(t, []montygo.CollectedStreamEntry{{Stream: montygo.Stderr, Text: "err\n"}}, c.Output())
 		})
 
 		t.Run("CollectString maxBytes first write fails", func(t *testing.T) {
-			c, err := monty.NewCollectString(100)
+			c, err := montygo.NewCollectString(100)
 			require.NoError(t, err)
 			_, err = run(t, b, "print('x' * 200)", prtFeed(c))
 			prtRequireMemoryError(t, err, "memory limit exceeded: 201 bytes > 100 bytes")
@@ -257,7 +257,7 @@ func TestPrint(t *testing.T) {
 		})
 
 		t.Run("CollectStreams maxBytes first write fails with overhead", func(t *testing.T) {
-			c, err := monty.NewCollectStreams(100)
+			c, err := montygo.NewCollectStreams(100)
 			require.NoError(t, err)
 			_, err = run(t, b, "print('x' * 200)", prtFeed(c))
 			prtRequireMemoryError(t, err, "memory limit exceeded: 265 bytes > 100 bytes")
@@ -265,7 +265,7 @@ func TestPrint(t *testing.T) {
 		})
 
 		t.Run("CollectString partial success keeps prior buffer", func(t *testing.T) {
-			c, err := monty.NewCollectString(10)
+			c, err := montygo.NewCollectString(10)
 			require.NoError(t, err)
 			_, err = run(t, b, "print('a'); print('x' * 20)", prtLineBuffered(c))
 			prtRequireMemoryError(t, err, "memory limit exceeded: 23 bytes > 10 bytes")
@@ -273,34 +273,34 @@ func TestPrint(t *testing.T) {
 		})
 
 		t.Run("CollectStreams partial success keeps prior entries", func(t *testing.T) {
-			c, err := monty.NewCollectStreams(100)
+			c, err := montygo.NewCollectStreams(100)
 			require.NoError(t, err)
 			_, err = run(t, b, "print('a'); print('x' * 20)", prtLineBuffered(c))
 			prtRequireMemoryError(t, err, "memory limit exceeded: 151 bytes > 100 bytes")
-			require.Equal(t, []monty.CollectedStreamEntry{{Stream: monty.Stdout, Text: "a\n"}}, c.Output())
+			require.Equal(t, []montygo.CollectedStreamEntry{{Stream: montygo.Stdout, Text: "a\n"}}, c.Output())
 		})
 
 		t.Run("CollectString charges UTF-8 multi-byte characters", func(t *testing.T) {
-			c, err := monty.NewCollectString(1)
+			c, err := montygo.NewCollectString(1)
 			require.NoError(t, err)
-			prtRequireMemoryError(t, c.Print(monty.Stdout, "é"), "memory limit exceeded: 2 bytes > 1 bytes")
+			prtRequireMemoryError(t, c.Print(montygo.Stdout, "é"), "memory limit exceeded: 2 bytes > 1 bytes")
 			require.Equal(t, "", c.Output())
 		})
 
 		t.Run("CollectStreams charges UTF-8 multi-byte characters", func(t *testing.T) {
-			c, err := monty.NewCollectStreams(5)
+			c, err := montygo.NewCollectStreams(5)
 			require.NoError(t, err)
-			prtRequireMemoryError(t, c.Print(monty.Stdout, "😀"), "memory limit exceeded: 68 bytes > 5 bytes")
+			prtRequireMemoryError(t, c.Print(montygo.Stdout, "😀"), "memory limit exceeded: 68 bytes > 5 bytes")
 			require.Empty(t, c.Output())
 		})
 
 		t.Run("CollectString reuses across feeds", func(t *testing.T) {
 			ctx := testCtx(t)
-			c := &monty.CollectString{}
-			s := newSession(t, b, monty.CheckoutOptions{})
-			_, err := s.FeedRun(ctx, `print("first")`, &monty.FeedOptions{Print: c})
+			c := &montygo.CollectString{}
+			s := newSession(t, b, montygo.CheckoutOptions{})
+			_, err := s.FeedRun(ctx, `print("first")`, &montygo.FeedOptions{Print: c})
 			require.NoError(t, err)
-			_, err = s.FeedRun(ctx, `print("second")`, &monty.FeedOptions{Print: c})
+			_, err = s.FeedRun(ctx, `print("second")`, &montygo.FeedOptions{Print: c})
 			require.NoError(t, err)
 			require.NoError(t, s.Close(ctx))
 			require.Equal(t, "first\nsecond\n", c.Output())
@@ -309,53 +309,53 @@ func TestPrint(t *testing.T) {
 		t.Run("CollectString/CollectStreams reject invalid maxBytes", func(t *testing.T) {
 			const msg = "maxBytes must be a finite non-negative number or null"
 			for _, bad := range []int64{-2, math.MinInt64} {
-				_, err := monty.NewCollectString(bad)
-				var oe *monty.OptionError
+				_, err := montygo.NewCollectString(bad)
+				var oe *montygo.OptionError
 				require.ErrorAs(t, err, &oe)
 				require.Equal(t, msg, oe.Message)
-				_, err = monty.NewCollectStreams(bad)
+				_, err = montygo.NewCollectStreams(bad)
 				require.ErrorAs(t, err, &oe)
 				require.Equal(t, msg, oe.Message)
 			}
-			unlimited, err := monty.NewCollectString(monty.UnlimitedPrintCollect)
+			unlimited, err := montygo.NewCollectString(montygo.UnlimitedPrintCollect)
 			require.NoError(t, err)
-			require.NoError(t, unlimited.Print(monty.Stdout, strings.Repeat("x", 200)))
+			require.NoError(t, unlimited.Print(montygo.Stdout, strings.Repeat("x", 200)))
 			require.Len(t, unlimited.Output(), 200)
 		})
 
 		t.Run("print collect cap fails before feedStart returns a snapshot", func(t *testing.T) {
 			ctx := testCtx(t)
-			c, err := monty.NewCollectString(10)
+			c, err := montygo.NewCollectString(10)
 			require.NoError(t, err)
-			s := newSession(t, b, monty.CheckoutOptions{})
-			_, err = s.FeedStart(ctx, "print('x' * 100)\nfetch()", &monty.FeedOptions{
+			s := newSession(t, b, montygo.CheckoutOptions{})
+			_, err = s.FeedStart(ctx, "print('x' * 100)\nfetch()", &montygo.FeedOptions{
 				Print:          c,
 				ExternalLookup: map[string]any{"fetch": func() int { return 1 }},
 			})
-			var rt *monty.RuntimeError
+			var rt *montygo.RuntimeError
 			require.ErrorAs(t, err, &rt)
 			require.Equal(t, "MemoryError", rt.TypeName)
 			require.True(t, strings.HasPrefix(rt.Message, "memory limit exceeded:"), rt.Message)
 			_, err = s.FeedRun(ctx, "1 + 1", nil)
-			var next *monty.RuntimeError
+			var next *montygo.RuntimeError
 			require.ErrorAs(t, err, &next)
 			require.Equal(t, "MemoryError", next.TypeName)
 		})
 
 		t.Run("print collect cap fails before feedRun answers a suspension", func(t *testing.T) {
 			ctx := testCtx(t)
-			c, err := monty.NewCollectString(10)
+			c, err := montygo.NewCollectString(10)
 			require.NoError(t, err)
-			s := newSession(t, b, monty.CheckoutOptions{})
-			_, err = s.FeedRun(ctx, "print('x' * 100)\nfetch()", &monty.FeedOptions{
+			s := newSession(t, b, montygo.CheckoutOptions{})
+			_, err = s.FeedRun(ctx, "print('x' * 100)\nfetch()", &montygo.FeedOptions{
 				Print:          c,
 				ExternalLookup: map[string]any{"fetch": func() int { return 1 }},
 			})
-			var rt *monty.RuntimeError
+			var rt *montygo.RuntimeError
 			require.ErrorAs(t, err, &rt)
 			require.Equal(t, "MemoryError", rt.TypeName)
 			_, err = s.FeedRun(ctx, "1 + 1", nil)
-			var next *monty.RuntimeError
+			var next *montygo.RuntimeError
 			require.ErrorAs(t, err, &next)
 		})
 	})

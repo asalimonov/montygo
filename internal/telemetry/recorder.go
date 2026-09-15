@@ -1,5 +1,5 @@
 // Package telemetry records Monty sessions, runs, suspensions, output and
-// pool health into process-wide OpenTelemetry components.
+// pool health into OpenTelemetry components, per pool or process-wide.
 package telemetry
 
 import (
@@ -53,8 +53,13 @@ func Install(newOwner any, c Components, replace bool) bool {
 		return false
 	}
 	owner = newOwner
-	swap(&Recorder{c: c, instruments: map[string]*handle{}})
+	swap(NewRecorder(c))
 	return true
+}
+
+// NewRecorder returns a recorder owned by one pool.
+func NewRecorder(c Components) *Recorder {
+	return &Recorder{c: c, instruments: map[string]*handle{}}
 }
 
 // Uninstall removes the installation held by o.
@@ -88,8 +93,8 @@ func swap(r *Recorder) {
 	}
 }
 
-// Current returns the installed recorder, or nil.
-func Current() *Recorder { return current.Load() }
+// Global returns the process-wide recorder, or nil.
+func Global() *Recorder { return current.Load() }
 
 // Tracing reports whether spans are recorded.
 func (r *Recorder) Tracing() bool {

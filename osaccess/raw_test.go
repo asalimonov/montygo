@@ -9,7 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/osaccess"
 )
 
@@ -34,62 +34,62 @@ func (o *testOS) ensureParentExists(p string) {
 	}
 }
 
-func (o *testOS) PathExists(path monty.Path) (bool, error) {
+func (o *testOS) PathExists(path montygo.Path) (bool, error) {
 	_, file := o.files[string(path)]
 	return file || o.directories[string(path)], nil
 }
 
-func (o *testOS) PathIsFile(path monty.Path) (bool, error) {
+func (o *testOS) PathIsFile(path montygo.Path) (bool, error) {
 	_, ok := o.files[string(path)]
 	return ok, nil
 }
 
-func (o *testOS) PathIsDir(path monty.Path) (bool, error) { return o.directories[string(path)], nil }
+func (o *testOS) PathIsDir(path montygo.Path) (bool, error) { return o.directories[string(path)], nil }
 
-func (o *testOS) PathIsSymlink(monty.Path) (bool, error) { return false, nil }
+func (o *testOS) PathIsSymlink(montygo.Path) (bool, error) { return false, nil }
 
-func (o *testOS) PathReadText(path monty.Path) (string, error) {
+func (o *testOS) PathReadText(path montygo.Path) (string, error) {
 	data, err := o.PathReadBytes(path)
 	return string(data), err
 }
 
-func (o *testOS) PathReadBytes(path monty.Path) ([]byte, error) {
+func (o *testOS) PathReadBytes(path montygo.Path) ([]byte, error) {
 	data, ok := o.files[string(path)]
 	if !ok {
-		return nil, monty.Raise("FileNotFoundError", "No such file: "+string(path))
+		return nil, montygo.Raise("FileNotFoundError", "No such file: "+string(path))
 	}
 	return data, nil
 }
 
-func (o *testOS) PathWriteText(path monty.Path, data string) (int, error) {
+func (o *testOS) PathWriteText(path montygo.Path, data string) (int, error) {
 	o.ensureParentExists(string(path))
 	o.files[string(path)] = []byte(data)
 	return utf8.RuneCountInString(data), nil
 }
 
-func (o *testOS) PathWriteBytes(path monty.Path, data []byte) (int, error) {
+func (o *testOS) PathWriteBytes(path montygo.Path, data []byte) (int, error) {
 	o.ensureParentExists(string(path))
 	o.files[string(path)] = data
 	return len(data), nil
 }
 
-func (o *testOS) PathAppendText(path monty.Path, data string) (int, error) {
+func (o *testOS) PathAppendText(path montygo.Path, data string) (int, error) {
 	o.ensureParentExists(string(path))
 	o.files[string(path)] = append(o.files[string(path)], data...)
 	return utf8.RuneCountInString(data), nil
 }
 
-func (o *testOS) PathAppendBytes(path monty.Path, data []byte) (int, error) {
+func (o *testOS) PathAppendBytes(path montygo.Path, data []byte) (int, error) {
 	o.ensureParentExists(string(path))
 	o.files[string(path)] = append(o.files[string(path)], data...)
 	return len(data), nil
 }
 
-func (o *testOS) PathMkdir(path monty.Path, parents, existOK bool) error {
+func (o *testOS) PathMkdir(path montygo.Path, parents, existOK bool) error {
 	p := string(path)
 	if o.directories[p] {
 		if !existOK {
-			return monty.Raise("FileExistsError", "Directory exists: "+p)
+			return montygo.Raise("FileExistsError", "Directory exists: "+p)
 		}
 		return nil
 	}
@@ -100,37 +100,37 @@ func (o *testOS) PathMkdir(path monty.Path, parents, existOK bool) error {
 	return nil
 }
 
-func (o *testOS) PathUnlink(path monty.Path) error {
+func (o *testOS) PathUnlink(path montygo.Path) error {
 	if _, ok := o.files[string(path)]; !ok {
-		return monty.Raise("FileNotFoundError", "No such file: "+string(path))
+		return montygo.Raise("FileNotFoundError", "No such file: "+string(path))
 	}
 	delete(o.files, string(path))
 	return nil
 }
 
-func (o *testOS) PathRmdir(path monty.Path) error {
+func (o *testOS) PathRmdir(path montygo.Path) error {
 	p := string(path)
 	if !o.directories[p] {
-		return monty.Raise("FileNotFoundError", "No such directory: "+p)
+		return montygo.Raise("FileNotFoundError", "No such directory: "+p)
 	}
 	for f := range o.files {
 		if strings.HasPrefix(f, p+"/") {
-			return monty.Raise("OSError", "Directory not empty: "+p)
+			return montygo.Raise("OSError", "Directory not empty: "+p)
 		}
 	}
 	for d := range o.directories {
 		if d != p && strings.HasPrefix(d, p+"/") {
-			return monty.Raise("OSError", "Directory not empty: "+p)
+			return montygo.Raise("OSError", "Directory not empty: "+p)
 		}
 	}
 	delete(o.directories, p)
 	return nil
 }
 
-func (o *testOS) PathIterdir(path monty.Path) ([]monty.Path, error) {
+func (o *testOS) PathIterdir(path montygo.Path) ([]montygo.Path, error) {
 	p := string(path)
 	if !o.directories[p] {
-		return nil, monty.Raise("FileNotFoundError", "No such directory: "+p)
+		return nil, montygo.Raise("FileNotFoundError", "No such directory: "+p)
 	}
 	prefix := strings.TrimRight(p, "/") + "/"
 	seen := map[string]bool{}
@@ -152,14 +152,14 @@ func (o *testOS) PathIterdir(path monty.Path) ([]monty.Path, error) {
 		collect(d)
 	}
 	sort.Strings(names)
-	out := make([]monty.Path, len(names))
+	out := make([]montygo.Path, len(names))
 	for i, n := range names {
-		out[i] = monty.Path(n)
+		out[i] = montygo.Path(n)
 	}
 	return out, nil
 }
 
-func (o *testOS) PathStat(path monty.Path) (osaccess.StatResult, error) {
+func (o *testOS) PathStat(path montygo.Path) (osaccess.StatResult, error) {
 	p := string(path)
 	zero := 0.0
 	if data, ok := o.files[p]; ok {
@@ -168,10 +168,10 @@ func (o *testOS) PathStat(path monty.Path) (osaccess.StatResult, error) {
 	if o.directories[p] {
 		return osaccess.DirStat(0o755, &zero), nil
 	}
-	return osaccess.StatResult{}, monty.Raise("FileNotFoundError", "No such file or directory: "+p)
+	return osaccess.StatResult{}, montygo.Raise("FileNotFoundError", "No such file or directory: "+p)
 }
 
-func (o *testOS) PathRename(path, target monty.Path) error {
+func (o *testOS) PathRename(path, target montygo.Path) error {
 	p, t := string(path), string(target)
 	if data, ok := o.files[p]; ok {
 		o.ensureParentExists(t)
@@ -192,10 +192,10 @@ func (o *testOS) PathRename(path, target monty.Path) error {
 		}
 		return nil
 	}
-	return monty.Raise("FileNotFoundError", "No such file or directory: "+p)
+	return montygo.Raise("FileNotFoundError", "No such file or directory: "+p)
 }
 
-func (o *testOS) PathResolve(path monty.Path) (string, error) {
+func (o *testOS) PathResolve(path montygo.Path) (string, error) {
 	var parts []string
 	for _, part := range strings.Split(string(path), "/") {
 		switch {
@@ -210,7 +210,7 @@ func (o *testOS) PathResolve(path monty.Path) (string, error) {
 	return "/" + strings.Join(parts, "/"), nil
 }
 
-func (o *testOS) PathAbsolute(path monty.Path) (string, error) {
+func (o *testOS) PathAbsolute(path montygo.Path) (string, error) {
 	if strings.HasPrefix(string(path), "/") {
 		return string(path), nil
 	}
@@ -230,12 +230,12 @@ func (o *testOS) GetEnviron() (map[string]string, error) {
 	return map[string]string{"TEST_VAR": "test_value", "HOME": "/test/home"}, nil
 }
 
-func (o *testOS) DateToday() (monty.Date, error) {
-	return monty.Date{Year: 2024, Month: 1, Day: 15}, nil
+func (o *testOS) DateToday() (montygo.Date, error) {
+	return montygo.Date{Year: 2024, Month: 1, Day: 15}, nil
 }
 
-func (o *testOS) DatetimeNow(tz *monty.TimeZone) (monty.DateTime, error) {
-	dt := monty.DateTime{Year: 2024, Month: 1, Day: 15, Hour: 10, Minute: 30, Second: 5, Microsecond: 123456}
+func (o *testOS) DatetimeNow(tz *montygo.TimeZone) (montygo.DateTime, error) {
+	dt := montygo.DateTime{Year: 2024, Month: 1, Day: 15, Hour: 10, Minute: 30, Second: 5, Microsecond: 123456}
 	if tz != nil {
 		off := tz.OffsetSeconds
 		dt.OffsetSeconds = &off
@@ -246,74 +246,74 @@ func (o *testOS) DatetimeNow(tz *monty.TimeZone) (monty.DateTime, error) {
 
 type partialOS struct{ *testOS }
 
-func (partialOS) PathExists(monty.Path) (bool, error) { return false, osaccess.ErrNotImplemented }
+func (partialOS) PathExists(montygo.Path) (bool, error) { return false, osaccess.ErrNotImplemented }
 
 type pathRecordingOS struct {
 	*testOS
 	readArgs []string
 }
 
-func (o *pathRecordingOS) PathOpen(path monty.Path, mode string) (*monty.FileHandle, error) {
+func (o *pathRecordingOS) PathOpen(path montygo.Path, mode string) (*montygo.FileHandle, error) {
 	if _, ok := o.files[string(path)]; strings.HasPrefix(mode, "r") && !ok {
-		return nil, monty.Raise("FileNotFoundError", "No such file: "+string(path))
+		return nil, montygo.Raise("FileNotFoundError", "No such file: "+string(path))
 	}
-	return monty.NewFileHandle(string(path), mode, 0)
+	return montygo.NewFileHandle(string(path), mode, 0)
 }
 
-func (o *pathRecordingOS) PathReadText(path monty.Path) (string, error) {
+func (o *pathRecordingOS) PathReadText(path montygo.Path) (string, error) {
 	o.readArgs = append(o.readArgs, string(path))
 	return o.testOS.PathReadText(path)
 }
 
 func TestOSAccessRaw(t *testing.T) {
-	montyTest(t, "test_abstract_filesystem_exists", func(t *testing.T, b monty.Backend) {
+	montyTest(t, "test_abstract_filesystem_exists", func(t *testing.T, b montygo.Backend) {
 		fs := newTestOS()
 		fs.files["/test.txt"] = []byte("hello")
 		require.Equal(t, true, mustRun(t, b, `from pathlib import Path; Path("/test.txt").exists()`, osaccess.Handler(fs)))
 	})
 
-	montyTest(t, "test_abstract_filesystem_exists_missing", func(t *testing.T, b monty.Backend) {
+	montyTest(t, "test_abstract_filesystem_exists_missing", func(t *testing.T, b montygo.Backend) {
 		require.Equal(t, false, mustRun(t, b, `from pathlib import Path; Path("/missing.txt").exists()`, osaccess.Handler(newTestOS())))
 	})
 
-	// Python compares type name and repr; Go compares the monty.Date value.
-	montyTest(t, "test_abstract_os_date_today", func(t *testing.T, b monty.Backend) {
+	// Python compares type name and repr; Go compares the montygo.Date value.
+	montyTest(t, "test_abstract_os_date_today", func(t *testing.T, b montygo.Backend) {
 		result := mustRun(t, b, `from datetime import date; date.today()`, osaccess.Handler(newTestOS()))
-		require.Equal(t, monty.Date{Year: 2024, Month: 1, Day: 15}, result)
+		require.Equal(t, montygo.Date{Year: 2024, Month: 1, Day: 15}, result)
 	})
 
 	// Python compares repr "datetime.datetime(2024, 1, 15, 10, 30, 5, 123456, tzinfo=datetime.timezone.utc)"; Go compares fields.
-	montyTest(t, "test_abstract_os_datetime_now_with_timezone", func(t *testing.T, b monty.Backend) {
+	montyTest(t, "test_abstract_os_datetime_now_with_timezone", func(t *testing.T, b montygo.Backend) {
 		result := mustRun(t, b, `from datetime import datetime, timezone; datetime.now(timezone.utc)`, osaccess.Handler(newTestOS()))
-		dt, ok := result.(monty.DateTime)
+		dt, ok := result.(montygo.DateTime)
 		require.True(t, ok, "got %T", result)
 		require.NotNil(t, dt.OffsetSeconds)
 		require.Equal(t, int32(0), *dt.OffsetSeconds)
 		dt.OffsetSeconds = nil
 		dt.TimezoneName = nil
-		require.Equal(t, monty.DateTime{Year: 2024, Month: 1, Day: 15, Hour: 10, Minute: 30, Second: 5, Microsecond: 123456}, dt)
+		require.Equal(t, montygo.DateTime{Year: 2024, Month: 1, Day: 15, Hour: 10, Minute: 30, Second: 5, Microsecond: 123456}, dt)
 	})
 
 	t.Run("test_abstract_os_dispatch", func(t *testing.T) {
 		fs := newTestOS()
 		fs.files["/test.txt"] = []byte("hello")
-		result, err := osaccess.Dispatch(context.Background(), fs, "Path.read_text", []any{monty.Path("/test.txt")}, monty.Kwargs{})
+		result, err := osaccess.Dispatch(context.Background(), fs, "Path.read_text", []any{montygo.Path("/test.txt")}, montygo.Kwargs{})
 		require.NoError(t, err)
 		require.Equal(t, "hello", result)
 	})
 
 	t.Run("test_abstract_os_dispatch_not_handled", func(t *testing.T) {
 		fs := partialOS{newTestOS()}
-		result, err := osaccess.Handler(fs)(context.Background(), "Path.exists", []any{monty.Path("/tmp")}, monty.Kwargs{})
+		result, err := osaccess.Handler(fs)(context.Background(), "Path.exists", []any{montygo.Path("/tmp")}, montygo.Kwargs{})
 		require.NoError(t, err)
-		require.Same(t, monty.NotHandled, result)
+		require.Same(t, montygo.NotHandled, result)
 	})
 
-	montyTest(t, "test_abstract_os_dispatch_not_handled_falls_back_in_run", func(t *testing.T, b monty.Backend) {
+	montyTest(t, "test_abstract_os_dispatch_not_handled_falls_back_in_run", func(t *testing.T, b montygo.Backend) {
 		fs := newTestOS()
-		handler := func(ctx context.Context, name string, args []any, kwargs monty.Kwargs) (any, error) {
+		handler := func(ctx context.Context, name string, args []any, kwargs montygo.Kwargs) (any, error) {
 			if name == "Path.exists" {
-				return monty.NotHandled, nil
+				return montygo.NotHandled, nil
 			}
 			return osaccess.Dispatch(ctx, fs, name, args, kwargs)
 		}
@@ -329,7 +329,7 @@ message
 		require.Equal(t, "Permission denied: '/tmp'", mustRun(t, b, code, handler))
 	})
 
-	montyTest(t, "test_abstract_filesystem_is_file", func(t *testing.T, b monty.Backend) {
+	montyTest(t, "test_abstract_filesystem_is_file", func(t *testing.T, b montygo.Backend) {
 		fs := newTestOS()
 		fs.files["/file.txt"] = []byte("content")
 		fs.directories["/mydir"] = true
@@ -337,10 +337,10 @@ message
 from pathlib import Path
 (Path('/file.txt').is_file(), Path('/mydir').is_file())
 `
-		require.Equal(t, monty.Tuple{true, false}, mustRun(t, b, code, osaccess.Handler(fs)))
+		require.Equal(t, montygo.Tuple{true, false}, mustRun(t, b, code, osaccess.Handler(fs)))
 	})
 
-	montyTest(t, "test_abstract_filesystem_is_dir", func(t *testing.T, b monty.Backend) {
+	montyTest(t, "test_abstract_filesystem_is_dir", func(t *testing.T, b montygo.Backend) {
 		fs := newTestOS()
 		fs.files["/file.txt"] = []byte("content")
 		fs.directories["/mydir"] = true
@@ -348,36 +348,36 @@ from pathlib import Path
 from pathlib import Path
 (Path('/file.txt').is_dir(), Path('/mydir').is_dir())
 `
-		require.Equal(t, monty.Tuple{false, true}, mustRun(t, b, code, osaccess.Handler(fs)))
+		require.Equal(t, montygo.Tuple{false, true}, mustRun(t, b, code, osaccess.Handler(fs)))
 	})
 
-	montyTest(t, "test_abstract_filesystem_read_text", func(t *testing.T, b monty.Backend) {
+	montyTest(t, "test_abstract_filesystem_read_text", func(t *testing.T, b montygo.Backend) {
 		fs := newTestOS()
 		fs.files["/hello.txt"] = []byte("Hello, World!")
 		require.Equal(t, "Hello, World!", mustRun(t, b, `from pathlib import Path; Path("/hello.txt").read_text()`, osaccess.Handler(fs)))
 	})
 
 	// Python round-trips exception() to a FileNotFoundError instance; Go checks the exception info.
-	montyTest(t, "test_abstract_filesystem_read_text_missing", func(t *testing.T, b monty.Backend) {
+	montyTest(t, "test_abstract_filesystem_read_text_missing", func(t *testing.T, b montygo.Backend) {
 		_, err := run(t, b, `from pathlib import Path; Path("/missing.txt").read_text()`, osaccess.Handler(newTestOS()))
 		rte := requireRuntimeError(t, err, "FileNotFoundError: No such file: /missing.txt")
 		info := rte.Exception()
 		require.Equal(t, "FileNotFoundError", info.TypeName)
-		require.True(t, monty.IsSubclass(info.TypeName, "OSError"))
+		require.True(t, montygo.IsSubclass(info.TypeName, "OSError"))
 	})
 
-	montyTest(t, "test_abstract_filesystem_read_bytes", func(t *testing.T, b monty.Backend) {
+	montyTest(t, "test_abstract_filesystem_read_bytes", func(t *testing.T, b montygo.Backend) {
 		fs := newTestOS()
 		fs.files["/data.bin"] = []byte{0, 1, 2, 3}
 		require.Equal(t, []byte{0, 1, 2, 3}, mustRun(t, b, `from pathlib import Path; Path("/data.bin").read_bytes()`, osaccess.Handler(fs)))
 	})
 
-	// Python records type(path) is PurePosixPath; Go records the raw handler argument type (monty.Path, never a handle).
-	montyTest(t, "test_abstract_filesystem_open_passes_path_to_read_handler", func(t *testing.T, b monty.Backend) {
+	// Python records type(path) is PurePosixPath; Go records the raw handler argument type (montygo.Path, never a handle).
+	montyTest(t, "test_abstract_filesystem_open_passes_path_to_read_handler", func(t *testing.T, b montygo.Backend) {
 		fs := &pathRecordingOS{testOS: newTestOS()}
 		fs.files["/hello.txt"] = []byte("hi")
 		var rawArgs []any
-		handler := func(ctx context.Context, name string, args []any, kwargs monty.Kwargs) (any, error) {
+		handler := func(ctx context.Context, name string, args []any, kwargs montygo.Kwargs) (any, error) {
 			if name == "Path.read_text" {
 				rawArgs = append(rawArgs, args[0])
 			}
@@ -391,15 +391,15 @@ data
 `
 		require.Equal(t, "hi", mustRun(t, b, code, handler))
 		require.Equal(t, []string{"/hello.txt"}, fs.readArgs)
-		require.Equal(t, []any{monty.Path("/hello.txt")}, rawArgs)
+		require.Equal(t, []any{montygo.Path("/hello.txt")}, rawArgs)
 
 		fs.readArgs, rawArgs = nil, nil
 		require.Equal(t, "hi", mustRun(t, b, `from pathlib import Path; Path("/hello.txt").read_text()`, handler))
 		require.Equal(t, []string{"/hello.txt"}, fs.readArgs)
-		require.Equal(t, []any{monty.Path("/hello.txt")}, rawArgs)
+		require.Equal(t, []any{montygo.Path("/hello.txt")}, rawArgs)
 	})
 
-	montyTest(t, "test_abstract_filesystem_stat_file", func(t *testing.T, b monty.Backend) {
+	montyTest(t, "test_abstract_filesystem_stat_file", func(t *testing.T, b montygo.Backend) {
 		fs := newTestOS()
 		fs.files["/file.txt"] = []byte("hello world")
 		code := `
@@ -407,10 +407,10 @@ from pathlib import Path
 s = Path('/file.txt').stat()
 (s.st_size, s.st_mode)
 `
-		require.Equal(t, monty.Tuple{int64(11), int64(0o100644)}, mustRun(t, b, code, osaccess.Handler(fs)))
+		require.Equal(t, montygo.Tuple{int64(11), int64(0o100644)}, mustRun(t, b, code, osaccess.Handler(fs)))
 	})
 
-	montyTest(t, "test_abstract_filesystem_stat_directory", func(t *testing.T, b monty.Backend) {
+	montyTest(t, "test_abstract_filesystem_stat_directory", func(t *testing.T, b montygo.Backend) {
 		fs := newTestOS()
 		fs.directories["/mydir"] = true
 		code := `
@@ -421,17 +421,17 @@ s.st_mode
 		require.Equal(t, int64(0o040755), mustRun(t, b, code, osaccess.Handler(fs)))
 	})
 
-	montyTest(t, "test_abstract_filesystem_stat_missing", func(t *testing.T, b monty.Backend) {
+	montyTest(t, "test_abstract_filesystem_stat_missing", func(t *testing.T, b montygo.Backend) {
 		_, err := run(t, b, "from pathlib import Path\nPath(\"/missing\").stat()", osaccess.Handler(newTestOS()))
 		rte := requireRuntimeError(t, err, "FileNotFoundError: No such file or directory: /missing")
 		require.Equal(t, `Traceback (most recent call last):
   File "<python-input-0>", line 2, in <module>
     Path("/missing").stat()
     ~~~~~~~~~~~~~~~~~~~~~~~
-FileNotFoundError: No such file or directory: /missing`, rte.Display(monty.DisplayTraceback))
+FileNotFoundError: No such file or directory: /missing`, rte.Display(montygo.DisplayTraceback))
 	})
 
-	montyTest(t, "test_abstract_filesystem_iterdir", func(t *testing.T, b monty.Backend) {
+	montyTest(t, "test_abstract_filesystem_iterdir", func(t *testing.T, b montygo.Backend) {
 		fs := newTestOS()
 		fs.directories["/mydir"] = true
 		fs.files["/mydir/a.txt"] = []byte("a")
@@ -446,13 +446,13 @@ list(Path('/mydir').iterdir())
 		require.Len(t, result, 3)
 		names := make([]string, len(result))
 		for i, p := range result {
-			names[i] = string(p.(monty.Path))
+			names[i] = string(p.(montygo.Path))
 		}
 		sort.Strings(names)
 		require.Equal(t, []string{"/mydir/a.txt", "/mydir/b.txt", "/mydir/subdir"}, names)
 	})
 
-	montyTest(t, "test_abstract_filesystem_iterdir_empty", func(t *testing.T, b monty.Backend) {
+	montyTest(t, "test_abstract_filesystem_iterdir_empty", func(t *testing.T, b montygo.Backend) {
 		fs := newTestOS()
 		fs.directories["/empty"] = true
 		code := `
@@ -462,7 +462,7 @@ list(Path('/empty').iterdir())
 		require.Equal(t, []any{}, mustRun(t, b, code, osaccess.Handler(fs)))
 	})
 
-	montyTest(t, "test_abstract_filesystem_resolve", func(t *testing.T, b monty.Backend) {
+	montyTest(t, "test_abstract_filesystem_resolve", func(t *testing.T, b montygo.Backend) {
 		code := `
 from pathlib import Path
 str(Path('/foo/bar/../baz').resolve())
@@ -470,7 +470,7 @@ str(Path('/foo/bar/../baz').resolve())
 		require.Equal(t, "/foo/baz", mustRun(t, b, code, osaccess.Handler(newTestOS())))
 	})
 
-	montyTest(t, "test_abstract_filesystem_absolute", func(t *testing.T, b monty.Backend) {
+	montyTest(t, "test_abstract_filesystem_absolute", func(t *testing.T, b montygo.Backend) {
 		code := `
 from pathlib import Path
 str(Path('/already/absolute').absolute())
@@ -478,7 +478,7 @@ str(Path('/already/absolute').absolute())
 		require.Equal(t, "/already/absolute", mustRun(t, b, code, osaccess.Handler(newTestOS())))
 	})
 
-	montyTest(t, "test_abstract_filesystem_getenv", func(t *testing.T, b monty.Backend) {
+	montyTest(t, "test_abstract_filesystem_getenv", func(t *testing.T, b montygo.Backend) {
 		code := `
 import os
 os.getenv('TEST_VAR')
@@ -486,7 +486,7 @@ os.getenv('TEST_VAR')
 		require.Equal(t, "test_value", mustRun(t, b, code, osaccess.Handler(newTestOS())))
 	})
 
-	montyTest(t, "test_abstract_filesystem_getenv_missing", func(t *testing.T, b monty.Backend) {
+	montyTest(t, "test_abstract_filesystem_getenv_missing", func(t *testing.T, b montygo.Backend) {
 		code := `
 import os
 os.getenv('NONEXISTENT')
@@ -494,7 +494,7 @@ os.getenv('NONEXISTENT')
 		require.Nil(t, mustRun(t, b, code, osaccess.Handler(newTestOS())))
 	})
 
-	montyTest(t, "test_abstract_filesystem_getenv_default", func(t *testing.T, b monty.Backend) {
+	montyTest(t, "test_abstract_filesystem_getenv_default", func(t *testing.T, b montygo.Backend) {
 		code := `
 import os
 os.getenv('NONEXISTENT', 'my_default')
@@ -502,16 +502,16 @@ os.getenv('NONEXISTENT', 'my_default')
 		require.Equal(t, "my_default", mustRun(t, b, code, osaccess.Handler(newTestOS())))
 	})
 
-	// Python asserts type(result) is PurePosixPath; Go asserts monty.Path.
-	montyTest(t, "test_path_monty_to_py", func(t *testing.T, b monty.Backend) {
+	// Python asserts type(result) is PurePosixPath; Go asserts montygo.Path.
+	montyTest(t, "test_path_monty_to_py", func(t *testing.T, b montygo.Backend) {
 		result := mustRun(t, b, `from pathlib import Path; Path("/foo/bar/thing.txt")`, nil)
-		require.IsType(t, monty.Path(""), result)
-		require.Equal(t, monty.Path("/foo/bar/thing.txt"), result)
+		require.IsType(t, montygo.Path(""), result)
+		require.Equal(t, montygo.Path("/foo/bar/thing.txt"), result)
 	})
 
-	// Python passes a PurePosixPath input; Go passes monty.Path.
-	montyTest(t, "test_path_py_to_monty", func(t *testing.T, b monty.Backend) {
-		result, err := runFeed(t, b, `f"type={type(p)} {p=}"`, &monty.FeedOptions{Inputs: map[string]any{"p": monty.Path("/foo/bar/thing.txt")}})
+	// Python passes a PurePosixPath input; Go passes montygo.Path.
+	montyTest(t, "test_path_py_to_monty", func(t *testing.T, b montygo.Backend) {
+		result, err := runFeed(t, b, `f"type={type(p)} {p=}"`, &montygo.FeedOptions{Inputs: map[string]any{"p": montygo.Path("/foo/bar/thing.txt")}})
 		require.NoError(t, err)
 		require.Equal(t, "type=<class 'PosixPath'> p=PosixPath('/foo/bar/thing.txt')", result)
 	})
@@ -520,10 +520,10 @@ os.getenv('NONEXISTENT', 'my_default')
 		ctx := context.Background()
 		result, err := osaccess.Dispatch(ctx, newTestOS(), "os.unknown", nil, nil)
 		require.NoError(t, err)
-		require.Same(t, monty.NotHandled, result)
-		result, err = osaccess.Handler(osaccess.Base{})(ctx, "open", []any{monty.Path("/x"), "r"}, nil)
+		require.Same(t, montygo.NotHandled, result)
+		result, err = osaccess.Handler(osaccess.Base{})(ctx, "open", []any{montygo.Path("/x"), "r"}, nil)
 		require.NoError(t, err)
-		require.Same(t, monty.NotHandled, result)
+		require.Same(t, montygo.NotHandled, result)
 	})
 }
 

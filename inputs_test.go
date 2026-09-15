@@ -1,19 +1,19 @@
-package monty_test
+package montygo_test
 
 import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 func coreAInputs(inputs map[string]any) runOptions {
-	return runOptions{FeedOptions: monty.FeedOptions{Inputs: inputs}}
+	return runOptions{FeedOptions: montygo.FeedOptions{Inputs: inputs}}
 }
 
 func TestInputs(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b monty.Backend) {
+	eachBackend(t, func(t *testing.T, b montygo.Backend) {
 		t.Run("single input", func(t *testing.T) {
 			require.Equal(t, int64(42), mustRun(t, b, "x", coreAInputs(map[string]any{"x": 42})))
 		})
@@ -42,14 +42,14 @@ func TestInputs(t *testing.T) {
 
 		t.Run("missing input raises", func(t *testing.T) {
 			_, err := run(t, b, "x + y", coreAInputs(map[string]any{"x": 1}))
-			var runtimeErr *monty.RuntimeError
+			var runtimeErr *montygo.RuntimeError
 			require.ErrorAs(t, err, &runtimeErr)
 			require.EqualError(t, err, "NameError: name 'y' is not defined")
 		})
 
 		t.Run("all inputs missing raises", func(t *testing.T) {
 			_, err := run(t, b, "x", runOptions{})
-			var runtimeErr *monty.RuntimeError
+			var runtimeErr *montygo.RuntimeError
 			require.ErrorAs(t, err, &runtimeErr)
 			require.EqualError(t, err, "NameError: name 'x' is not defined")
 		})

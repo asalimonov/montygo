@@ -1,4 +1,4 @@
-package monty
+package montygo
 
 import (
 	"context"
@@ -23,7 +23,22 @@ type AttrPolicy struct {
 }
 
 // All exposes every public name.
-var All = AttrPolicy{set: true, all: true}
+func All() AttrPolicy { return AttrPolicy{set: true, all: true} }
+
+// Expose exposes exactly the methods of the interface T under their sandbox
+// names, so widening the surface means editing the interface. T MUST be an
+// interface type.
+func Expose[T any]() AttrPolicy {
+	t := reflect.TypeFor[T]()
+	if t.Kind() != reflect.Interface {
+		panic(fmt.Sprintf("montygo.Expose: %s is not an interface type", t))
+	}
+	names := make([]string, 0, t.NumMethod())
+	for i := 0; i < t.NumMethod(); i++ {
+		names = append(names, SandboxName(t.Method(i).Name))
+	}
+	return Names(names...)
+}
 
 // Names exposes exactly the given sandbox names.
 func Names(names ...string) AttrPolicy { return AttrPolicy{set: true, names: names} }
@@ -82,6 +97,10 @@ type ClassInstanceOptions struct {
 	// ID pins the instance identity (a canonical uuid).
 	ID        string
 	ClassType *ClassType
+	// ParameterNames labels method parameters in Host.Stubs, by sandbox method
+	// name. Each list excludes context.Context and Kwargs and includes a
+	// variadic parameter. Every key MUST name an allowed method.
+	ParameterNames map[string][]string
 }
 
 // ClassInstance exposes a host object to the sandbox under a policy. When the
@@ -124,6 +143,7 @@ func NewClassInstance(instance any, opts ClassInstanceOptions) (*ClassInstance, 
 		return nil, &ValueError{Message: "ClassInstance expects an object instance"}
 	}
 	c := &ClassInstance{instance: instance, opts: opts}
+	c.opts.ParameterNames = copyParameterNames(opts.ParameterNames)
 	if opts.ID != "" {
 		id, err := normalizeID("ClassInstance", opts.ID)
 		if err != nil {
@@ -149,7 +169,46 @@ func NewClassInstance(instance any, opts ClassInstanceOptions) (*ClassInstance, 
 		}
 		c.classType = ct
 	}
+	if err := c.validateParameterNames(); err != nil {
+		return nil, err
+	}
 	return c, nil
+}
+
+// validateParameterNames checks the instance's labels and the class-level
+// labels of every method the instance exposes.
+func (c *ClassInstance) validateParameterNames() error {
+	methods := c.classType.stubMethods(c.opts.AllowedMethods)
+	sigs := make(map[string]reflect.Type, len(methods))
+	for _, m := range methods {
+		sigs[m.name] = m.sig
+	}
+	for _, name := range sortedKeys(c.opts.ParameterNames) {
+		sig, ok := sigs[name]
+		if !ok {
+			return &ValueError{Message: fmt.Sprintf("parameter names: unknown method %q", name)}
+		}
+		if err := validateMethodParameterNames(name, sig, true, c.opts.ParameterNames[name]); err != nil {
+			return err
+		}
+	}
+	for _, m := range methods {
+		if names, ok := c.classType.opts.ParameterNames[m.name]; ok {
+			if err := validateMethodParameterNames(m.name, m.sig, true, names); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// parameterNames returns the labels of an exposed method: the instance's own,
+// else the class's.
+func (c *ClassInstance) parameterNames(method string) []string {
+	if names, ok := c.opts.ParameterNames[method]; ok {
+		return names
+	}
+	return c.classType.opts.ParameterNames[method]
 }
 
 // MustClassInstance is NewClassInstance that panics on error.
@@ -283,7 +342,10 @@ func (c *ClassInstance) callMethod(ctx context.Context, name string, args []any,
 		return nil, err
 	}
 	if fut, ok := result.(*Future); ok {
-		return fut.then(func(v any) (any, error) { return c.convert(name, v) }), nil
+		if fut == nil {
+			return nil, &ValueError{Message: "host returned a nil Future"}
+		}
+		return fut.thenContext(ctx, func(v any) (any, error) { return c.convert(name, v) }), nil
 	}
 	return c.convert(name, result)
 }
@@ -316,6 +378,9 @@ type ClassTypeOptions struct {
 	InstanceAllowedMethods AttrPolicy
 	// InstanceWrapper customizes how constructed instances are exposed.
 	InstanceWrapper func(classType *ClassType, instance any) (*ClassInstance, error)
+	// ParameterNames labels parameters of allowed statics and instance methods
+	// in Host.Stubs, by sandbox name, as ClassInstanceOptions.ParameterNames.
+	ParameterNames map[string][]string
 }
 
 // ClassType exposes a host class to the sandbox.
@@ -354,6 +419,7 @@ func newClassType(t reflect.Type, opts ClassTypeOptions) (*ClassType, error) {
 		return nil, &ValueError{Message: "ClassType expects a class (constructor function)"}
 	}
 	c := &ClassType{goType: t, opts: opts}
+	c.opts.ParameterNames = copyParameterNames(opts.ParameterNames)
 	if opts.ID != "" {
 		id, err := normalizeID("ClassType", opts.ID)
 		if err != nil {
@@ -364,7 +430,48 @@ func newClassType(t reflect.Type, opts ClassTypeOptions) (*ClassType, error) {
 		id, _ := classIDs.LoadOrStore(t, newUUID())
 		c.id = id.(string)
 	}
+	if err := c.validateParameterNames(); err != nil {
+		return nil, err
+	}
 	return c, nil
+}
+
+// validateParameterNames checks every label against the allowed static or
+// instance method of that name; a name exposed as both MUST fit both.
+func (c *ClassType) validateParameterNames() error {
+	methods := c.stubMethods(c.opts.InstanceAllowedMethods)
+	sigs := make(map[string]reflect.Type, len(methods))
+	for _, m := range methods {
+		sigs[m.name] = m.sig
+	}
+	for _, name := range sortedKeys(c.opts.ParameterNames) {
+		names := c.opts.ParameterNames[name]
+		sig, isMethod := sigs[name]
+		static, isStatic := c.staticMethod(name)
+		if !isMethod && !isStatic {
+			return &ValueError{Message: fmt.Sprintf("parameter names: unknown method %q", name)}
+		}
+		if isMethod {
+			if err := validateMethodParameterNames(name, sig, true, names); err != nil {
+				return err
+			}
+		}
+		if isStatic {
+			if err := validateMethodParameterNames(name, reflectedSignature(static), false, names); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// staticMethod returns the callable static exposed under name.
+func (c *ClassType) staticMethod(name string) (any, bool) {
+	entry, ok := c.opts.Statics[name]
+	if !ok || !c.opts.AllowedMethods.Allows(name) || !isCallable(entry) {
+		return nil, false
+	}
+	return entry, true
 }
 
 // ID returns the class identity.
@@ -461,7 +568,10 @@ func (c *ClassType) callMethod(ctx context.Context, name string, args []any, kwa
 		return nil, err
 	}
 	if fut, ok := result.(*Future); ok {
-		return fut.then(func(v any) (any, error) { return c.convert(name, v) }), nil
+		if fut == nil {
+			return nil, &ValueError{Message: "host returned a nil Future"}
+		}
+		return fut.thenContext(ctx, func(v any) (any, error) { return c.convert(name, v) }), nil
 	}
 	return c.convert(name, result)
 }
@@ -566,11 +676,21 @@ type wrapper interface {
 }
 
 type instanceStore struct {
-	mu sync.Mutex
-	m  map[string]wrapper
+	mu    sync.Mutex
+	m     map[string]wrapper
+	limit uint64
+	peak  int
 }
 
-func newInstanceStore() *instanceStore { return &instanceStore{m: map[string]wrapper{}} }
+func newInstanceStore(limit uint64) *instanceStore {
+	return &instanceStore{m: map[string]wrapper{}, limit: limit}
+}
+
+func (s *instanceStore) stats() (count, peak int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.m), s.peak
+}
 
 func sameObject(a, b any) bool {
 	if ta, ok := a.(reflect.Type); ok {
@@ -601,8 +721,16 @@ func (s *instanceStore) put(w wrapper, onlyIfAbsent bool) error {
 		if onlyIfAbsent {
 			return nil
 		}
+		s.m[w.wrapperID()] = w
+		return nil
+	}
+	if s.limit != Unlimited && uint64(len(s.m)) >= s.limit {
+		return &ResourceError{Resource: "host object", Limit: s.limit}
 	}
 	s.m[w.wrapperID()] = w
+	if len(s.m) > s.peak {
+		s.peak = len(s.m)
+	}
 	return nil
 }
 

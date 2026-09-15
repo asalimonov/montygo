@@ -6,7 +6,7 @@ import (
 	"math"
 	"sort"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 // Param is one parameter of a Python signature.
@@ -23,7 +23,7 @@ func Required(name string) Param { return Param{Name: name} }
 func Optional(name string, def any) Param { return Param{Name: name, Default: def, Optional: true} }
 
 // Bind maps positional and keyword arguments onto params, filling defaults.
-func Bind(fn string, args []any, kwargs monty.Kwargs, params ...Param) ([]any, error) {
+func Bind(fn string, args []any, kwargs montygo.Kwargs, params ...Param) ([]any, error) {
 	if len(args) > len(params) {
 		return nil, typeError("%s() takes %d positional arguments but %d were given", fn, len(params), len(args))
 	}
@@ -66,7 +66,7 @@ func Bind(fn string, args []any, kwargs monty.Kwargs, params ...Param) ([]any, e
 }
 
 func typeError(format string, args ...any) error {
-	return monty.Raise("TypeError", fmt.Sprintf(format, args...))
+	return montygo.Raise("TypeError", fmt.Sprintf(format, args...))
 }
 
 func wrongType(name, want string, v any) error {
@@ -87,7 +87,7 @@ func typeName(v any) string {
 		return "float"
 	case []any:
 		return "list"
-	case *monty.Dict:
+	case *montygo.Dict:
 		return "dict"
 	}
 	return fmt.Sprintf("%T", v)

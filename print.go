@@ -1,8 +1,9 @@
-package monty
+package montygo
 
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -24,6 +25,60 @@ type PrintTarget interface {
 type ContextPrintTarget interface {
 	PrintTarget
 	PrintContext(ctx context.Context, stream Stream, text string) error
+}
+
+// FlushingPrintTarget is a PrintTarget that buffers; Flush is called when a turn ends.
+type FlushingPrintTarget interface {
+	PrintTarget
+	Flush() error
+}
+
+// Lines delivers complete lines per stream, without their newline, and flushes
+// an unterminated remainder when the turn ends.
+func Lines(fn func(stream Stream, line string) error) PrintTarget {
+	return &lineTarget{fn: fn, partial: map[Stream]string{}}
+}
+
+type lineTarget struct {
+	mu      sync.Mutex
+	fn      func(Stream, string) error
+	partial map[Stream]string
+}
+
+func (t *lineTarget) Print(stream Stream, text string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	buf := t.partial[stream] + text
+	for {
+		i := strings.IndexByte(buf, '\n')
+		if i < 0 {
+			break
+		}
+		line := buf[:i]
+		buf = buf[i+1:]
+		if err := t.fn(stream, line); err != nil {
+			t.partial[stream] = buf
+			return err
+		}
+	}
+	t.partial[stream] = buf
+	return nil
+}
+
+func (t *lineTarget) Flush() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, stream := range [...]Stream{Stdout, Stderr} {
+		rest := t.partial[stream]
+		if rest == "" {
+			continue
+		}
+		t.partial[stream] = ""
+		if err := t.fn(stream, rest); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // PrintFunc adapts a function to PrintTarget.

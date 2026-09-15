@@ -1,4 +1,4 @@
-package monty_test
+package montygo_test
 
 import (
 	"math"
@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 func coreABytes(t *testing.T, v any) []byte {
@@ -26,7 +26,7 @@ func coreARequireBigInt(t *testing.T, want *big.Int, got any) {
 
 func coreARequirePyEqual(t *testing.T, want, got any) {
 	t.Helper()
-	require.Truef(t, monty.Equal(want, got), "expected %s, got %s", monty.Repr(want), monty.Repr(got))
+	require.Truef(t, montygo.Equal(want, got), "expected %s, got %s", montygo.Repr(want), montygo.Repr(got))
 }
 
 func coreATwoPow(n uint) *big.Int {
@@ -38,7 +38,7 @@ func coreAInt32(v int32) *int32 { return &v }
 func coreAString(v string) *string { return &v }
 
 func TestTypes(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b monty.Backend) {
+	eachBackend(t, func(t *testing.T, b montygo.Backend) {
 		t.Run("none input", func(t *testing.T) {
 			require.Equal(t, true, mustRun(t, b, "x is None", coreAInputs(map[string]any{"x": nil})))
 		})
@@ -115,20 +115,20 @@ func TestTypes(t *testing.T) {
 
 		t.Run("tuple", func(t *testing.T) {
 			result := mustRun(t, b, "(1, 2, 3)", runOptions{})
-			require.IsType(t, monty.Tuple{}, result)
-			require.Equal(t, monty.Tuple{int64(1), int64(2), int64(3)}, result)
+			require.IsType(t, montygo.Tuple{}, result)
+			require.Equal(t, montygo.Tuple{int64(1), int64(2), int64(3)}, result)
 		})
 
 		t.Run("tuple empty", func(t *testing.T) {
 			result := mustRun(t, b, "()", runOptions{})
-			require.IsType(t, monty.Tuple{}, result)
-			require.Equal(t, monty.Tuple{}, result)
+			require.IsType(t, montygo.Tuple{}, result)
+			require.Equal(t, montygo.Tuple{}, result)
 		})
 
 		t.Run("dict", func(t *testing.T) {
 			result := mustRun(t, b, `{"a": 1, "b": 2}`, runOptions{})
-			require.IsType(t, &monty.Dict{}, result)
-			dict := result.(*monty.Dict)
+			require.IsType(t, &montygo.Dict{}, result)
+			dict := result.(*montygo.Dict)
 			a, ok := dict.Get("a")
 			require.True(t, ok)
 			require.Equal(t, int64(1), a)
@@ -140,40 +140,40 @@ func TestTypes(t *testing.T) {
 
 		t.Run("dict empty", func(t *testing.T) {
 			result := mustRun(t, b, "{}", runOptions{})
-			require.IsType(t, &monty.Dict{}, result)
-			require.Equal(t, 0, result.(*monty.Dict).Len())
+			require.IsType(t, &montygo.Dict{}, result)
+			require.Equal(t, 0, result.(*montygo.Dict).Len())
 		})
 
 		t.Run("set", func(t *testing.T) {
 			result := mustRun(t, b, "{1, 2, 3}", runOptions{})
-			require.IsType(t, &monty.Set{}, result)
-			coreARequirePyEqual(t, monty.NewSet(int64(1), int64(2), int64(3)), result)
+			require.IsType(t, &montygo.Set{}, result)
+			coreARequirePyEqual(t, montygo.NewSet(int64(1), int64(2), int64(3)), result)
 		})
 
 		t.Run("set empty", func(t *testing.T) {
 			result := mustRun(t, b, "set()", runOptions{})
-			require.IsType(t, &monty.Set{}, result)
-			coreARequirePyEqual(t, monty.NewSet(), result)
+			require.IsType(t, &montygo.Set{}, result)
+			coreARequirePyEqual(t, montygo.NewSet(), result)
 		})
 
 		t.Run("frozenset", func(t *testing.T) {
 			result := mustRun(t, b, "frozenset([1, 2, 3])", runOptions{})
-			require.IsType(t, &monty.FrozenSet{}, result)
-			coreARequirePyEqual(t, monty.NewFrozenSet(int64(1), int64(2), int64(3)), result)
+			require.IsType(t, &montygo.FrozenSet{}, result)
+			coreARequirePyEqual(t, montygo.NewFrozenSet(int64(1), int64(2), int64(3)), result)
 		})
 
 		t.Run("frozenset empty", func(t *testing.T) {
 			result := mustRun(t, b, "frozenset()", runOptions{})
-			require.IsType(t, &monty.FrozenSet{}, result)
-			coreARequirePyEqual(t, monty.NewFrozenSet(), result)
+			require.IsType(t, &montygo.FrozenSet{}, result)
+			coreARequirePyEqual(t, montygo.NewFrozenSet(), result)
 		})
 
 		t.Run("ellipsis input", func(t *testing.T) {
-			require.Equal(t, true, mustRun(t, b, "x is ...", coreAInputs(map[string]any{"x": monty.Ellipsis})))
+			require.Equal(t, true, mustRun(t, b, "x is ...", coreAInputs(map[string]any{"x": montygo.Ellipsis})))
 		})
 
 		t.Run("ellipsis output", func(t *testing.T) {
-			require.Equal(t, monty.Ellipsis, mustRun(t, b, "...", runOptions{}))
+			require.Equal(t, montygo.Ellipsis, mustRun(t, b, "...", runOptions{}))
 		})
 
 		t.Run("nested list", func(t *testing.T) {
@@ -189,29 +189,29 @@ func TestTypes(t *testing.T) {
 
 		t.Run("nested dict", func(t *testing.T) {
 			result := mustRun(t, b, `{"list": [1, 2], "nested": {"a": 1}}`, runOptions{})
-			require.IsType(t, &monty.Dict{}, result)
-			dict := result.(*monty.Dict)
+			require.IsType(t, &montygo.Dict{}, result)
+			dict := result.(*montygo.Dict)
 			list, _ := dict.Get("list")
 			require.Equal(t, []any{int64(1), int64(2)}, list)
 			nested, _ := dict.Get("nested")
-			require.IsType(t, &monty.Dict{}, nested)
-			a, _ := nested.(*monty.Dict).Get("a")
+			require.IsType(t, &montygo.Dict{}, nested)
+			a, _ := nested.(*montygo.Dict).Get("a")
 			require.Equal(t, int64(1), a)
 		})
 
 		t.Run("mixed nested", func(t *testing.T) {
 			result := mustRun(t, b, `{"list": [1, 2], "tuple": (3, 4), "nested": {"set": {5, 6}}}`, runOptions{})
-			require.IsType(t, &monty.Dict{}, result)
-			dict := result.(*monty.Dict)
+			require.IsType(t, &montygo.Dict{}, result)
+			dict := result.(*montygo.Dict)
 			list, _ := dict.Get("list")
 			require.Equal(t, []any{int64(1), int64(2)}, list)
 			tuple, _ := dict.Get("tuple")
-			require.IsType(t, monty.Tuple{}, tuple)
-			require.Equal(t, monty.Tuple{int64(3), int64(4)}, tuple)
+			require.IsType(t, montygo.Tuple{}, tuple)
+			require.Equal(t, montygo.Tuple{int64(3), int64(4)}, tuple)
 			nested, _ := dict.Get("nested")
-			require.IsType(t, &monty.Dict{}, nested)
-			set, _ := nested.(*monty.Dict).Get("set")
-			require.IsType(t, &monty.Set{}, set)
+			require.IsType(t, &montygo.Dict{}, nested)
+			set, _ := nested.(*montygo.Dict).Get("set")
+			require.IsType(t, &montygo.Set{}, set)
 		})
 
 		t.Run("nested set in list", func(t *testing.T) {
@@ -219,44 +219,44 @@ func TestTypes(t *testing.T) {
 			require.IsType(t, []any{}, result)
 			list := result.([]any)
 			require.Len(t, list, 2)
-			require.IsType(t, &monty.Set{}, list[0])
-			require.IsType(t, &monty.Set{}, list[1])
-			coreARequirePyEqual(t, monty.NewSet(int64(1), int64(2)), list[0])
-			coreARequirePyEqual(t, monty.NewSet(int64(3), int64(4)), list[1])
+			require.IsType(t, &montygo.Set{}, list[0])
+			require.IsType(t, &montygo.Set{}, list[1])
+			coreARequirePyEqual(t, montygo.NewSet(int64(1), int64(2)), list[0])
+			coreARequirePyEqual(t, montygo.NewSet(int64(3), int64(4)), list[1])
 		})
 
 		t.Run("nested bytes in dict", func(t *testing.T) {
 			result := mustRun(t, b, `{"data": b"abc"}`, runOptions{})
-			require.IsType(t, &monty.Dict{}, result)
-			data, _ := result.(*monty.Dict).Get("data")
+			require.IsType(t, &montygo.Dict{}, result)
+			data, _ := result.(*montygo.Dict).Get("data")
 			require.Equal(t, []byte{97, 98, 99}, coreABytes(t, data))
 		})
 
 		t.Run("tuple containing set", func(t *testing.T) {
 			result := mustRun(t, b, `({1, 2}, "hello")`, runOptions{})
-			require.IsType(t, monty.Tuple{}, result)
-			tuple := result.(monty.Tuple)
+			require.IsType(t, montygo.Tuple{}, result)
+			tuple := result.(montygo.Tuple)
 			require.Len(t, tuple, 2)
-			require.IsType(t, &monty.Set{}, tuple[0])
-			coreARequirePyEqual(t, monty.NewSet(int64(1), int64(2)), tuple[0])
+			require.IsType(t, &montygo.Set{}, tuple[0])
+			coreARequirePyEqual(t, montygo.NewSet(int64(1), int64(2)), tuple[0])
 			require.Equal(t, "hello", tuple[1])
 		})
 
 		t.Run("datetime input preserves timezone presence", func(t *testing.T) {
 			ctx := testCtx(t)
-			session := newSession(t, b, monty.CheckoutOptions{})
-			datetime := monty.DateTime{Year: 2020, Month: 1, Day: 2, Hour: 3, Minute: 4, Second: 5, Microsecond: 6}
-			v, err := session.FeedRun(ctx, "x", &monty.FeedOptions{Inputs: map[string]any{"x": datetime}})
+			session := newSession(t, b, montygo.CheckoutOptions{})
+			datetime := montygo.DateTime{Year: 2020, Month: 1, Day: 2, Hour: 3, Minute: 4, Second: 5, Microsecond: 6}
+			v, err := session.FeedRun(ctx, "x", &montygo.FeedOptions{Inputs: map[string]any{"x": datetime}})
 			require.NoError(t, err)
 			require.Equal(t, datetime, v)
-			v, err = session.FeedRun(ctx, "x.tzinfo is None", &monty.FeedOptions{Inputs: map[string]any{"x": datetime}})
+			v, err = session.FeedRun(ctx, "x.tzinfo is None", &montygo.FeedOptions{Inputs: map[string]any{"x": datetime}})
 			require.NoError(t, err)
 			require.Equal(t, true, v)
 
 			orphaned := datetime
 			orphaned.TimezoneName = coreAString("orphaned")
-			_, err = session.FeedRun(ctx, "x", &monty.FeedOptions{Inputs: map[string]any{"x": orphaned}})
-			var conversionErr *monty.ConversionError
+			_, err = session.FeedRun(ctx, "x", &montygo.FeedOptions{Inputs: map[string]any{"x": orphaned}})
+			var conversionErr *montygo.ConversionError
 			require.ErrorAs(t, err, &conversionErr)
 			require.EqualError(t, err, "MontyDateTime timezoneName requires offsetSeconds")
 		})
@@ -315,14 +315,14 @@ func TestTypes(t *testing.T) {
 		})
 
 		t.Run("time output from sandbox", func(t *testing.T) {
-			require.Equal(t, monty.Time{Hour: 1, Minute: 2, Second: 3, Microsecond: 4, Fold: 0},
+			require.Equal(t, montygo.Time{Hour: 1, Minute: 2, Second: 3, Microsecond: 4, Fold: 0},
 				mustRun(t, b, "import datetime\ndatetime.time(1, 2, 3, 4)", runOptions{}))
 		})
 
 		t.Run("aware time output from sandbox", func(t *testing.T) {
 			code := `import datetime
 datetime.time(6, 7, tzinfo=datetime.timezone(datetime.timedelta(hours=2), "P2"))`
-			require.Equal(t, monty.Time{
+			require.Equal(t, montygo.Time{
 				Hour:          6,
 				Minute:        7,
 				Second:        0,
@@ -334,19 +334,19 @@ datetime.time(6, 7, tzinfo=datetime.timezone(datetime.timedelta(hours=2), "P2"))
 		})
 
 		t.Run("time input round-trips", func(t *testing.T) {
-			time := monty.Time{Hour: 10, Minute: 20, Second: 30, Microsecond: 40, Fold: 1}
+			time := montygo.Time{Hour: 10, Minute: 20, Second: 30, Microsecond: 40, Fold: 1}
 			require.Equal(t, time, mustRun(t, b, "x", coreAInputs(map[string]any{"x": time})))
 		})
 
 		t.Run("time input is a real sandbox time", func(t *testing.T) {
-			time := monty.Time{Hour: 10, Minute: 20, Second: 0, Microsecond: 0}
+			time := montygo.Time{Hour: 10, Minute: 20, Second: 0, Microsecond: 0}
 			require.Equal(t, "time", mustRun(t, b, "type(x).__name__", coreAInputs(map[string]any{"x": time})))
 			require.Equal(t, int64(620), mustRun(t, b, "x.hour * 60 + x.minute", coreAInputs(map[string]any{"x": time})))
 			require.Equal(t, "10:20:00", mustRun(t, b, "x.isoformat()", coreAInputs(map[string]any{"x": time})))
 		})
 
 		t.Run("omitted fold defaults to zero", func(t *testing.T) {
-			time := monty.Time{Hour: 1, Minute: 2, Second: 0, Microsecond: 0}
+			time := montygo.Time{Hour: 1, Minute: 2, Second: 0, Microsecond: 0}
 			require.Equal(t, int64(0), mustRun(t, b, "x.fold", coreAInputs(map[string]any{"x": time})))
 		})
 	})

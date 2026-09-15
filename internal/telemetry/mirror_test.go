@@ -28,7 +28,7 @@ func newMirror(t *testing.T, pid int, hasPID bool) (*Spans, *mirrorRig) {
 	logs := &logSink{}
 	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(logs))
 	require.True(t, Install(new(byte), Components{Tracer: tp.Tracer("test"), Logger: lp.Logger("test")}, false))
-	return NewSpans(Current(), context.Background(), pid, hasPID), &mirrorRig{spans: spans, logs: logs}
+	return NewSpans(Global(), context.Background(), pid, hasPID), &mirrorRig{spans: spans, logs: logs}
 }
 
 func (r *mirrorRig) span(t *testing.T, name string) sdktrace.ReadOnlySpan {

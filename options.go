@@ -1,4 +1,4 @@
-package monty
+package montygo
 
 import (
 	"fmt"
@@ -6,6 +6,18 @@ import (
 	"time"
 
 	"github.com/asalimonov/montygo/internal/wire"
+)
+
+// Unlimited disables a limit that accepts it: MaxSuspensions, MaxMemory,
+// MaxHostObjects and MaxPendingFutures.
+const Unlimited uint64 = math.MaxUint64
+
+// UnlimitedDuration disables MaxDuration explicitly.
+const UnlimitedDuration time.Duration = math.MaxInt64
+
+const (
+	defaultMaxHostObjects    uint64 = 10_000
+	defaultMaxPendingFutures uint64 = 1000
 )
 
 // TypeCheckFormat selects how typing diagnostics render.
@@ -30,11 +42,16 @@ var typeCheckFormats = map[TypeCheckFormat]int32{
 
 // ResourceLimits bounds a session; zero values mean unlimited or the default.
 type ResourceLimits struct {
-	MaxDuration       time.Duration
-	MaxMemory         uint64
-	GCInterval        uint64
+	// MaxDuration bounds sandbox execution per session: 0 means no limit, UnlimitedDuration is explicit.
+	MaxDuration time.Duration
+	// MaxMemory bounds allocator bytes: 0 means the worker default, Unlimited disables.
+	MaxMemory  uint64
+	GCInterval uint64
+	// MaxRecursionDepth: 0 means 1000; Unlimited is rejected because the worker's stack is finite.
 	MaxRecursionDepth uint64
-	MaxSuspensions    uint64
+	// MaxSuspensions bounds host round trips per session, reset by LoadSession and
+	// LoadSnapshot: 0 means 1000, Unlimited disables.
+	MaxSuspensions uint64
 }
 
 // CheckoutOptions configure one session.
@@ -51,6 +68,37 @@ type CheckoutOptions struct {
 	AssertMessageAnnotations *uint32
 	// PrintFlushInterval: nil keeps the 5ms default, 0 restores line buffering.
 	PrintFlushInterval *time.Duration
+	// Host is a validated registry of functions and objects the session exposes;
+	// FeedOptions.ExternalLookup entries override its names.
+	Host *Host
+	// MaxHostObjects bounds host objects the session keeps for identity: 0 means 10000, Unlimited disables.
+	MaxHostObjects uint64
+	// MaxPendingFutures bounds unresolved futures per feed: 0 means 1000, Unlimited disables.
+	MaxPendingFutures uint64
+	// Stop overrides the pool's stop policy for this session; zero fields inherit.
+	Stop StopPolicy
+}
+
+type sessionLimits struct {
+	hostObjects    uint64
+	pendingFutures uint64
+	stop           StopPolicy
+}
+
+func (o CheckoutOptions) sessionLimits(poolStop StopPolicy) (sessionLimits, error) {
+	l := sessionLimits{hostObjects: o.MaxHostObjects, pendingFutures: o.MaxPendingFutures}
+	if l.hostObjects == 0 {
+		l.hostObjects = defaultMaxHostObjects
+	}
+	if l.pendingFutures == 0 {
+		l.pendingFutures = defaultMaxPendingFutures
+	}
+	stop, err := effectivePolicy(poolStop, []StopPolicy{o.Stop})
+	if err != nil {
+		return l, err
+	}
+	l.stop = stop
+	return l, nil
 }
 
 // Uint32 returns a pointer to v, for AssertMessageAnnotations.
@@ -103,17 +151,20 @@ func (o CheckoutOptions) configure() (wire.Configure, error) {
 		if l.MaxDuration < 0 {
 			return cfg, &OptionError{Message: "invalid maxDurationSecs: can not convert float seconds to Duration: value is negative"}
 		}
-		if l.MaxDuration > 0 {
+		if l.MaxDuration > 0 && l.MaxDuration != UnlimitedDuration {
 			micros := uint64(l.MaxDuration / time.Microsecond)
 			limits.MaxDurationMicros = &micros
 		}
-		if l.MaxMemory > 0 {
+		if l.MaxMemory > 0 && l.MaxMemory != Unlimited {
 			mem := l.MaxMemory
 			limits.MaxMemoryBytes = &mem
 		}
 		if l.GCInterval > 0 {
 			gc := l.GCInterval
 			limits.GCInterval = &gc
+		}
+		if l.MaxRecursionDepth == Unlimited {
+			return cfg, &OptionError{Message: "maxRecursionDepth cannot be unlimited"}
 		}
 		if l.MaxRecursionDepth > 0 {
 			recursion = l.MaxRecursionDepth

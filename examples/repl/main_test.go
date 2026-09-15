@@ -2,7 +2,12 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,12 +152,73 @@ func TestArgumentErrors(t *testing.T) {
 		{[]string{"--mount", dir + "::/data::rwx"}, "invalid mount mode 'rwx' in '" + dir + "::/data::rwx': expected 'ro', 'rw', or 'overlay'"},
 		{[]string{"-m", dir + "::/data::rw::"}, "invalid write limit in '" + dir + "::/data::rw::': value must not be empty"},
 		{[]string{"-m", dir + "::/data::rw::-5"}, "invalid write limit '-5' in '" + dir + "::/data::rw::-5': expected a non-negative integer"},
+		{[]string{"-ws-ca", "ca.pem"}, "-ws-ca and -ws-insecure-skip-verify require -ws"},
+		{[]string{"-ws-insecure-skip-verify"}, "-ws-ca and -ws-insecure-skip-verify require -ws"},
 	} {
 		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
 			err := run(t.Context(), console{in: strings.NewReader(""), out: io.Discard, errOut: io.Discard}, tc.args)
 			require.EqualError(t, err, tc.want)
 		})
 	}
+}
+
+func TestWebSocketFlagParsing(t *testing.T) {
+	srv := httptest.NewTLSServer(http.NotFoundHandler())
+	srv.Close()
+	dir := t.TempDir()
+	caFile := filepath.Join(dir, "ca.pem")
+	require.NoError(t, os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600))
+	notPEM := filepath.Join(dir, "not.pem")
+	require.NoError(t, os.WriteFile(notPEM, []byte("not a certificate"), 0o600))
+
+	parse := func(t *testing.T, args ...string) wsOptions {
+		t.Helper()
+		o, err := parseOptions(args, io.Discard)
+		require.NoError(t, err)
+		return o.ws
+	}
+
+	t.Run("no TLS flags keep the system defaults", func(t *testing.T) {
+		ws := parse(t, "-ws", "ws://127.0.0.1:8000/")
+		require.Equal(t, wsOptions{url: "ws://127.0.0.1:8000/"}, ws)
+		cfg, err := ws.tlsConfig()
+		require.NoError(t, err)
+		require.Nil(t, cfg)
+	})
+
+	t.Run("a CA file becomes the root pool", func(t *testing.T) {
+		ws := parse(t, "-ws", "wss://monty.test/", "-ws-ca", caFile)
+		require.Equal(t, wsOptions{url: "wss://monty.test/", caFile: caFile}, ws)
+		cfg, err := ws.tlsConfig()
+		require.NoError(t, err)
+		require.Equal(t, uint16(tls.VersionTLS12), cfg.MinVersion)
+		require.False(t, cfg.InsecureSkipVerify)
+		_, err = srv.Certificate().Verify(x509.VerifyOptions{Roots: cfg.RootCAs})
+		require.NoError(t, err)
+	})
+
+	t.Run("insecure skip verify", func(t *testing.T) {
+		cfg, err := parse(t, "-ws", "wss://monty.test/", "-ws-insecure-skip-verify").tlsConfig()
+		require.NoError(t, err)
+		require.True(t, cfg.InsecureSkipVerify)
+		require.Nil(t, cfg.RootCAs)
+	})
+
+	t.Run("a CA file without certificates", func(t *testing.T) {
+		_, err := parse(t, "-ws", "wss://monty.test/", "-ws-ca", notPEM).tlsConfig()
+		require.EqualError(t, err, "no certificates found in "+notPEM)
+	})
+
+	t.Run("a missing CA file", func(t *testing.T) {
+		err := run(t.Context(), console{in: strings.NewReader(""), out: io.Discard, errOut: io.Discard},
+			[]string{"-ws", "wss://monty.test/", "-ws-ca", filepath.Join(dir, "missing.pem")})
+		require.ErrorIs(t, err, os.ErrNotExist)
+	})
+
+	t.Run("-ws builds a WebSocket pool", func(t *testing.T) {
+		err := run(t.Context(), console{in: strings.NewReader(""), out: io.Discard, errOut: io.Discard}, []string{"-ws", "ftp://127.0.0.1:9"})
+		require.ErrorContains(t, err, `ftp://127.0.0.1:9: unsupported URL scheme "ftp"`)
+	})
 }
 
 func TestParseMemorySize(t *testing.T) {

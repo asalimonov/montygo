@@ -1,4 +1,4 @@
-package monty
+package montygo
 
 import (
 	"context"
@@ -6,10 +6,12 @@ import (
 	"io"
 	"runtime"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/asalimonov/montygo/internal/pool"
+	"github.com/asalimonov/montygo/internal/telemetry"
 	"github.com/asalimonov/montygo/internal/wasmblob"
 	"github.com/asalimonov/montygo/internal/worker"
 )
@@ -60,6 +62,23 @@ type Options struct {
 	DisableWasmCache bool
 	// WorkerStderr receives worker diagnostics: nil means os.Stderr.
 	WorkerStderr io.Writer
+	// MaxPendingBytes bounds worker output buffered by the parent per native or
+	// wasm worker: 0 means 64 MiB, UnlimitedPendingBytes disables the bound.
+	MaxPendingBytes int64
+	// Telemetry selects this pool's telemetry; nil uses the process-wide installation.
+	Telemetry *TelemetryComponents
+	// Stop is the default stop policy of this pool's sessions; zero fields inherit DefaultStopPolicy.
+	Stop StopPolicy
+}
+
+// UnlimitedPendingBytes disables the buffered frame bound.
+const UnlimitedPendingBytes int64 = -1
+
+const defaultMaxPendingBytes int64 = 64 << 20
+
+// PoolStats counts a pool's workers by state.
+type PoolStats struct {
+	Starting, Active, Idle, Retiring int
 }
 
 // Pool is an elastic set of sandbox workers.
@@ -68,21 +87,44 @@ type Pool struct {
 	backend Backend
 	binary  string
 	closed  atomic.Bool
+	rec     *telemetry.Recorder
 	metered bool
 	// connectHeaders supplies per-checkout WebSocket upgrade headers.
 	connectHeaders func(ctx context.Context) (map[string]string, error)
+	sessionsMu     sync.Mutex
+	sessions       map[*Session]struct{}
+	stop           StopPolicy
 }
 
 // New creates a pool.
 func New(ctx context.Context, opts Options) (*Pool, error) {
-	spawner, backend, binary, err := resolveSpawner(ctx, opts)
+	rec := resolveRecorder(opts.Telemetry)
+	spawner, backend, binary, err := resolveSpawner(ctx, opts, rec)
 	if err != nil {
 		return nil, err
 	}
-	return newPool(ctx, opts, spawner, backend, binary, false)
+	return newPool(ctx, opts, spawner, backend, binary, false, rec)
 }
 
-func newPool(ctx context.Context, opts Options, spawner worker.Spawner, backend Backend, binary string, singleUse bool) (*Pool, error) {
+func pendingBytes(opts Options) int64 {
+	switch {
+	case opts.MaxPendingBytes == 0:
+		return defaultMaxPendingBytes
+	case opts.MaxPendingBytes < 0:
+		return 0
+	}
+	return opts.MaxPendingBytes
+}
+
+func pendingObserver(rec *telemetry.Recorder) worker.PendingBytesObserver {
+	if !rec.Metering() {
+		return nil
+	}
+	m := telemetry.NewPoolMetrics(rec)
+	return m.PendingBytes
+}
+
+func newPool(ctx context.Context, opts Options, spawner worker.Spawner, backend Backend, binary string, singleUse bool, rec *telemetry.Recorder) (*Pool, error) {
 	minProcs := opts.MinProcesses
 	switch {
 	case minProcs == 0:
@@ -104,7 +146,12 @@ func newPool(ctx context.Context, opts Options, spawner worker.Spawner, backend 
 	if grace == 0 {
 		grace = time.Second
 	}
-	metrics := currentMetrics()
+	stop, err := effectivePolicy(DefaultStopPolicy, []StopPolicy{opts.Stop})
+	if err != nil {
+		return nil, err
+	}
+	metrics := poolMetrics(rec)
+	p := &Pool{backend: backend, binary: binary, rec: rec, metered: metrics != nil, sessions: map[*Session]struct{}{}, stop: stop}
 	cfg := pool.Config{
 		Spawner:               spawner,
 		MinProcesses:          minProcs,
@@ -115,7 +162,7 @@ func newPool(ctx context.Context, opts Options, spawner worker.Spawner, backend 
 		GraceDisabled:         opts.DurationLimitGrace == NoDurationLimitGrace,
 		MaxCheckoutsPerWorker: opts.MaxCheckoutsPerWorker,
 		SingleUse:             singleUse,
-		MontyVersion:          Version,
+		MontyVersion:          MontyVersion,
 		ProtocolVersion:       ProtocolVersion,
 		Metrics:               metrics,
 	}
@@ -123,33 +170,35 @@ func newPool(ctx context.Context, opts Options, spawner worker.Spawner, backend 
 	if err != nil {
 		return nil, spawnError(err)
 	}
-	return &Pool{inner: inner, backend: backend, binary: binary, metered: metrics != nil}, nil
+	p.inner = inner
+	return p, nil
 }
 
-func resolveSpawner(ctx context.Context, opts Options) (worker.Spawner, Backend, string, error) {
+func resolveSpawner(ctx context.Context, opts Options, rec *telemetry.Recorder) (worker.Spawner, Backend, string, error) {
+	pending, observe := pendingBytes(opts), pendingObserver(rec)
 	switch opts.Backend {
 	case BackendNative:
 		bin, err := FindMontyBinary(opts.BinaryPath)
 		if err != nil {
 			return nil, 0, "", err
 		}
-		return newSubprocessSpawner(bin, opts.WorkerStderr), BackendNative, bin, nil
+		return newSubprocessSpawner(bin, opts.WorkerStderr, pending, observe), BackendNative, bin, nil
 	case BackendWasm:
-		s, err := wasmSpawner(ctx, opts)
+		s, err := wasmSpawner(ctx, opts, pending, observe)
 		return s, BackendWasm, "", err
 	case BackendAuto:
 		if bin, err := FindMontyBinary(opts.BinaryPath); err == nil && nativeSupported {
-			return newSubprocessSpawner(bin, opts.WorkerStderr), BackendNative, bin, nil
+			return newSubprocessSpawner(bin, opts.WorkerStderr, pending, observe), BackendNative, bin, nil
 		} else if opts.BinaryPath != "" {
 			return nil, 0, "", err
 		}
-		s, err := wasmSpawner(ctx, opts)
+		s, err := wasmSpawner(ctx, opts, pending, observe)
 		return s, BackendWasm, "", err
 	}
 	return nil, 0, "", &OptionError{Message: "use NewWebSocket for the WebSocket backend"}
 }
 
-func wasmSpawner(ctx context.Context, opts Options) (worker.Spawner, error) {
+func wasmSpawner(ctx context.Context, opts Options, pending int64, observe worker.PendingBytesObserver) (worker.Spawner, error) {
 	blob, err := wasmblob.Bytes()
 	if err != nil {
 		return nil, err
@@ -165,19 +214,19 @@ func wasmSpawner(ctx context.Context, opts Options) (worker.Spawner, error) {
 	if err != nil {
 		return nil, err
 	}
-	if opts.WorkerStderr != nil {
-		return &stderrWasmSpawner{WasmSpawner: s, stderr: opts.WorkerStderr}, nil
-	}
-	return s, nil
+	return &poolWasmSpawner{WasmSpawner: s, stderr: opts.WorkerStderr, pending: pending, observe: observe}, nil
 }
 
-type stderrWasmSpawner struct {
+// poolWasmSpawner applies one pool's stderr and frame bound to the shared runtime.
+type poolWasmSpawner struct {
 	*worker.WasmSpawner
-	stderr io.Writer
+	stderr  io.Writer
+	pending int64
+	observe worker.PendingBytesObserver
 }
 
-func (s *stderrWasmSpawner) Spawn(ctx context.Context) (worker.Worker, error) {
-	return s.SpawnWithStderr(ctx, s.stderr)
+func (s *poolWasmSpawner) Spawn(ctx context.Context) (worker.Worker, error) {
+	return s.SpawnWith(ctx, s.stderr, s.pending, s.observe)
 }
 
 // Backend reports the transport the pool uses.
@@ -188,10 +237,94 @@ func (p *Pool) BinaryPath() string { return p.binary }
 
 // Close shuts down idle workers; it is idempotent.
 func (p *Pool) Close(ctx context.Context) error {
-	if !p.closed.CompareAndSwap(false, true) {
+	p.sessionsMu.Lock()
+	alreadyClosed := p.closed.Swap(true)
+	p.sessionsMu.Unlock()
+	if alreadyClosed {
 		return nil
 	}
 	return p.inner.Close(ctx)
+}
+
+// Shutdown ends admission, closes every open session with the stop policy
+// and waits for the workers to exit. ctx bounds only the caller's wait.
+func (p *Pool) Shutdown(ctx context.Context, policy ...StopPolicy) error {
+	if len(policy) > 1 {
+		return &OptionError{Message: "at most one stop policy"}
+	}
+	p.sessionsMu.Lock()
+	p.closed.Store(true)
+	open := make([]*Session, 0, len(p.sessions))
+	for s := range p.sessions {
+		open = append(open, s)
+	}
+	p.sessionsMu.Unlock()
+	errs := make([]error, len(open))
+	var wg sync.WaitGroup
+	for i, s := range open {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = s.Close(ctx, policy...)
+		}()
+	}
+	wg.Wait()
+	if err := p.inner.Shutdown(ctx); err != nil {
+		return err
+	}
+	for _, err := range errs {
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
+// Run checks out a session, feeds code once and closes the session.
+func (p *Pool) Run(ctx context.Context, code string, opts *RunOptions) (any, error) {
+	if opts == nil {
+		opts = &RunOptions{}
+	}
+	s, err := p.Checkout(ctx, opts.CheckoutOptions)
+	if err != nil {
+		return nil, err
+	}
+	v, err := s.FeedRun(ctx, code, &opts.FeedOptions)
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.limits.stop.Timeout+s.limits.stop.Join)
+	defer cancel()
+	_ = s.Close(cctx)
+	return v, err
+}
+
+// RunOptions configure a one-shot run.
+type RunOptions struct {
+	CheckoutOptions
+	FeedOptions
+}
+
+// Stats counts the pool's workers by state.
+func (p *Pool) Stats() PoolStats {
+	s := p.inner.Stats()
+	return PoolStats{Starting: s.Starting, Active: s.Active, Idle: s.Idle, Retiring: s.Retiring}
+}
+
+func (p *Pool) track(s *Session) error {
+	p.sessionsMu.Lock()
+	defer p.sessionsMu.Unlock()
+	if p.closed.Load() {
+		return ErrPoolClosed
+	}
+	if err := s.Err(); err != nil {
+		return err
+	}
+	p.sessions[s] = struct{}{}
+	return nil
+}
+
+func (p *Pool) untrack(s *Session) {
+	p.sessionsMu.Lock()
+	delete(p.sessions, s)
+	p.sessionsMu.Unlock()
 }
 
 // Checkout dedicates a worker to a new session.
@@ -203,8 +336,12 @@ func (p *Pool) Checkout(ctx context.Context, opts CheckoutOptions) (*Session, er
 	if err != nil {
 		return nil, err
 	}
-	s := &Session{pool: p, store: newInstanceStore(), scriptName: cfg.ScriptName}
-	headers := traceContextHeaders(ctx)
+	limits, err := opts.sessionLimits(p.stop)
+	if err != nil {
+		return nil, err
+	}
+	s := newSession(p, cfg.ScriptName, limits)
+	headers := traceContextHeaders(p.rec, ctx)
 	if p.connectHeaders != nil {
 		extra, err := p.connectHeaders(ctx)
 		if err != nil {
@@ -219,7 +356,18 @@ func (p *Pool) Checkout(ctx context.Context, opts CheckoutOptions) (*Session, er
 	if err != nil {
 		return nil, checkoutError(err)
 	}
-	s.co = co
+	s.attach(co)
+	if opts.Host != nil {
+		if err := opts.Host.register(s.store); err != nil {
+			_ = s.Close(ctx, KillNow)
+			return nil, err
+		}
+		s.host = opts.Host
+	}
+	if err := p.track(s); err != nil {
+		_ = s.Close(ctx, KillNow)
+		return nil, err
+	}
 	return s, nil
 }
 

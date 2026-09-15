@@ -9,34 +9,34 @@ import (
 	"sort"
 	"time"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 // Ops is the set of OS operations a Monty OS handler can answer.
 type Ops interface {
-	PathExists(path monty.Path) (bool, error)
-	PathIsFile(path monty.Path) (bool, error)
-	PathIsDir(path monty.Path) (bool, error)
-	PathIsSymlink(path monty.Path) (bool, error)
-	PathOpen(path monty.Path, mode string) (*monty.FileHandle, error)
-	PathReadText(path monty.Path) (string, error)
-	PathReadBytes(path monty.Path) ([]byte, error)
-	PathWriteText(path monty.Path, data string) (int, error)
-	PathWriteBytes(path monty.Path, data []byte) (int, error)
-	PathAppendText(path monty.Path, data string) (int, error)
-	PathAppendBytes(path monty.Path, data []byte) (int, error)
-	PathMkdir(path monty.Path, parents, existOK bool) error
-	PathUnlink(path monty.Path) error
-	PathRmdir(path monty.Path) error
-	PathIterdir(path monty.Path) ([]monty.Path, error)
-	PathStat(path monty.Path) (StatResult, error)
-	PathRename(path, target monty.Path) error
-	PathResolve(path monty.Path) (string, error)
-	PathAbsolute(path monty.Path) (string, error)
+	PathExists(path montygo.Path) (bool, error)
+	PathIsFile(path montygo.Path) (bool, error)
+	PathIsDir(path montygo.Path) (bool, error)
+	PathIsSymlink(path montygo.Path) (bool, error)
+	PathOpen(path montygo.Path, mode string) (*montygo.FileHandle, error)
+	PathReadText(path montygo.Path) (string, error)
+	PathReadBytes(path montygo.Path) ([]byte, error)
+	PathWriteText(path montygo.Path, data string) (int, error)
+	PathWriteBytes(path montygo.Path, data []byte) (int, error)
+	PathAppendText(path montygo.Path, data string) (int, error)
+	PathAppendBytes(path montygo.Path, data []byte) (int, error)
+	PathMkdir(path montygo.Path, parents, existOK bool) error
+	PathUnlink(path montygo.Path) error
+	PathRmdir(path montygo.Path) error
+	PathIterdir(path montygo.Path) ([]montygo.Path, error)
+	PathStat(path montygo.Path) (StatResult, error)
+	PathRename(path, target montygo.Path) error
+	PathResolve(path montygo.Path) (string, error)
+	PathAbsolute(path montygo.Path) (string, error)
 	Getenv(key string, def any) (any, error)
 	GetEnviron() (map[string]string, error)
-	DateToday() (monty.Date, error)
-	DatetimeNow(tz *monty.TimeZone) (monty.DateTime, error)
+	DateToday() (montygo.Date, error)
+	DatetimeNow(tz *montygo.TimeZone) (montygo.DateTime, error)
 }
 
 // ErrNotImplemented declines an operation; the dispatcher answers NotHandled.
@@ -45,45 +45,45 @@ var ErrNotImplemented = errors.New("not implemented")
 // Base declines every operation except DateToday and DatetimeNow, which use the host clock.
 type Base struct{}
 
-func (Base) PathExists(monty.Path) (bool, error)    { return false, ErrNotImplemented }
-func (Base) PathIsFile(monty.Path) (bool, error)    { return false, ErrNotImplemented }
-func (Base) PathIsDir(monty.Path) (bool, error)     { return false, ErrNotImplemented }
-func (Base) PathIsSymlink(monty.Path) (bool, error) { return false, ErrNotImplemented }
-func (Base) PathOpen(monty.Path, string) (*monty.FileHandle, error) {
+func (Base) PathExists(montygo.Path) (bool, error)    { return false, ErrNotImplemented }
+func (Base) PathIsFile(montygo.Path) (bool, error)    { return false, ErrNotImplemented }
+func (Base) PathIsDir(montygo.Path) (bool, error)     { return false, ErrNotImplemented }
+func (Base) PathIsSymlink(montygo.Path) (bool, error) { return false, ErrNotImplemented }
+func (Base) PathOpen(montygo.Path, string) (*montygo.FileHandle, error) {
 	return nil, ErrNotImplemented
 }
-func (Base) PathReadText(monty.Path) (string, error)         { return "", ErrNotImplemented }
-func (Base) PathReadBytes(monty.Path) ([]byte, error)        { return nil, ErrNotImplemented }
-func (Base) PathWriteText(monty.Path, string) (int, error)   { return 0, ErrNotImplemented }
-func (Base) PathWriteBytes(monty.Path, []byte) (int, error)  { return 0, ErrNotImplemented }
-func (Base) PathAppendText(monty.Path, string) (int, error)  { return 0, ErrNotImplemented }
-func (Base) PathAppendBytes(monty.Path, []byte) (int, error) { return 0, ErrNotImplemented }
-func (Base) PathMkdir(monty.Path, bool, bool) error          { return ErrNotImplemented }
-func (Base) PathUnlink(monty.Path) error                     { return ErrNotImplemented }
-func (Base) PathRmdir(monty.Path) error                      { return ErrNotImplemented }
-func (Base) PathIterdir(monty.Path) ([]monty.Path, error)    { return nil, ErrNotImplemented }
-func (Base) PathStat(monty.Path) (StatResult, error)         { return StatResult{}, ErrNotImplemented }
-func (Base) PathRename(monty.Path, monty.Path) error         { return ErrNotImplemented }
-func (Base) PathResolve(monty.Path) (string, error)          { return "", ErrNotImplemented }
-func (Base) PathAbsolute(monty.Path) (string, error)         { return "", ErrNotImplemented }
-func (Base) Getenv(string, any) (any, error)                 { return nil, ErrNotImplemented }
-func (Base) GetEnviron() (map[string]string, error)          { return nil, ErrNotImplemented }
+func (Base) PathReadText(montygo.Path) (string, error)         { return "", ErrNotImplemented }
+func (Base) PathReadBytes(montygo.Path) ([]byte, error)        { return nil, ErrNotImplemented }
+func (Base) PathWriteText(montygo.Path, string) (int, error)   { return 0, ErrNotImplemented }
+func (Base) PathWriteBytes(montygo.Path, []byte) (int, error)  { return 0, ErrNotImplemented }
+func (Base) PathAppendText(montygo.Path, string) (int, error)  { return 0, ErrNotImplemented }
+func (Base) PathAppendBytes(montygo.Path, []byte) (int, error) { return 0, ErrNotImplemented }
+func (Base) PathMkdir(montygo.Path, bool, bool) error          { return ErrNotImplemented }
+func (Base) PathUnlink(montygo.Path) error                     { return ErrNotImplemented }
+func (Base) PathRmdir(montygo.Path) error                      { return ErrNotImplemented }
+func (Base) PathIterdir(montygo.Path) ([]montygo.Path, error)  { return nil, ErrNotImplemented }
+func (Base) PathStat(montygo.Path) (StatResult, error)         { return StatResult{}, ErrNotImplemented }
+func (Base) PathRename(montygo.Path, montygo.Path) error       { return ErrNotImplemented }
+func (Base) PathResolve(montygo.Path) (string, error)          { return "", ErrNotImplemented }
+func (Base) PathAbsolute(montygo.Path) (string, error)         { return "", ErrNotImplemented }
+func (Base) Getenv(string, any) (any, error)                   { return nil, ErrNotImplemented }
+func (Base) GetEnviron() (map[string]string, error)            { return nil, ErrNotImplemented }
 
 // DateToday returns the host's local date.
-func (Base) DateToday() (monty.Date, error) {
+func (Base) DateToday() (montygo.Date, error) {
 	y, m, d := time.Now().Date()
-	return monty.Date{Year: int32(y), Month: uint8(m), Day: uint8(d)}, nil
+	return montygo.Date{Year: int32(y), Month: uint8(m), Day: uint8(d)}, nil
 }
 
 // DatetimeNow returns the host's local wall clock when tz is nil, else the current time in tz.
-func (Base) DatetimeNow(tz *monty.TimeZone) (monty.DateTime, error) {
+func (Base) DatetimeNow(tz *montygo.TimeZone) (montygo.DateTime, error) {
 	now := time.Now()
 	if tz == nil {
-		dt := monty.DateTimeFromTime(now)
+		dt := montygo.DateTimeFromTime(now)
 		dt.OffsetSeconds, dt.TimezoneName = nil, nil
 		return dt, nil
 	}
-	dt := monty.DateTimeFromTime(now.In(time.FixedZone("", int(tz.OffsetSeconds))))
+	dt := montygo.DateTimeFromTime(now.In(time.FixedZone("", int(tz.OffsetSeconds))))
 	off := tz.OffsetSeconds
 	dt.OffsetSeconds = &off
 	dt.TimezoneName = nil
@@ -94,23 +94,23 @@ func (Base) DatetimeNow(tz *monty.TimeZone) (monty.DateTime, error) {
 	return dt, nil
 }
 
-// Handler adapts ops to a monty.OSHandler.
-func Handler(ops Ops) monty.OSHandler {
-	return func(ctx context.Context, name string, args []any, kwargs monty.Kwargs) (any, error) {
+// Handler adapts ops to a montygo.OSHandler.
+func Handler(ops Ops) montygo.OSHandler {
+	return func(ctx context.Context, name string, args []any, kwargs montygo.Kwargs) (any, error) {
 		return Dispatch(ctx, ops, name, args, kwargs)
 	}
 }
 
-// Dispatch routes one OS call to ops. Unknown names and ErrNotImplemented yield monty.NotHandled.
-func Dispatch(_ context.Context, ops Ops, name string, args []any, kwargs monty.Kwargs) (any, error) {
+// Dispatch routes one OS call to ops. Unknown names and ErrNotImplemented yield montygo.NotHandled.
+func Dispatch(_ context.Context, ops Ops, name string, args []any, kwargs montygo.Kwargs) (any, error) {
 	result, err := dispatch(ops, name, args, kwargs)
 	if errors.Is(err, ErrNotImplemented) {
-		return monty.NotHandled, nil
+		return montygo.NotHandled, nil
 	}
 	return result, err
 }
 
-func dispatch(ops Ops, name string, args []any, kwargs monty.Kwargs) (any, error) {
+func dispatch(ops Ops, name string, args []any, kwargs montygo.Kwargs) (any, error) {
 	switch name {
 	case "Path.exists":
 		return pathCall(args, "path_exists", ops.PathExists)
@@ -151,7 +151,7 @@ func dispatch(ops Ops, name string, args []any, kwargs monty.Kwargs) (any, error
 		return bytesCall(args, "path_append_bytes", ops.PathAppendBytes)
 	case "Path.mkdir":
 		if len(kwargs) > 2 {
-			return nil, monty.Raise("AssertionError", "Unexpected keyword arguments: "+kwargsRepr(kwargs))
+			return nil, montygo.Raise("AssertionError", "Unexpected keyword arguments: "+kwargsRepr(kwargs))
 		}
 		if err := arity("path_mkdir", args, 1, 1); err != nil {
 			return nil, err
@@ -229,16 +229,16 @@ func dispatch(ops Ops, name string, args []any, kwargs monty.Kwargs) (any, error
 		if err := arity("datetime_now", args, 0, 1); err != nil {
 			return nil, err
 		}
-		var tz *monty.TimeZone
+		var tz *montygo.TimeZone
 		if len(args) == 1 {
 			switch x := args[0].(type) {
 			case nil:
-			case monty.TimeZone:
+			case montygo.TimeZone:
 				tz = &x
-			case *monty.TimeZone:
+			case *montygo.TimeZone:
 				tz = x
 			default:
-				return nil, monty.Raise("TypeError", fmt.Sprintf("datetime_now() argument must be a timezone or None, got %T", x))
+				return nil, montygo.Raise("TypeError", fmt.Sprintf("datetime_now() argument must be a timezone or None, got %T", x))
 			}
 		}
 		return ops.DatetimeNow(tz)
@@ -246,7 +246,7 @@ func dispatch(ops Ops, name string, args []any, kwargs monty.Kwargs) (any, error
 	return nil, ErrNotImplemented
 }
 
-func pathCall[T any](args []any, method string, fn func(monty.Path) (T, error)) (T, error) {
+func pathCall[T any](args []any, method string, fn func(montygo.Path) (T, error)) (T, error) {
 	var zero T
 	if err := arity(method, args, 1, 1); err != nil {
 		return zero, err
@@ -258,7 +258,7 @@ func pathCall[T any](args []any, method string, fn func(monty.Path) (T, error)) 
 	return fn(p)
 }
 
-func unitCall(args []any, method string, fn func(monty.Path) error) (any, error) {
+func unitCall(args []any, method string, fn func(montygo.Path) error) (any, error) {
 	if err := arity(method, args, 1, 1); err != nil {
 		return nil, err
 	}
@@ -269,7 +269,7 @@ func unitCall(args []any, method string, fn func(monty.Path) error) (any, error)
 	return nil, fn(p)
 }
 
-func textCall(args []any, method string, fn func(monty.Path, string) (int, error)) (any, error) {
+func textCall(args []any, method string, fn func(montygo.Path, string) (int, error)) (any, error) {
 	if err := arity(method, args, 2, 2); err != nil {
 		return nil, err
 	}
@@ -288,7 +288,7 @@ func textCall(args []any, method string, fn func(monty.Path, string) (int, error
 	return n, nil
 }
 
-func bytesCall(args []any, method string, fn func(monty.Path, []byte) (int, error)) (any, error) {
+func bytesCall(args []any, method string, fn func(montygo.Path, []byte) (int, error)) (any, error) {
 	if err := arity(method, args, 2, 2); err != nil {
 		return nil, err
 	}
@@ -298,7 +298,7 @@ func bytesCall(args []any, method string, fn func(monty.Path, []byte) (int, erro
 	}
 	data, ok := args[1].([]byte)
 	if !ok {
-		return nil, monty.Raise("TypeError", fmt.Sprintf("%s() data must be bytes, got %T", method, args[1]))
+		return nil, montygo.Raise("TypeError", fmt.Sprintf("%s() data must be bytes, got %T", method, args[1]))
 	}
 	n, err := fn(p, data)
 	if err != nil {
@@ -312,32 +312,32 @@ func arity(method string, args []any, lo, hi int) error {
 		return nil
 	}
 	if len(args) < lo {
-		return monty.Raise("TypeError", fmt.Sprintf("%s() missing %d required positional argument(s)", method, lo-len(args)))
+		return montygo.Raise("TypeError", fmt.Sprintf("%s() missing %d required positional argument(s)", method, lo-len(args)))
 	}
-	return monty.Raise("TypeError", fmt.Sprintf("%s() takes %d positional argument(s) but %d were given", method, hi, len(args)))
+	return montygo.Raise("TypeError", fmt.Sprintf("%s() takes %d positional argument(s) but %d were given", method, hi, len(args)))
 }
 
-func pathArg(method string, v any) (monty.Path, error) {
+func pathArg(method string, v any) (montygo.Path, error) {
 	switch x := v.(type) {
-	case monty.Path:
+	case montygo.Path:
 		return x, nil
 	case string:
-		return monty.Path(x), nil
-	case *monty.FileHandle:
+		return montygo.Path(x), nil
+	case *montygo.FileHandle:
 		if x != nil {
-			return monty.Path(x.Path), nil
+			return montygo.Path(x.Path), nil
 		}
-	case monty.FileHandle:
-		return monty.Path(x.Path), nil
+	case montygo.FileHandle:
+		return montygo.Path(x.Path), nil
 	}
-	return "", monty.Raise("TypeError", fmt.Sprintf("%s() expected a path, got %T", method, v))
+	return "", montygo.Raise("TypeError", fmt.Sprintf("%s() expected a path, got %T", method, v))
 }
 
 func stringArg(method string, v any) (string, error) {
 	if s, ok := v.(string); ok {
 		return s, nil
 	}
-	return "", monty.Raise("TypeError", fmt.Sprintf("%s() expected str, got %T", method, v))
+	return "", montygo.Raise("TypeError", fmt.Sprintf("%s() expected str, got %T", method, v))
 }
 
 func truthy(v any) bool {
@@ -358,26 +358,26 @@ func truthy(v any) bool {
 	return true
 }
 
-func kwargsRepr(kwargs monty.Kwargs) string {
+func kwargsRepr(kwargs montygo.Kwargs) string {
 	keys := make([]string, 0, len(kwargs))
 	for k := range kwargs {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	d := monty.NewDict()
+	d := montygo.NewDict()
 	for _, k := range keys {
 		d.Append(k, kwargs[k])
 	}
-	return monty.Repr(d)
+	return montygo.Repr(d)
 }
 
-func environDict(env map[string]string) *monty.Dict {
+func environDict(env map[string]string) *montygo.Dict {
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	d := monty.NewDict()
+	d := montygo.NewDict()
 	for _, k := range keys {
 		d.Append(k, env[k])
 	}
@@ -428,8 +428,8 @@ func statTime(mtime *float64) float64 {
 }
 
 // NamedTuple converts the result to the StatResult named tuple the sandbox expects.
-func (s StatResult) NamedTuple() monty.NamedTuple {
-	return monty.NamedTuple{
+func (s StatResult) NamedTuple() montygo.NamedTuple {
+	return montygo.NamedTuple{
 		TypeName:   "StatResult",
 		FieldNames: append([]string(nil), statFields...),
 		Values:     []any{s.StMode, s.StIno, s.StDev, s.StNlink, s.StUID, s.StGID, s.StSize, s.StAtime, s.StMtime, s.StCtime},

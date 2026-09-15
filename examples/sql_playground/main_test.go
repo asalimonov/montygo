@@ -11,7 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 func requireDatasets(t *testing.T) {
@@ -40,9 +40,9 @@ func TestRun(t *testing.T) {
 func TestRunTypeCheckRejectsUpstreamStubImport(t *testing.T) {
 	requireDatasets(t)
 	err := run(t.Context(), io.Discard, []string{"-type-check"})
-	var typing *monty.TypingError
+	var typing *montygo.TypingError
 	require.ErrorAs(t, err, &typing)
-	diagnostics := typing.Display(monty.DisplayTraceback)
+	diagnostics := typing.Display(montygo.DisplayTraceback)
 	require.True(t, strings.HasPrefix(diagnostics, "error[unresolved-import]: Cannot resolve imported module `type_stubs`\n  --> sql_playground.py:11:10\n"), diagnostics)
 	require.Equal(t, 1, strings.Count(diagnostics, "error["), diagnostics)
 }
@@ -65,13 +65,13 @@ func TestRunMissingDatasets(t *testing.T) {
 }
 
 func TestPrintReport(t *testing.T) {
-	row := func(name string, purchases any, avg float64) *monty.Dict {
-		return monty.NewDict(
-			monty.Pair{Key: "name", Value: name},
-			monty.Pair{Key: "total_purchases", Value: purchases},
-			monty.Pair{Key: "twitter", Value: "h"},
-			monty.Pair{Key: "tweet_count", Value: int64(2)},
-			monty.Pair{Key: "avg_sentiment", Value: avg},
+	row := func(name string, purchases any, avg float64) *montygo.Dict {
+		return montygo.NewDict(
+			montygo.Pair{Key: "name", Value: name},
+			montygo.Pair{Key: "total_purchases", Value: purchases},
+			montygo.Pair{Key: "twitter", Value: "h"},
+			montygo.Pair{Key: "tweet_count", Value: int64(2)},
+			montygo.Pair{Key: "avg_sentiment", Value: avg},
 		)
 	}
 	big, _ := new(big.Int).SetString("12345678901234567890", 10)

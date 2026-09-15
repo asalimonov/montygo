@@ -1,4 +1,4 @@
-package monty_test
+package montygo_test
 
 import (
 	"strings"
@@ -8,16 +8,16 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 type extAsyncOutput struct {
 	mu      sync.Mutex
 	chunks  []string
-	streams []monty.Stream
+	streams []montygo.Stream
 }
 
-func (o *extAsyncOutput) Print(stream monty.Stream, text string) error {
+func (o *extAsyncOutput) Print(stream montygo.Stream, text string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.streams = append(o.streams, stream)
@@ -37,24 +37,24 @@ func (o *extAsyncOutput) allStdout(t *testing.T) {
 	defer o.mu.Unlock()
 	require.NotEmpty(t, o.streams)
 	for _, s := range o.streams {
-		require.Equal(t, monty.Stdout, s)
+		require.Equal(t, montygo.Stdout, s)
 	}
 }
 
-func extAsyncAfter(delay time.Duration, v any, err error) *monty.Future {
-	return monty.Async(func() (any, error) {
+func extAsyncAfter(delay time.Duration, v any, err error) *montygo.Future {
+	return montygo.Async(func() (any, error) {
 		time.Sleep(delay)
 		return v, err
 	})
 }
 
 func TestAsync(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b monty.Backend) {
+	eachBackend(t, func(t *testing.T, b montygo.Backend) {
 		t.Run("sequential coroutines use one suspension per call", func(t *testing.T) {
 			v := mustRun(t, b, "a = await fetch()\nb = await fetch()\na[0] + b[0]", runOptions{
-				CheckoutOptions: monty.CheckoutOptions{Limits: &monty.ResourceLimits{MaxSuspensions: 2}},
-				FeedOptions: monty.FeedOptions{ExternalLookup: map[string]any{
-					"fetch": func() *monty.Future { return extAsyncAfter(0, []int{21}, nil) },
+				CheckoutOptions: montygo.CheckoutOptions{Limits: &montygo.ResourceLimits{MaxSuspensions: 2}},
+				FeedOptions: montygo.FeedOptions{ExternalLookup: map[string]any{
+					"fetch": func() *montygo.Future { return extAsyncAfter(0, []int{21}, nil) },
 				}},
 			})
 			require.Equal(t, int64(42), v)
@@ -69,7 +69,7 @@ func TestAsync(t *testing.T) {
 
 		t.Run("run with async external function", func(t *testing.T) {
 			v := mustRun(t, b, "await fetch_data()", extLookup(map[string]any{
-				"fetch_data": func() *monty.Future { return extAsyncAfter(10*time.Millisecond, "async result", nil) },
+				"fetch_data": func() *montygo.Future { return extAsyncAfter(10*time.Millisecond, "async result", nil) },
 			}))
 			require.Equal(t, "async result", v)
 		})
@@ -81,17 +81,17 @@ b = await fetch_b()
 a + b
 `
 			v := mustRun(t, b, code, extLookup(map[string]any{
-				"fetch_a": func() *monty.Future { return extAsyncAfter(5*time.Millisecond, 10, nil) },
-				"fetch_b": func() *monty.Future { return extAsyncAfter(5*time.Millisecond, 20, nil) },
+				"fetch_a": func() *montygo.Future { return extAsyncAfter(5*time.Millisecond, 10, nil) },
+				"fetch_b": func() *montygo.Future { return extAsyncAfter(5*time.Millisecond, 20, nil) },
 			}))
 			require.Equal(t, int64(30), v)
 		})
 
 		t.Run("run async external function with inputs", func(t *testing.T) {
-			v := mustRun(t, b, "await multiply(x)", runOptions{FeedOptions: monty.FeedOptions{
+			v := mustRun(t, b, "await multiply(x)", runOptions{FeedOptions: montygo.FeedOptions{
 				Inputs: map[string]any{"x": 5},
 				ExternalLookup: map[string]any{
-					"multiply": func(n int64) *monty.Future { return extAsyncAfter(0, n*2, nil) },
+					"multiply": func(n int64) *montygo.Future { return extAsyncAfter(0, n*2, nil) },
 				},
 			}})
 			require.Equal(t, int64(10), v)
@@ -99,9 +99,9 @@ a + b
 
 		t.Run("run async external function with args and kwargs", func(t *testing.T) {
 			v := mustRun(t, b, `await process(1, 2, name="test")`, extLookup(map[string]any{
-				"process": func(a, b int64, kw monty.Kwargs) *monty.Future {
-					return monty.Async(func() (any, error) {
-						return kw["name"].(string) + ": " + monty.Repr(a+b), nil
+				"process": func(a, b int64, kw montygo.Kwargs) *montygo.Future {
+					return montygo.Async(func() (any, error) {
+						return kw["name"].(string) + ": " + montygo.Repr(a+b), nil
 					})
 				},
 			}))
@@ -110,15 +110,15 @@ a + b
 
 		t.Run("sync external function throws exception", func(t *testing.T) {
 			_, err := run(t, b, "fail_sync()", extLookup(map[string]any{
-				"fail_sync": func() error { return monty.Raise("ValueError", "sync error") },
+				"fail_sync": func() error { return montygo.Raise("ValueError", "sync error") },
 			}))
 			extRequireRuntimeMessage(t, err, "ValueError: sync error")
 		})
 
 		t.Run("async external function throws exception", func(t *testing.T) {
 			_, err := run(t, b, "await fail_async()", extLookup(map[string]any{
-				"fail_async": func() *monty.Future {
-					return extAsyncAfter(5*time.Millisecond, nil, monty.Raise("ValueError", "async error"))
+				"fail_async": func() *montygo.Future {
+					return extAsyncAfter(5*time.Millisecond, nil, montygo.Raise("ValueError", "async error"))
 				},
 			}))
 			extRequireRuntimeMessage(t, err, "ValueError: async error")
@@ -133,8 +133,8 @@ except ValueError:
 result
 `
 			v := mustRun(t, b, code, extLookup(map[string]any{
-				"might_fail": func() *monty.Future {
-					return extAsyncAfter(0, nil, monty.Raise("ValueError", "expected error"))
+				"might_fail": func() *montygo.Future {
+					return extAsyncAfter(0, nil, montygo.Raise("ValueError", "expected error"))
 				},
 			}))
 			require.Equal(t, "caught", v)
@@ -158,7 +158,7 @@ result
 
 		t.Run("async external function returns complex types", func(t *testing.T) {
 			v := mustRun(t, b, "await get_data()", extLookup(map[string]any{
-				"get_data": func() *monty.Future {
+				"get_data": func() *montygo.Future {
 					return extAsyncAfter(0, []any{1, 2, map[string]any{"key": "value"}}, nil)
 				},
 			}))
@@ -167,19 +167,19 @@ result
 			require.Len(t, result, 3)
 			require.Equal(t, int64(1), result[0])
 			require.Equal(t, int64(2), result[1])
-			d, ok := result[2].(*monty.Dict)
-			require.True(t, ok, "dict item arrives as *monty.Dict, got %T", result[2])
+			d, ok := result[2].(*montygo.Dict)
+			require.True(t, ok, "dict item arrives as *montygo.Dict, got %T", result[2])
 			got, found := d.Get("key")
 			require.True(t, found)
 			require.Equal(t, "value", got)
 		})
 
 		t.Run("async external function with list input", func(t *testing.T) {
-			v := mustRun(t, b, "await sum_list(items)", runOptions{FeedOptions: monty.FeedOptions{
+			v := mustRun(t, b, "await sum_list(items)", runOptions{FeedOptions: montygo.FeedOptions{
 				Inputs: map[string]any{"items": []int{1, 2, 3, 4, 5}},
 				ExternalLookup: map[string]any{
-					"sum_list": func(items []int64) *monty.Future {
-						return monty.Async(func() (any, error) {
+					"sum_list": func(items []int64) *montygo.Future {
+						return montygo.Async(func() (any, error) {
 							var total int64
 							for _, it := range items {
 								total += it
@@ -200,7 +200,7 @@ sync_result + async_result
 `
 			v := mustRun(t, b, code, extLookup(map[string]any{
 				"sync_func":  func() int { return 100 },
-				"async_func": func() *monty.Future { return extAsyncAfter(5*time.Millisecond, 200, nil) },
+				"async_func": func() *montygo.Future { return extAsyncAfter(5*time.Millisecond, 200, nil) },
 			}))
 			require.Equal(t, int64(300), v)
 		})
@@ -212,9 +212,9 @@ second = await process(first)
 await finalize(second)
 `
 			v := mustRun(t, b, code, extLookup(map[string]any{
-				"get_first": func() *monty.Future { return extAsyncAfter(0, "hello", nil) },
-				"process":   func(s string) *monty.Future { return extAsyncAfter(0, strings.ToUpper(s), nil) },
-				"finalize":  func(s string) *monty.Future { return extAsyncAfter(0, s+"!", nil) },
+				"get_first": func() *montygo.Future { return extAsyncAfter(0, "hello", nil) },
+				"process":   func(s string) *montygo.Future { return extAsyncAfter(0, strings.ToUpper(s), nil) },
+				"finalize":  func(s string) *montygo.Future { return extAsyncAfter(0, s+"!", nil) },
 			}))
 			require.Equal(t, "HELLO!", v)
 		})
@@ -236,7 +236,7 @@ factorial(5)
 
 		t.Run("run with printCallback", func(t *testing.T) {
 			out := &extAsyncOutput{}
-			v, err := run(t, b, `print("hello from async")`, runOptions{FeedOptions: monty.FeedOptions{Print: out}})
+			v, err := run(t, b, `print("hello from async")`, runOptions{FeedOptions: montygo.FeedOptions{Print: out}})
 			require.NoError(t, err)
 			require.Nil(t, v)
 			out.allStdout(t)
@@ -245,7 +245,7 @@ factorial(5)
 
 		t.Run("printCallback with external functions", func(t *testing.T) {
 			out := &extAsyncOutput{}
-			v := mustRun(t, b, "x = get_value()\nprint(f\"got {x}\")\nx", runOptions{FeedOptions: monty.FeedOptions{
+			v := mustRun(t, b, "x = get_value()\nprint(f\"got {x}\")\nx", runOptions{FeedOptions: montygo.FeedOptions{
 				ExternalLookup: map[string]any{"get_value": func() int { return 42 }},
 				Print:          out,
 			}})
@@ -256,7 +256,7 @@ factorial(5)
 
 		t.Run("printCallback with multiple prints", func(t *testing.T) {
 			out := &extAsyncOutput{}
-			mustRun(t, b, "print(\"a\")\nprint(\"b\")\nprint(\"c\")", runOptions{FeedOptions: monty.FeedOptions{Print: out}})
+			mustRun(t, b, "print(\"a\")\nprint(\"b\")\nprint(\"c\")", runOptions{FeedOptions: montygo.FeedOptions{Print: out}})
 			require.Equal(t, "a\nb\nc\n", out.joined())
 		})
 	})

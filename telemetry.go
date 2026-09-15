@@ -1,4 +1,4 @@
-package monty
+package montygo
 
 import (
 	"context"
@@ -99,7 +99,7 @@ func NewInstrumentation(cfg InstrumentationConfig) (*Instrumentation, error) {
 func (i *Instrumentation) Name() string { return instrumentationName }
 
 // Version is the instrumentation scope version.
-func (i *Instrumentation) Version() string { return Version }
+func (i *Instrumentation) Version() string { return BindingVersion() }
 
 // Enable installs the instrumentation; it fails when other telemetry is installed.
 func (i *Instrumentation) Enable() error {
@@ -199,14 +199,15 @@ func (i *Instrumentation) refreshLocked() error {
 		return nil
 	}
 	var c telemetry.Components
+	version := BindingVersion()
 	if teleOn(i.cfg.Traces) && i.tracerProvider != nil {
-		c.Tracer = i.tracerProvider.Tracer(instrumentationName, trace.WithInstrumentationVersion(Version))
+		c.Tracer = i.tracerProvider.Tracer(instrumentationName, trace.WithInstrumentationVersion(version))
 	}
 	if teleOn(i.cfg.Metrics) && i.meterProvider != nil {
-		c.Meter = i.meterProvider.Meter(instrumentationName, metric.WithInstrumentationVersion(Version))
+		c.Meter = i.meterProvider.Meter(instrumentationName, metric.WithInstrumentationVersion(version))
 	}
 	if teleOn(i.cfg.Logs) && i.loggerProvider != nil {
-		c.Logger = i.loggerProvider.Logger(instrumentationName, log.WithInstrumentationVersion(Version))
+		c.Logger = i.loggerProvider.Logger(instrumentationName, log.WithInstrumentationVersion(version))
 	}
 	teleMu.Lock()
 	defer teleMu.Unlock()

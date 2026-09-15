@@ -1,11 +1,13 @@
 // Command repl is an interactive Monty REPL modelled on the `monty` CLI REPL:
 // snippets run in one persistent session, multi-line input follows CPython's
-// prompts, and Ctrl-C interrupts a running snippet.
+// prompts, and Ctrl-C stops a running snippet.
 package main
 
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,20 +17,20 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 	"unicode"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/examples/internal/montyenv"
 )
 
 const (
 	statementPrompt    = "❯ "
 	continuationPrompt = "… "
-	banner             = "Monty v" + monty.Version + " REPL. Type `exit` to exit.\n"
 	restartNotice      = "the session was lost; starting a new session\n"
 )
+
+var banner = "Monty v" + montygo.MontyVersion + " REPL (montygo " + montygo.BindingVersion() + "). Type `exit` to exit.\n"
 
 var errInterrupted = errors.New("KeyboardInterrupt")
 
@@ -77,7 +79,7 @@ func run(ctx context.Context, c console, args []string) error {
 		return err
 	}
 	defer opts.close()
-	pool, err := monty.New(ctx, montyenv.PoolOptions())
+	pool, err := openPool(ctx, opts)
 	if err != nil {
 		return err
 	}
@@ -106,9 +108,54 @@ func run(ctx context.Context, c console, args []string) error {
 type options struct {
 	scriptName string
 	initial    string
-	mounts     []*monty.MountDir
+	mounts     []*montygo.MountDir
 	cwd        string
-	limits     monty.ResourceLimits
+	limits     montygo.ResourceLimits
+	ws         wsOptions
+}
+
+type wsOptions struct {
+	url                string
+	caFile             string
+	insecureSkipVerify bool
+}
+
+// openPool dials a remote Monty server when -ws is set, else starts local workers.
+func openPool(ctx context.Context, o *options) (*montygo.Pool, error) {
+	if o.ws.url == "" {
+		return montygo.New(ctx, montyenv.PoolOptions())
+	}
+	tlsConfig, err := o.ws.tlsConfig()
+	if err != nil {
+		return nil, err
+	}
+	return montygo.NewWebSocket(ctx, montygo.WebSocketOptions{
+		URL: o.ws.url,
+		// A killed session is replaced before the lost one is released.
+		MaxProcesses:   2,
+		RequestTimeout: montygo.NoRequestTimeout,
+		TLSConfig:      tlsConfig,
+	})
+}
+
+// tlsConfig is nil unless a CA file or skip-verify customises the system defaults.
+func (w wsOptions) tlsConfig() (*tls.Config, error) {
+	if w.caFile == "" && !w.insecureSkipVerify {
+		return nil, nil
+	}
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: w.insecureSkipVerify}
+	if w.caFile != "" {
+		pem, err := os.ReadFile(w.caFile)
+		if err != nil {
+			return nil, err
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("no certificates found in %s", w.caFile)
+		}
+		cfg.RootCAs = roots
+	}
+	return cfg, nil
 }
 
 func (o *options) close() {
@@ -140,12 +187,22 @@ func parseOptions(args []string, errOut io.Writer) (*options, error) {
 	gcInterval := flags.Uint64("gc-interval", 0, "run garbage collection every N allocations")
 	recursion := flags.Uint64("max-recursion-depth", 0, "maximum call-stack depth (default 1000)")
 	suspensions := flags.Uint64("max-suspensions", 0, "maximum suspensions in one session (default 1000)")
+	wsURL := flags.String("ws", "", "run sessions on a remote Monty server at this ws:// or wss:// URL")
+	wsCA := flags.String("ws-ca", "", "PEM file of CA certificates trusted for a wss:// server")
+	wsInsecure := flags.Bool("ws-insecure-skip-verify", false, "skip TLS certificate verification for a wss:// server")
 	if err := flags.Parse(args); err != nil {
 		return nil, err
 	}
 
-	o := &options{scriptName: "repl.py", initial: *command, cwd: *cwd}
+	o := &options{
+		scriptName: "repl.py",
+		initial:    *command,
+		cwd:        *cwd,
+		ws:         wsOptions{url: *wsURL, caFile: *wsCA, insecureSkipVerify: *wsInsecure},
+	}
 	switch {
+	case *wsURL == "" && (*wsCA != "" || *wsInsecure):
+		return nil, errors.New("-ws-ca and -ws-insecure-skip-verify require -ws")
 	case flags.NArg() > 1:
 		return nil, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args()[1:], " "))
 	case flags.NArg() == 1 && *command != "":
@@ -164,7 +221,7 @@ func parseOptions(args []string, errOut io.Writer) (*options, error) {
 	if math.IsNaN(seconds) || seconds < 0 || seconds > float64(math.MaxInt64)/float64(time.Second) {
 		return nil, fmt.Errorf("invalid max duration '%v': expected a non-negative number of seconds", seconds)
 	}
-	o.limits = monty.ResourceLimits{
+	o.limits = montygo.ResourceLimits{
 		MaxDuration:       time.Duration(seconds * float64(time.Second)),
 		GCInterval:        *gcInterval,
 		MaxRecursionDepth: *recursion,
@@ -212,7 +269,7 @@ func parseMemorySize(s string) (uint64, error) {
 }
 
 // openMount parses host_path::virtual_path[::mode[::write_limit_bytes]].
-func openMount(spec string) (*monty.MountDir, error) {
+func openMount(spec string) (*montygo.MountDir, error) {
 	parts := strings.Split(spec, "::")
 	if len(parts) < 2 || len(parts) > 4 {
 		return nil, fmt.Errorf("invalid mount spec '%s': expected host_path::virtual_path[::mode[::write_limit_bytes]]", spec)
@@ -224,15 +281,15 @@ func openMount(spec string) (*monty.MountDir, error) {
 	if len(parts) >= 3 {
 		modeName = parts[2]
 	}
-	mode, ok := map[string]monty.MountMode{
-		"ro":      monty.MountReadOnly,
-		"rw":      monty.MountReadWrite,
-		"overlay": monty.MountOverlay,
+	mode, ok := map[string]montygo.MountMode{
+		"ro":      montygo.MountReadOnly,
+		"rw":      montygo.MountReadWrite,
+		"overlay": montygo.MountOverlay,
 	}[modeName]
 	if !ok {
 		return nil, fmt.Errorf("invalid mount mode '%s' in '%s': expected 'ro', 'rw', or 'overlay'", modeName, spec)
 	}
-	dirOpts := monty.MountDirOptions{HostPath: parts[0], VirtualPath: parts[1], Mode: mode}
+	dirOpts := montygo.MountDirOptions{HostPath: parts[0], VirtualPath: parts[1], Mode: mode}
 	if len(parts) == 4 {
 		if parts[3] == "" {
 			return nil, fmt.Errorf("invalid write limit in '%s': value must not be empty", spec)
@@ -243,7 +300,7 @@ func openMount(spec string) (*monty.MountDir, error) {
 		}
 		dirOpts.WriteBytesLimit = &limit
 	}
-	dir, err := monty.NewMountDir(dirOpts)
+	dir, err := montygo.NewMountDir(dirOpts)
 	if err != nil {
 		return nil, fmt.Errorf("mount %s: %w", spec, err)
 	}
@@ -252,13 +309,13 @@ func openMount(spec string) (*monty.MountDir, error) {
 
 type repl struct {
 	console
-	pool    *monty.Pool
+	pool    *montygo.Pool
 	opts    *options
-	session *monty.Session
+	session *montygo.Session
 }
 
 func (r *repl) checkout(ctx context.Context) error {
-	session, err := r.pool.Checkout(ctx, monty.CheckoutOptions{ScriptName: r.opts.scriptName, Limits: &r.opts.limits})
+	session, err := r.pool.Checkout(ctx, montygo.CheckoutOptions{ScriptName: r.opts.scriptName, Limits: &r.opts.limits})
 	if err != nil {
 		return err
 	}
@@ -266,13 +323,13 @@ func (r *repl) checkout(ctx context.Context) error {
 	return nil
 }
 
-func (r *repl) feedOptions() *monty.FeedOptions {
-	return &monty.FeedOptions{
+func (r *repl) feedOptions() *montygo.FeedOptions {
+	return &montygo.FeedOptions{
 		Mount: r.opts.mounts,
 		Cwd:   r.opts.cwd,
-		Print: monty.PrintFunc(func(stream monty.Stream, text string) error {
+		Print: montygo.PrintFunc(func(stream montygo.Stream, text string) error {
 			w := r.out
-			if stream == monty.Stderr {
+			if stream == montygo.Stderr {
 				w = r.errOut
 			}
 			_, err := io.WriteString(w, text)
@@ -374,26 +431,26 @@ func (r *repl) execute(ctx context.Context, code string) error {
 	return r.report(ctx, value, err)
 }
 
-// feed runs code, cancelling it when an interrupt arrives.
+// interruptTimeout keeps Ctrl-C responsive: a snippet that does not yield is
+// killed after it, as the upstream REPL replaces its session on Ctrl-C.
+const interruptTimeout = 500 * time.Millisecond
+
+// feed runs code and stops it when an interrupt arrives. The session survives
+// a stop that Python yields to; a snippet that never yields is killed.
 func (r *repl) feed(ctx context.Context, code string) (any, error) {
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	var interrupted atomic.Bool
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-r.interrupts:
-			interrupted.Store(true)
-			cancel()
-		case <-done:
+	run := r.session.Go(ctx, code, r.feedOptions())
+	select {
+	case <-run.Done():
+	case <-r.interrupts:
+		stopped, err := run.Stop(ctx, montygo.StopPolicy{Timeout: interruptTimeout})
+		if err != nil {
+			return nil, err
 		}
-	}()
-	value, err := r.session.FeedRun(runCtx, code, r.feedOptions())
-	close(done)
-	if err != nil && interrupted.Load() {
-		return nil, errInterrupted
+		if stopped.How != montygo.StopFinished {
+			return nil, errInterrupted
+		}
 	}
-	return value, err
+	return run.Wait()
 }
 
 // report prints a result or an error, and replaces a session whose worker is gone.
@@ -409,29 +466,22 @@ func (r *repl) report(ctx context.Context, value any, err error) error {
 		if _, werr := fmt.Fprintln(r.errOut, err); werr != nil {
 			return werr
 		}
+		if r.session.Err() == nil {
+			return nil
+		}
 	default:
 		if _, werr := fmt.Fprintf(r.errOut, "error: %s\n", describe(err)); werr != nil {
 			return werr
 		}
-		if !sessionLost(err) {
+		if !errors.Is(err, montygo.ErrSessionLost) {
 			return nil
 		}
 	}
-	_ = r.session.Close(context.Background())
+	_ = r.session.Close(context.Background(), montygo.KillNow)
 	if _, err := io.WriteString(r.errOut, restartNotice); err != nil {
 		return err
 	}
 	return r.checkout(ctx)
-}
-
-func sessionLost(err error) bool {
-	var (
-		crashed    *monty.CrashedError
-		disconnect *monty.DisconnectError
-		shutdown   *monty.ShutdownError
-		protocol   *monty.ProtocolError
-	)
-	return errors.As(err, &crashed) || errors.As(err, &disconnect) || errors.As(err, &shutdown) || errors.As(err, &protocol)
 }
 
 // display renders a result like upstream MontyObject's Display: strings raw,
@@ -440,16 +490,16 @@ func display(value any) string {
 	switch v := value.(type) {
 	case string:
 		return v
-	case monty.Type:
+	case montygo.Type:
 		return "<class '" + v.Name + "'>"
 	}
-	return monty.Repr(value)
+	return montygo.Repr(value)
 }
 
 func describe(err error) string {
-	var montyErr monty.Error
+	var montyErr montygo.Error
 	if errors.As(err, &montyErr) {
-		return montyErr.Display(monty.DisplayTraceback)
+		return montyErr.Display(montygo.DisplayTraceback)
 	}
 	return err.Error()
 }

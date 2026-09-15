@@ -1,6 +1,6 @@
 # Test parity
 
-Upstream tests are ported file by file. Subtest names keep the upstream titles, so `go test -run 'TestMount/native/overlay_write_does_not_modify_host'` finds a TS test by its title. Root tests run on the native and wasm backends.
+Upstream tests are ported file by file. Subtest names keep the upstream titles, so `go test -run 'TestMount/native/overlay_write_does_not_modify_host'` finds a TS test by its title. Root tests run on the native and wasm backends, and on the websocket backend against the server image.
 
 - **ported**: same scenario and assertions.
 - **adapted**: same intent, expressed with Go types or APIs.
@@ -42,11 +42,11 @@ Upstream tests are ported file by file. Subtest names keep the upstream titles, 
 ### Adaptations
 
 - **Disposal**: `await using` becomes `defer Close`, asserting `ErrSessionClosed` / `ErrPoolClosed` afterwards.
-- **Values**: `Map` → `*monty.Dict`, `Set` → `*monty.Set` / `*monty.FrozenSet`, `__tuple__` arrays → `monty.Tuple`, `BigInt` → `*big.Int`, `Buffer` → `[]byte`, marker objects → value structs.
-- **Keyword arguments**: the trailing options bag becomes a `monty.Kwargs` parameter.
-- **Exception names**: JS `Error.name` becomes `monty.Raise(excType, msg)`.
+- **Values**: `Map` → `*montygo.Dict`, `Set` → `*montygo.Set` / `*montygo.FrozenSet`, `__tuple__` arrays → `montygo.Tuple`, `BigInt` → `*big.Int`, `Buffer` → `[]byte`, marker objects → value structs.
+- **Keyword arguments**: the trailing options bag becomes a `montygo.Kwargs` parameter.
+- **Exception names**: JS `Error.name` becomes `montygo.Raise(excType, msg)`.
 - **Unconvertible values**: a JS `Symbol` becomes a Go `chan int`.
-- **Error classes**: `instanceof` checks become `errors.As` against `monty.Error` and the concrete types; class constructor tests build Go error values directly.
+- **Error classes**: `instanceof` checks become `errors.As` against `montygo.Error` and the concrete types; class constructor tests build Go error values directly.
 - **Option validation**: values Go's types cannot express (negative or fractional numbers, NaN, `2**32` for `uint32` options, `null` vs `-1` for collector caps) are replaced by the representable boundary cases.
 - **Codec unit tests**: tests of the TS wasm value codec run as round trips through a real session.
 - **Transport unit tests**: tests of the TS wasm transport run against `internal/pool` with a fake worker, or against `internal/worker` directly.
@@ -55,7 +55,7 @@ Upstream tests are ported file by file. Subtest names keep the upstream titles, 
 - **External lookup**: prototype-inherited names become absent map keys; getter-counting tests count name-lookup snapshots.
 - **Mounts**: `Object.keys(MountDir)` becomes a reflection check of the exported fields; an empty `Cwd` means "not set" in Go.
 - **Worker environment**: on darwin the test inspects `ps eww` instead of `/proc`.
-- **Telemetry**: each scenario runs in a child process of the test binary, like `runTelemetryChild`. `AsyncLocalStorage` becomes `context.WithValue`, async callbacks return `*monty.Future`, and spans are compared by span context. Broken components panic from `Start`, `Emit`, `Add` or `Record` instead of throwing. A broken context becomes a tracer that returns no span, because attaching a span to a Go context cannot fail. Name lookups run no host getter, so the concurrent callback test asserts the `name lookup {name}` span position instead.
+- **Telemetry**: each scenario runs in a child process of the test binary, like `runTelemetryChild`. `AsyncLocalStorage` becomes `context.WithValue`, async callbacks return `*montygo.Future`, and spans are compared by span context. Broken components panic from `Start`, `Emit`, `Add` or `Record` instead of throwing. A broken context becomes a tracer that returns no span, because attaching a span to a Go context cannot fail. Name lookups run no host getter, so the concurrent callback test asserts the `name lookup {name}` span position instead.
 
 ### Skipped
 
@@ -66,15 +66,86 @@ Upstream tests are ported file by file. Subtest names keep the upstream titles, 
 | class_instance: a string policy other than "all" is rejected at construction | an invalid policy string cannot be expressed |
 | mount: browser wasm reports mounts as unsupported | the Go wasm backend services mounts host-side |
 
+### Deviations
+
+| Test | Upstream | montygo |
+|---|---|---|
+| `cancel_test.go`: a context deadline mid-turn loses the session and the pool recovers | the worker is killed as soon as the context ends | the cancelled feed context requests a stop with the session policy; Python that never yields is killed when the policy's `Timeout` expires (100 ms in the test) and `FeedRun` returns a `*SessionKilledError` matching `ErrSessionLost` |
+| `cancel_test.go`: cancelling while awaiting a host future interrupts the feed and keeps the session | the worker is killed and the session is poisoned | `AbortFeed(KeyboardInterrupt)` ends the feed; `FeedRun` returns a `*RuntimeError` with `TypeName` `KeyboardInterrupt`, `errors.Is(err, ErrSessionLost)` is false and the next feed runs |
+| `cancel_test.go`: a gathered future wait honours cancellation | same | a cancelled `ResolveFutures` wait is aborted the same way |
+| `stop_test.go`: the feed context ends the run through the policy | same | `FeedRun` returns `KeyboardInterrupt` and `Session.State()` is `SessionIdle` afterwards |
+
+The default stop cannot be caught by `except KeyboardInterrupt` inside the sandbox, because `AbortFeed` ends the feed (`lifecycle_test.go`: stopping a host call raises KeyboardInterrupt and keeps the session). `StopPolicy.Catchable` raises it in the sandbox instead (`stop_test.go`: a catchable stop lets Python clean up with host calls); upstream has no counterpart.
+
+## montygo-only tests
+
+Tests of behaviour beyond `@pydantic/monty`. Root tests run on every backend through `eachBackend` unless noted.
+
+| File | Tests | Covers |
+|---|---|---|
+| cancel_test.go | 4 | context cancellation mid-turn (kill at `Timeout`), during a host call and a gathered wait, checkout wait |
+| lifecycle_test.go | 11 | `TestStop`: stopping a host call, with a reason, through `AsyncContext`, running Python killed at `Timeout`, a suspended snapshot, nothing running; `TestSessionLifecycle`: `Go`, `Close(ctx, KillNow)`, `Done`, `Err`, `Stats` |
+| stop_test.go | 18 | `TestStopPolicy`: `StopKind` and `SessionState` strings, `SessionKept`, catchable stops (caught, uncaught, awaited future, ignored and killed), `Drain` (natural end, expiry), `KillNow`, a second `Stop` joining and shortening, policy levels (pool, checkout, call), invalid policies, feed-context cancellation through the policy; `TestSessionClose`: `Close` stopping a running feed, `Close` continuing after the caller's context ends, `State` transitions; `TestPoolRunAndSlot`: `Pool.Run`, `Shutdown` with `Drain`, `Slot` re-checkout, busy and closed |
+| execution_test.go | backend regressions | `TestImmediateStop`: 1000 immediate stops per backend; busy admission; stale Run/snapshot; wait-only cancellation; `TestStopUncooperativeCallback`: `StopPending`, `ErrCallbackDetached`, capacity recovery; `TestStopDuringConversion` |
+| execution_future_test.go | backend regressions | call-ID accounting for shared Futures, failed-gather cleanup, cross-session ownership, snapshot context lifetime, manual settlement |
+| lifecycle_state_test.go | deterministic transitions | reservation/preparation stops, completion versus force, stale watchdog/step, ID exhaustion, duplicate call IDs, derived conversion cancellation/panic |
+| host_parameters_test.go, record_conversion_test.go | backend regressions | positional-only labelled stubs, the `/` marker after fixed parameters only, method `ParameterNames` on instances and class types, unknown methods and count mismatches, signature/name validation, nullable Record and Future-resolved Record conversion |
+| internal/pool/lease_test.go | lease regressions | idle termination, stale lease, blocked Print, 1000 release/termination races, accounting until observed exit |
+| host_test.go | 10 | `Host` validation, `Stubs`, `Restorable`, host names in feeds, `ExternalLookup` override, stubs under type checking, restore of pinned objects, `LoadSession` refusing unpinned objects; `Expose` (no backend) |
+| resource_test.go | 10 | `Unlimited`, `MaxRecursionDepth`, `MaxHostObjects`, `MaxPendingFutures`, `ResourceError`; `MaxPendingBytes` throttling; `Pool.Stats`, `Pool.Shutdown`; `Lines` |
+| namedtuple_test.go | 3 | `AsNamedTuple`, `NewNamedTuple`, sandbox round trip |
+| telemetry_pool_test.go | 2 | `Options.Telemetry` scoping, empty components record nothing |
+| serverinfo_test.go | 7 | `FetchServerInfo` against a stub HTTP server: base path, 404, other statuses, malformed body, header errors, scheme, timeout (no backend) |
+| version_test.go | 3 + 11 cases | `BindingVersion` resolution table, user agent (no backend) |
+| internal/worker/queue_test.go | 5 | frame queue bound, release, close, oversized frame |
+| internal/wire/fields_test.go | 2 | codec field table against `monty.proto` |
+| internal/wire/codec_fuzz_test.go | 2 fuzz targets | event decoding against `montypb`, request round trip |
+| internal/wire/codec_bench_test.go | 4 benchmarks | decode and encode against `montypb` |
+| scripts/version_test.sh, scripts/check_pins_test.sh | shell | `scripts/version.sh` states, pin drift detection (`make test-scripts`) |
+
 ## `monty-fs` (`crates/monty-fs/tests`)
 
 `internal/mountfs` ports 242 tests: `fs.rs`, `fs_security.rs`, `mount_confinement.rs`, `mount_escape_repro.rs`, `overlay_stale_ref.rs`. Seven skip: two Windows-only tests, two non-UTF-8 filename tests (APFS refuses such names), two race soaks gated by `MONTY_FS_SOAK` as upstream, and `on_no_handler_includes_errno`, which tests the worker's default rather than the mount table.
 
 ## Python WebSocket client (`crates/monty-python/tests/test_websocket.py`, `crates/monty-pool/tests/websocket.rs`)
 
-`websocket_test.go` ports `test_websocket.py` against an in-process relay (`websocket_relay_test.go`, the Go analogue of `scripts/websocket_relay.py`). Seven cases pass. Six skip because Go's types cannot express them: a non-callable header callback, unknown limit keys, and the non-mapping, non-string-key, non-string-value and unencodable-value header results.
+`websocket_test.go` ports `test_websocket.py` against an in-process relay (`websocket_relay_test.go`, the Go analogue of `scripts/websocket_relay.py`). Seven cases pass. Six skip because Go's types cannot express them: a non-callable header callback, unknown limit keys, and the non-mapping, non-string-key, non-string-value and unencodable-value header results. Three montygo subtests have no upstream counterpart: `wss_through_tls_relay`, `health_check_against_relay` and `dial_context_is_used`.
 
 `internal/pool/websocket_test.go` ports `websocket.rs` against a scripted in-process child: 26 pass, 7 skip. Five of the skips test the Rust raw relay path (`turn_raw`), which the Go pool does not have; one tests redacted `Debug` output; one tests dial-time trace headers, which the root pool injects and the root `trace_context_headers_precede_connect_headers` subtest covers.
+
+## Root suite on the `websocket` backend
+
+`make test-docker` runs the root package with `MONTY_TEST_BACKENDS=websocket` against one `monty-server` container, with the test dump key and the per-client quota disabled. Every root test runs, and subtests carry the backend name `websocket`.
+
+- `openPool` maps `Options` onto `WebSocketOptions`. `RequestTimeout` 0 becomes `NoRequestTimeout`.
+- `plRequireMemoryError` checks only the `MemoryError` type on websocket. The server's memory ceiling fires before the allocator abort, so the message is the interpreter's own.
+- Pool tests that observe worker identity through the worker pid skip through `plNativeOnly` with `websocket backend: <reason>`, as on wasm.
+- The crash recovery test forces a timeout with a 500 ms `RequestTimeout` instead of killing the worker pid, as on wasm.
+- A server that cannot be reached fails the test instead of skipping it.
+
+## `tests/network`
+
+A separate module of 58 tests for the server image. They have no upstream test counterpart; upstream `docs/server.md` is the specification, and `docs/parity/server.md` lists the deviations.
+
+| Group | File | Tests |
+|---|---|---|
+| `TestAdmission_` | `server_admission_test.go` | 6 |
+| `TestProtocol_` | `server_protocol_test.go` | 8 |
+| `TestLimits_` | `server_limits_test.go` | 5 |
+| `TestTimeouts_` | `server_timeouts_test.go` | 5 |
+| `TestDumps_` | `server_dumps_test.go` | 6 |
+| `TestDrain_` | `server_drain_test.go` | 6 |
+| `TestTLS_` | `server_tls_test.go` | 3 |
+| `TestParallel_` | `server_parallel_test.go` | 2 |
+| `TestTelemetry_` | `server_telemetry_test.go` | 2 |
+| `TestRepl_` | `repl_session_test.go` | 5 |
+| `TestReplCLI_` | `repl_cli_test.go` | 6 |
+| `TestPyClient_` | `pyclient_test.go` | 4 |
+
+- `TestTimeouts_SessionTimeout` and `TestTimeouts_KeepaliveDropsFrozenClient` are slow. They skip unless `MONTYGO_SLOW_TESTS_ENABLE` is set.
+- `TestProtocol_RemoteDialByContainerIP` runs only on Linux, where container bridge addresses are routable from the host.
+- `TestPyClient_*` skip when the Python client image is absent, as in the `docker-arm64` CI job. They run the `pydantic-monty-client` wheel built at the pin, and the PyPI `0.0.23` client for the protocol refusal.
+- Counter assertions compare deltas from a baseline, because default units are reused across tests.
 
 ## Python OS helpers (`crates/monty-python/tests/test_os_access*.py`)
 
@@ -86,16 +157,18 @@ Package `osaccess` ports all 207 test functions and runs the Monty-driven ones o
 | test_os_access_compat.py | `TestOSAccessCompat` | 41, against the OSAccess runner only; the CPython runner has no Go analogue |
 | test_os_access_raw.py | `TestOSAccessRaw`, `TestStatHelpers` | 27 |
 
-Adaptations: `PurePosixPath` checks become `monty.Path` checks, Python reprs become `String()` or field comparisons, and `exception()` round-trips compare the exception type name with `monty.IsSubclass`.
+Adaptations: `PurePosixPath` checks become `montygo.Path` checks, Python reprs become `String()` or field comparisons, and `exception()` round-trips compare the exception type name with `montygo.IsSubclass`.
 
 ## Examples (`examples/`)
 
-The `examples` module ports all 12 upstream example programs and the `monty` CLI REPL. Each sandbox script and stub file is byte-identical to upstream and embedded. Every program has an end-to-end test that runs on both backends (`MONTY_EXAMPLES_BACKEND=native|wasm`).
+The `examples` module ports all 12 upstream example programs and the `monty` CLI REPL, and adds two montygo-only programs. Each upstream sandbox script and stub file is byte-identical to upstream and embedded. Every program has an end-to-end test that runs on both backends (`MONTY_EXAMPLES_BACKEND=native|wasm`).
 
 | Upstream | Go | Notes |
 |---|---|---|
 | `classes/*.py` (9 programs) | `classes/*` | ported |
 | `expense_analysis` | `expense_analysis` | ported, type checked |
 | `sql_playground` | `sql_playground` | adapted: SQLite (`modernc.org/sqlite`) replaces DuckDB, with `$name` list parameters rewritten for `IN`. The feed skips type checking by default, because upstream imports its stubs as `type_stubs` and the worker names them `repl_type_stubs`; `-type-check` reproduces the upstream failure. |
-| `monty` CLI REPL (`crates/monty-runtime/src/run.rs`) | `repl` | adapted: continuation is read from the syntax error of a trial feed instead of an in-process parse. `TestContinuationModeMatchesUpstream` checks every case of upstream `repl_detects_continuation_mode_for_common_cases` plus more, on both backends. Overlay mounts reset after each snippet, and an interrupt replaces the session. |
+| `monty` CLI REPL (`crates/monty-runtime/src/run.rs`) | `repl` | adapted: continuation is read from the syntax error of a trial feed instead of an in-process parse. `TestContinuationModeMatchesUpstream` checks every case of upstream `repl_detects_continuation_mode_for_common_cases` plus more, on both backends. Overlay mounts reset after each snippet. Ctrl-C calls `Run.Stop` with the default policy; the session is replaced only when the worker was killed. |
+| — | `oneshot` | montygo-only: `Pool.Run`; the test asserts the value |
+| — | `service` | montygo-only: `Slot`, `Host` with `Expose`, `Run.Stop` on SIGINT or `-run-for`, `Slot.Close`, `Pool.Shutdown`; the test runs with `-run-for` and asserts the stop kind `aborted` |
 | `web_scraper` | `web_scraper` | adapted: chromedp and goquery replace Playwright and BeautifulSoup. Agent mode needs `ANTHROPIC_API_KEY`. `-code` runs the embedded `example_code.py` without the model, and browser tests skip without Chrome. |

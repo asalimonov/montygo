@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/osaccess"
 )
 
@@ -30,7 +30,7 @@ func awaitResult(t *testing.T) func(v any, err error) any {
 	return func(v any, err error) any {
 		t.Helper()
 		require.NoError(t, err)
-		fut, ok := v.(*monty.Future)
+		fut, ok := v.(*montygo.Future)
 		require.True(t, ok, "expected a future, got %T", v)
 		result, err := fut.Wait(t.Context())
 		require.NoError(t, err)
@@ -47,24 +47,24 @@ func TestExternalFunctionsReadThroughOSAccess(t *testing.T) {
 	ext := &ExternalFunctions{fs: fs}
 	await := awaitResult(t)
 
-	rows := await(ext.queryCSV(t.Context(), []any{monty.Path("/data/c.csv")}, monty.Kwargs{
+	rows := await(ext.queryCSV(t.Context(), []any{montygo.Path("/data/c.csv")}, montygo.Kwargs{
 		"sql":        `SELECT "First" FROM data WHERE "Email" IN $emails`,
-		"parameters": monty.NewDict(monty.Pair{Key: "emails", Value: []any{"afresco@dayrep.com"}}),
+		"parameters": montygo.NewDict(montygo.Pair{Key: "emails", Value: []any{"afresco@dayrep.com"}}),
 	}))
-	require.Equal(t, []any{monty.NewDict(monty.Pair{Key: "First", Value: "Al"})}, rows)
+	require.Equal(t, []any{montygo.NewDict(montygo.Pair{Key: "First", Value: "Al"})}, rows)
 
-	tweets := await(ext.readJSON(t.Context(), nil, monty.Kwargs{"filepath": monty.Path("/data/t.json")})).([]any)
-	tweet := tweets[0].(*monty.Dict)
+	tweets := await(ext.readJSON(t.Context(), nil, montygo.Kwargs{"filepath": montygo.Path("/data/t.json")})).([]any)
+	tweet := tweets[0].(*montygo.Dict)
 	require.Equal(t, []any{"user", "id", "big", "at", "tags"}, tweet.Keys())
-	require.Equal(t, "{'user': 'bmelator', 'id': 3731785240073317438, 'big': 123456789012345678901, 'at': 1448221456.5, 'tags': ['a', True, None]}", monty.Repr(tweet))
+	require.Equal(t, "{'user': 'bmelator', 'id': 3731785240073317438, 'big': 123456789012345678901, 'at': 1448221456.5, 'tags': ['a', True, None]}", montygo.Repr(tweet))
 
-	require.Equal(t, 0.3, await(analyzeSentiment(t.Context(), nil, monty.Kwargs{"text": "Glad I bought it"})))
+	require.Equal(t, 0.3, await(analyzeSentiment(t.Context(), nil, montygo.Kwargs{"text": "Glad I bought it"})))
 
-	fut, err := ext.readJSON(t.Context(), []any{monty.Path("/data/missing.json")}, nil)
+	fut, err := ext.readJSON(t.Context(), []any{montygo.Path("/data/missing.json")}, nil)
 	require.NoError(t, err)
-	_, err = fut.(*monty.Future).Wait(t.Context())
+	_, err = fut.(*montygo.Future).Wait(t.Context())
 	require.Error(t, err)
 
-	_, err = ext.queryCSV(t.Context(), []any{monty.Path("/data/c.csv")}, nil)
+	_, err = ext.queryCSV(t.Context(), []any{montygo.Path("/data/c.csv")}, nil)
 	require.EqualError(t, err, "TypeError: query_csv() missing 1 required positional argument: 'sql'")
 }

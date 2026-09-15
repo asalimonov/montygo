@@ -8,7 +8,7 @@ import (
 	"io"
 	"os"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/examples/internal/montyenv"
 )
 
@@ -31,21 +31,21 @@ func main() {
 }
 
 func run(ctx context.Context, out io.Writer) error {
-	pool, err := monty.New(ctx, montyenv.PoolOptions())
+	pool, err := montygo.New(ctx, montyenv.PoolOptions())
 	if err != nil {
 		return err
 	}
 	defer pool.Close(ctx)
 
 	result, err := func() (any, error) {
-		session, err := pool.Checkout(ctx, monty.CheckoutOptions{})
+		session, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
 		if err != nil {
 			return nil, err
 		}
 		defer session.Close(ctx)
-		wrapper, err := monty.NewClassType[Shape](monty.ClassTypeOptions{
-			EagerAttrs:     monty.All,
-			AllowedMethods: monty.Names("unit", "double"),
+		wrapper, err := montygo.NewClassType[Shape](montygo.ClassTypeOptions{
+			EagerAttrs:     montygo.All(),
+			AllowedMethods: montygo.Names("unit", "double"),
 			Statics: map[string]any{
 				"SIDES":  shapeSides,
 				"KIND":   shapeKind,
@@ -58,16 +58,16 @@ func run(ctx context.Context, out io.Writer) error {
 		}
 		return session.FeedRun(ctx,
 			"assert Shape.KIND == \"polygon\"\nShape.unit() + Shape.double(10)",
-			&monty.FeedOptions{Inputs: map[string]any{"Shape": wrapper}},
+			&montygo.FeedOptions{Inputs: map[string]any{"Shape": wrapper}},
 		)
 	}()
 	if err != nil {
 		return err
 	}
 
-	if !monty.Equal(result, 24) {
-		return fmt.Errorf("assertion failed: result == %s", monty.Repr(result))
+	if !montygo.Equal(result, 24) {
+		return fmt.Errorf("assertion failed: result == %s", montygo.Repr(result))
 	}
-	fmt.Fprintf(out, "class constants and classmethods work: %s\n", monty.Repr(result))
+	fmt.Fprintf(out, "class constants and classmethods work: %s\n", montygo.Repr(result))
 	return nil
 }

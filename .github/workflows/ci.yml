@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main, 'fix/**']
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -26,12 +27,14 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       MONTY_BIN: ${{ github.workspace }}/monty-src/target/debug/monty
       MAFUDGE_DATASETS: ${{ github.workspace }}/mafudge_datasets
     steps:
       - uses: actions/checkout@v7
+      - name: Check pins
+        run: make check-pins
       - name: Check out upstream Monty
         uses: actions/checkout@v7
         with:
@@ -70,9 +73,129 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test -count=1 -timeout 30m ./...
+      - name: Race
+        if: runner.os == 'Linux'
+        run: go test -race -count=1 -timeout 40m ./...
+      - name: Vulnerability check
+        if: runner.os == 'Linux'
+        uses: golang/govulncheck-action@v1
+        with:
+          go-version-input: '1.25.x'
+          go-package: ./...
+      - name: Fuzz
+        if: runner.os == 'Linux'
+        run: make fuzz FUZZTIME=30s
       - name: Vet examples
         working-directory: examples
         run: go vet ./...
       - name: Test examples
         working-directory: examples
         run: go test -count=1 -timeout 30m ./...
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check out upstream Monty
+        uses: actions/checkout@v7
+        with:
+          repository: pydantic/monty
+          ref: ${{ env.MONTY_REV }}
+          path: monty-src
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            monty-src
+            server
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: |
+            go.sum
+            tests/network/go.sum
+            examples/go.sum
+      - uses: docker/setup-buildx-action@v3
+      # buildx reads the cache service token only from the environment, which run steps do not get by default.
+      - name: Expose GitHub Actions runtime
+        uses: crazy-max/ghaction-github-runtime@v3
+      - name: Build native worker
+        run: cargo build --locked -p monty-runtime --manifest-path monty-src/Cargo.toml
+      - name: Audit server dependencies
+        working-directory: server
+        run: cargo install cargo-audit --locked && cargo audit
+      - name: Server checks
+        run: make server-check
+        env:
+          MONTY_BIN: ${{ github.workspace }}/monty-src/target/debug/monty
+      - name: Build image
+        run: make docker-build PLATFORMS=linux/amd64 MONTY_SRC=monty-src
+        env:
+          BUILDX_CACHE_FROM: type=gha,scope=monty-server-amd64
+          BUILDX_CACHE_TO: type=gha,mode=max,scope=monty-server-amd64
+      - name: Build Python client image
+        run: make docker-build-pyclient MONTY_SRC=monty-src
+      - name: Root suite over websocket
+        run: make test-docker
+      - name: Vet network tests
+        working-directory: tests/network
+        run: go vet ./... && go mod tidy -diff
+      - name: Network tests
+        run: make test-network
+
+  docker-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check out upstream Monty
+        uses: actions/checkout@v7
+        with:
+          repository: pydantic/monty
+          ref: ${{ env.MONTY_REV }}
+          path: monty-src
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: |
+            go.sum
+            tests/network/go.sum
+            examples/go.sum
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        run: make docker-build PLATFORMS=linux/arm64 MONTY_SRC=monty-src
+      - name: Network tests
+        run: make test-network
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [docker, docker-arm64]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Check out upstream Monty
+        uses: actions/checkout@v7
+        with:
+          repository: pydantic/monty
+          ref: ${{ env.MONTY_REV }}
+          path: monty-src
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Require a clean tree
+        run: test -z "$(git status --porcelain)"
+      - name: Push image
+        run: make docker-push REGISTRY=ghcr.io/${{ github.repository_owner }} MONTY_SRC=monty-src

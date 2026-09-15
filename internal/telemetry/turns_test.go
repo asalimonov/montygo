@@ -33,7 +33,7 @@ func newTurns(t *testing.T) (*TurnMetrics, *metricRig) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	require.True(t, Install(new(byte), Components{Meter: mp.Meter("test")}, false))
-	return &TurnMetrics{}, &metricRig{reader: reader}
+	return &TurnMetrics{r: Global()}, &metricRig{reader: reader}
 }
 
 func (r *metricRig) points(t *testing.T, name string) []point {

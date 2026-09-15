@@ -40,6 +40,8 @@ var (
 	SnapshotBytes    = &Instrument{Histogram, "monty.snapshot.bytes", "By", "Size of a session dump."}
 	PrintBytes       = &Instrument{Counter, "monty.print.bytes", "By", "Bytes the sandbox printed, by stream."}
 	FrameBytes       = &Instrument{Histogram, "monty.wire.frame.bytes", "By", "Size of one protocol frame, by direction."}
+	RetiringWorkers  = &Instrument{UpDownCounter, "monty.pool.workers.retiring", "{worker}", "Workers being shut down that still count toward capacity."}
+	PendingFrames    = &Instrument{UpDownCounter, "monty.pool.pending_frame_bytes", "By", "Bytes of worker frames buffered by the parent and not yet consumed."}
 )
 
 type handle struct {
@@ -95,26 +97,29 @@ func (r *Recorder) instrument(in *Instrument) (*handle, error) {
 	return h, nil
 }
 
-func record(in *Instrument, v float64, attrs ...attribute.KeyValue) {
-	Current().Record(in, v, attrs...)
+// PoolMetrics records pool-level measurements into one recorder.
+type PoolMetrics struct{ r *Recorder }
+
+// NewPoolMetrics returns pool metrics recording into r.
+func NewPoolMetrics(r *Recorder) PoolMetrics { return PoolMetrics{r: r} }
+
+func (m PoolMetrics) WorkersLive(delta int64) { m.r.Record(LiveWorkers, float64(delta)) }
+
+func (m PoolMetrics) WorkersIdle(delta int64) { m.r.Record(IdleWorkers, float64(delta)) }
+
+func (m PoolMetrics) WorkersRetiring(delta int64) { m.r.Record(RetiringWorkers, float64(delta)) }
+
+// PendingBytes records the change in buffered worker frame bytes.
+func (m PoolMetrics) PendingBytes(delta int64) { m.r.Record(PendingFrames, float64(delta)) }
+
+func (m PoolMetrics) CheckoutWait(d time.Duration, outcome string) {
+	m.r.Record(CheckoutWait, d.Seconds(), attribute.String("outcome", outcome))
 }
 
-// PoolMetrics records pool-level measurements into the recorder installed
-// when each measurement is taken.
-type PoolMetrics struct{}
-
-func (PoolMetrics) WorkersLive(delta int64) { record(LiveWorkers, float64(delta)) }
-
-func (PoolMetrics) WorkersIdle(delta int64) { record(IdleWorkers, float64(delta)) }
-
-func (PoolMetrics) CheckoutWait(d time.Duration, outcome string) {
-	record(CheckoutWait, d.Seconds(), attribute.String("outcome", outcome))
+func (m PoolMetrics) WorkerTerminated(reason string) {
+	m.r.Record(WorkerTerminated, 1, attribute.String("reason", reason))
 }
 
-func (PoolMetrics) WorkerTerminated(reason string) {
-	record(WorkerTerminated, 1, attribute.String("reason", reason))
-}
-
-func (PoolMetrics) SessionDuration(d time.Duration, outcome string) {
-	record(SessionDuration, d.Seconds(), attribute.String("outcome", outcome))
+func (m PoolMetrics) SessionDuration(d time.Duration, outcome string) {
+	m.r.Record(SessionDuration, d.Seconds(), attribute.String("outcome", outcome))
 }

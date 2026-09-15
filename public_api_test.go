@@ -1,4 +1,4 @@
-package monty_test
+package montygo_test
 
 import (
 	"go/ast"

@@ -13,13 +13,13 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/osaccess"
 )
 
 var (
 	poolsMu sync.Mutex
-	pools   = map[monty.Backend]*monty.Pool{}
+	pools   = map[montygo.Backend]*montygo.Pool{}
 )
 
 func TestMain(m *testing.M) {
@@ -39,18 +39,18 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func testBackends() []monty.Backend {
+func testBackends() []montygo.Backend {
 	spec := os.Getenv("MONTY_TEST_BACKENDS")
 	if spec == "" {
 		spec = "native,wasm"
 	}
-	var out []monty.Backend
+	var out []montygo.Backend
 	for _, name := range strings.Split(spec, ",") {
 		switch strings.TrimSpace(name) {
 		case "native":
-			out = append(out, monty.BackendNative)
+			out = append(out, montygo.BackendNative)
 		case "wasm":
-			out = append(out, monty.BackendWasm)
+			out = append(out, montygo.BackendWasm)
 		}
 	}
 	return out
@@ -62,14 +62,14 @@ func testCtx(t testing.TB) context.Context {
 	return ctx
 }
 
-func sharedPool(t testing.TB, b monty.Backend) *monty.Pool {
+func sharedPool(t testing.TB, b montygo.Backend) *montygo.Pool {
 	t.Helper()
 	poolsMu.Lock()
 	defer poolsMu.Unlock()
 	if p, ok := pools[b]; ok {
 		return p
 	}
-	p, err := monty.New(context.Background(), monty.Options{Backend: b, MaxProcesses: 8})
+	p, err := montygo.New(context.Background(), montygo.Options{Backend: b, MaxProcesses: 8})
 	if err != nil {
 		t.Skipf("backend %s unavailable: %v", b, err)
 	}
@@ -78,7 +78,7 @@ func sharedPool(t testing.TB, b monty.Backend) *monty.Pool {
 }
 
 // montyTest runs a sandbox-driven test once per backend.
-func montyTest(t *testing.T, name string, fn func(t *testing.T, b monty.Backend)) {
+func montyTest(t *testing.T, name string, fn func(t *testing.T, b montygo.Backend)) {
 	t.Helper()
 	t.Run(name, func(t *testing.T) {
 		for _, b := range testBackends() {
@@ -87,32 +87,32 @@ func montyTest(t *testing.T, name string, fn func(t *testing.T, b monty.Backend)
 	})
 }
 
-func runFeed(t testing.TB, b monty.Backend, code string, opts *monty.FeedOptions) (any, error) {
+func runFeed(t testing.TB, b montygo.Backend, code string, opts *montygo.FeedOptions) (any, error) {
 	t.Helper()
 	ctx := testCtx(t)
-	s, err := sharedPool(t, b).Checkout(ctx, monty.CheckoutOptions{})
+	s, err := sharedPool(t, b).Checkout(ctx, montygo.CheckoutOptions{})
 	require.NoError(t, err)
 	defer s.Close(context.Background())
 	return s.FeedRun(ctx, code, opts)
 }
 
-func run(t testing.TB, b monty.Backend, code string, handler monty.OSHandler) (any, error) {
+func run(t testing.TB, b montygo.Backend, code string, handler montygo.OSHandler) (any, error) {
 	t.Helper()
-	return runFeed(t, b, code, &monty.FeedOptions{OS: handler})
+	return runFeed(t, b, code, &montygo.FeedOptions{OS: handler})
 }
 
-func mustRun(t testing.TB, b monty.Backend, code string, handler monty.OSHandler) any {
+func mustRun(t testing.TB, b montygo.Backend, code string, handler montygo.OSHandler) any {
 	t.Helper()
 	v, err := run(t, b, code, handler)
 	require.NoError(t, err)
 	return v
 }
 
-func requireRuntimeError(t testing.TB, err error, want string) *monty.RuntimeError {
+func requireRuntimeError(t testing.TB, err error, want string) *montygo.RuntimeError {
 	t.Helper()
 	require.Error(t, err)
-	var rte *monty.RuntimeError
-	require.True(t, errors.As(err, &rte), "want *monty.RuntimeError, got %T: %v", err, err)
+	var rte *montygo.RuntimeError
+	require.True(t, errors.As(err, &rte), "want *montygo.RuntimeError, got %T: %v", err, err)
 	require.Equal(t, want, rte.Error())
 	return rte
 }
@@ -120,8 +120,8 @@ func requireRuntimeError(t testing.TB, err error, want string) *monty.RuntimeErr
 func requireRaised(t testing.TB, err error, excType, message string) {
 	t.Helper()
 	require.Error(t, err)
-	var raised *monty.RaisedError
-	require.True(t, errors.As(err, &raised), "want *monty.RaisedError, got %T: %v", err, err)
+	var raised *montygo.RaisedError
+	require.True(t, errors.As(err, &raised), "want *montygo.RaisedError, got %T: %v", err, err)
 	require.Equal(t, excType, raised.ExcType)
 	require.Equal(t, message, raised.Message)
 }
@@ -129,8 +129,8 @@ func requireRaised(t testing.TB, err error, excType, message string) {
 func requireExcType(t testing.TB, err error, excType string) {
 	t.Helper()
 	require.Error(t, err)
-	var raised *monty.RaisedError
-	require.True(t, errors.As(err, &raised), "want *monty.RaisedError, got %T: %v", err, err)
+	var raised *montygo.RaisedError
+	require.True(t, errors.As(err, &raised), "want *montygo.RaisedError, got %T: %v", err, err)
 	require.Equal(t, excType, raised.ExcType)
 }
 

@@ -2,10 +2,14 @@ package worker
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,19 +19,34 @@ import (
 	"github.com/asalimonov/montygo/internal/wire"
 )
 
-// wsServe runs handler for every upgrade and returns the ws:// URL.
-func wsServe(t *testing.T, handler func(conn *websocket.Conn, r *http.Request)) string {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func wsHandler(handler func(conn *websocket.Conn, r *http.Request)) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
 		if err != nil {
 			return
 		}
 		defer conn.CloseNow()
 		handler(conn, r)
-	}))
+	})
+}
+
+// wsServe runs handler for every upgrade and returns the ws:// URL.
+func wsServe(t *testing.T, handler func(conn *websocket.Conn, r *http.Request)) string {
+	t.Helper()
+	srv := httptest.NewServer(wsHandler(handler))
 	t.Cleanup(srv.Close)
 	return "ws" + strings.TrimPrefix(srv.URL, "http")
+}
+
+// wsServeTLS runs handler for every upgrade over TLS and returns the wss:// URL
+// with a client config trusting the server certificate.
+func wsServeTLS(t *testing.T, handler func(conn *websocket.Conn, r *http.Request)) (string, *tls.Config) {
+	t.Helper()
+	srv := httptest.NewTLSServer(wsHandler(handler))
+	t.Cleanup(srv.Close)
+	roots := x509.NewCertPool()
+	roots.AddCert(srv.Certificate())
+	return "wss" + strings.TrimPrefix(srv.URL, "https"), &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
 }
 
 func wsCtx(t *testing.T) context.Context {
@@ -182,5 +201,141 @@ func TestWebSocketWorker(t *testing.T) {
 		require.Nil(t, ConnectHeaders(context.Background()))
 		pairs := [][2]string{{"a", "b"}}
 		require.Equal(t, pairs, ConnectHeaders(WithConnectHeaders(context.Background(), pairs)))
+	})
+
+	t.Run("TLSConfig is used for wss dials", func(t *testing.T) {
+		url, cfg := wsServeTLS(t, func(conn *websocket.Conn, _ *http.Request) {
+			_, data, err := conn.Read(context.Background())
+			if err != nil {
+				return
+			}
+			_ = conn.Write(context.Background(), websocket.MessageBinary, data)
+			_, _, _ = conn.Read(context.Background())
+		})
+		ctx := wsCtx(t)
+		_, err := (&WebSocketDialer{URL: url}).Spawn(ctx)
+		require.Error(t, err)
+		require.True(t, strings.HasPrefix(err.Error(), url+": "), err.Error())
+
+		w, err := (&WebSocketDialer{URL: url, TLSConfig: cfg}).Spawn(ctx)
+		require.NoError(t, err)
+		t.Cleanup(w.Kill)
+		require.NoError(t, w.Send(ctx, []byte("frame")))
+		got, err := w.Recv(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "frame", string(got))
+		require.Empty(t, cfg.NextProtos, "the caller's config must not be mutated")
+	})
+
+	t.Run("DialContext opens the connection", func(t *testing.T) {
+		url := wsServe(t, func(conn *websocket.Conn, _ *http.Request) {
+			_, _, _ = conn.Read(context.Background())
+		})
+		var dials atomic.Int32
+		d := &WebSocketDialer{URL: url, DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dials.Add(1)
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
+		}}
+		w, err := d.Spawn(wsCtx(t))
+		require.NoError(t, err)
+		t.Cleanup(w.Kill)
+		require.Equal(t, int32(1), dials.Load())
+
+		errRefused := errors.New("dial refused")
+		d.DialContext = func(context.Context, string, string) (net.Conn, error) { return nil, errRefused }
+		_, err = d.Spawn(wsCtx(t))
+		require.ErrorIs(t, err, errRefused)
+	})
+
+	t.Run("Kill unblocks a pending Recv over TLS", func(t *testing.T) {
+		url, cfg := wsServeTLS(t, func(conn *websocket.Conn, _ *http.Request) {
+			_, _, _ = conn.Read(context.Background())
+		})
+		ctx := wsCtx(t)
+		w, err := (&WebSocketDialer{URL: url, TLSConfig: cfg}).Spawn(ctx)
+		require.NoError(t, err)
+		t.Cleanup(w.Kill)
+		require.IsType(t, &net.TCPConn{}, w.(*wsWorker).raw)
+		got := make(chan error, 1)
+		go func() {
+			_, err := w.Recv(ctx)
+			got <- err
+		}()
+		time.Sleep(20 * time.Millisecond)
+		w.Kill()
+		select {
+		case err := <-got:
+			require.ErrorIs(t, err, wire.ErrTruncated)
+		case <-time.After(5 * time.Second):
+			t.Fatal("Recv did not return after Kill")
+		}
+		wsRequireEnded(t, w)
+	})
+
+	t.Run("health URL derivation", func(t *testing.T) {
+		for raw, want := range map[string]string{
+			"ws://h:1/":           "http://h:1/health",
+			"wss://h/p":           "https://h/p/health",
+			"ws://h:1":            "http://h:1/health",
+			"http://h/p/?q=1#top": "http://h/p/health",
+			"https://h/a/b/":      "https://h/a/b/health",
+		} {
+			got, err := healthURL(raw)
+			require.NoError(t, err, raw)
+			require.Equal(t, want, got, raw)
+		}
+		_, err := healthURL("ftp://h/")
+		require.EqualError(t, err, `unsupported URL scheme "ftp"`)
+
+		ctx := wsCtx(t)
+		d := &WebSocketDialer{URL: "ftp://127.0.0.1:9"}
+		healthErr := d.HealthCheck(ctx, nil)
+		_, spawnErr := d.Spawn(ctx)
+		require.EqualError(t, healthErr, `ftp://127.0.0.1:9: unsupported URL scheme "ftp"`)
+		require.EqualError(t, spawnErr, healthErr.Error())
+	})
+
+	t.Run("HealthCheck reports non-200 and sends connect headers", func(t *testing.T) {
+		requests := make(chan *http.Request, 4)
+		var status atomic.Int32
+		status.Store(http.StatusServiceUnavailable)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests <- r.Clone(context.Background())
+			w.WriteHeader(int(status.Load()))
+		}))
+		t.Cleanup(srv.Close)
+		ctx := wsCtx(t)
+		d := &WebSocketDialer{URL: "ws" + strings.TrimPrefix(srv.URL, "http") + "/prefix/?token=1"}
+
+		err := d.HealthCheck(ctx, [][2]string{{"X-Token", "a"}, {"x-token", "b"}, {"Host", "monty.test"}})
+		require.EqualError(t, err, srv.URL+"/prefix/health: health check returned 503")
+		r := <-requests
+		require.Equal(t, http.MethodGet, r.Method)
+		require.Equal(t, "/prefix/health", r.URL.Path)
+		require.Empty(t, r.URL.RawQuery)
+		require.Equal(t, []string{"b"}, r.Header.Values("X-Token"))
+		require.Equal(t, DefaultUserAgent, r.Header.Get("User-Agent"))
+		require.Equal(t, "monty.test", r.Host)
+
+		status.Store(http.StatusOK)
+		require.NoError(t, d.HealthCheck(ctx, nil))
+		<-requests
+
+		err = d.HealthCheck(ctx, [][2]string{{"bad name", "v"}})
+		require.EqualError(t, err, d.URL+`: connect header "bad name": invalid HTTP header name`)
+	})
+
+	t.Run("HealthCheck reports its timeout", func(t *testing.T) {
+		release := make(chan struct{})
+		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-release }))
+		t.Cleanup(srv.Close)
+		t.Cleanup(func() { close(release) })
+		d := &WebSocketDialer{URL: srv.URL, DialTimeout: 50 * time.Millisecond}
+		require.EqualError(t, d.HealthCheck(wsCtx(t), nil), srv.URL+"/health: health check timed out after 50ms")
+
+		ctx, cancel := context.WithCancel(wsCtx(t))
+		time.AfterFunc(50*time.Millisecond, cancel)
+		d.DialTimeout = -1
+		require.ErrorIs(t, d.HealthCheck(ctx, nil), context.Canceled)
 	})
 }

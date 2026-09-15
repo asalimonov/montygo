@@ -20,7 +20,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/examples/internal/montyenv"
 )
 
@@ -130,7 +130,7 @@ func run(ctx context.Context, out io.Writer, args []string) error {
 		source = string(b)
 	}
 
-	pool, err := monty.New(ctx, montyenv.PoolOptions())
+	pool, err := montygo.New(ctx, montyenv.PoolOptions())
 	if err != nil {
 		return err
 	}
@@ -152,9 +152,9 @@ func run(ctx context.Context, out io.Writer, args []string) error {
 		pool:  pool,
 		out:   out,
 		externals: map[string]any{
-			"open_page":         monty.FunctionFunc(browser.openPage),
-			"beautiful_soup":    monty.FunctionFunc(beautifulSoup),
-			"record_model_info": monty.FunctionFunc(records.recordModelInfo),
+			"open_page":         montygo.FunctionFunc(browser.openPage),
+			"beautiful_soup":    montygo.FunctionFunc(beautifulSoup),
+			"record_model_info": montygo.FunctionFunc(records.recordModelInfo),
 		},
 	}
 
@@ -190,7 +190,7 @@ func envOr(name, fallback string) string {
 type scraper struct {
 	llm       messagesAPI
 	model     string
-	pool      *monty.Pool
+	pool      *montygo.Pool
 	externals map[string]any
 	out       io.Writer
 }
@@ -244,16 +244,16 @@ func responseText(resp *anthropic.Message) string {
 func (s *scraper) runCode(ctx context.Context, code string, inputs map[string]any, typeCheck bool) (string, error) {
 	var printOutput strings.Builder
 	output, err := func() (any, error) {
-		session, err := s.pool.Checkout(ctx, monty.CheckoutOptions{TypeCheck: true, TypeCheckStubs: stubs})
+		session, err := s.pool.Checkout(ctx, montygo.CheckoutOptions{TypeCheck: true, TypeCheckStubs: stubs})
 		if err != nil {
 			return nil, err
 		}
 		defer session.Close(ctx)
-		return session.FeedRun(ctx, code, &monty.FeedOptions{
+		return session.FeedRun(ctx, code, &montygo.FeedOptions{
 			Inputs:         inputs,
 			ExternalLookup: s.externals,
 			SkipTypeCheck:  !typeCheck,
-			Print: monty.PrintFunc(func(_ monty.Stream, text string) error {
+			Print: montygo.PrintFunc(func(_ montygo.Stream, text string) error {
 				printOutput.WriteString(text)
 				return nil
 			}),
@@ -261,14 +261,14 @@ func (s *scraper) runCode(ctx context.Context, code string, inputs map[string]an
 	}()
 
 	var msg string
-	var runtimeErr *monty.RuntimeError
-	var typingErr *monty.TypingError
-	var montyErr monty.Error
+	var runtimeErr *montygo.RuntimeError
+	var typingErr *montygo.TypingError
+	var montyErr montygo.Error
 	switch {
 	case errors.As(err, &runtimeErr):
-		msg = "Error running code: " + runtimeErr.Display(monty.DisplayTraceback)
+		msg = "Error running code: " + runtimeErr.Display(montygo.DisplayTraceback)
 	case errors.As(err, &typingErr):
-		msg = "Error Preparing Code: " + typingErr.Display(monty.DisplayTraceback)
+		msg = "Error Preparing Code: " + typingErr.Display(montygo.DisplayTraceback)
 	case errors.As(err, &montyErr):
 		msg = "Error Preparing Code: " + montyErr.Error()
 	case err != nil:
@@ -314,7 +314,7 @@ func extractCode(response string) ExtractCode {
 }
 
 type dictable interface {
-	asDict() *monty.Dict
+	asDict() *montygo.Dict
 }
 
 func toJSON(v any) string {
@@ -342,7 +342,7 @@ func writeJSON(b *strings.Builder, v any) {
 		case math.IsInf(x, -1):
 			b.WriteString("-Infinity")
 		default:
-			b.WriteString(strings.Replace(monty.Repr(x), "e+", "e", 1))
+			b.WriteString(strings.Replace(montygo.Repr(x), "e+", "e", 1))
 		}
 	case string:
 		writeJSONString(b, x)
@@ -350,13 +350,13 @@ func writeJSON(b *strings.Builder, v any) {
 		writeJSONString(b, string(x))
 	case []any:
 		writeJSONArray(b, x)
-	case monty.Tuple:
+	case montygo.Tuple:
 		writeJSONArray(b, x)
-	case *monty.Set:
+	case *montygo.Set:
 		writeJSONArray(b, x.Items())
-	case *monty.FrozenSet:
+	case *montygo.FrozenSet:
 		writeJSONArray(b, x.Items())
-	case *monty.Dict:
+	case *montygo.Dict:
 		b.WriteByte('{')
 		for i, p := range x.Pairs() {
 			if i > 0 {
@@ -364,19 +364,19 @@ func writeJSON(b *strings.Builder, v any) {
 			}
 			key, ok := p.Key.(string)
 			if !ok {
-				key = monty.Repr(p.Key)
+				key = montygo.Repr(p.Key)
 			}
 			writeJSONString(b, key)
 			b.WriteByte(':')
 			writeJSON(b, p.Value)
 		}
 		b.WriteByte('}')
-	case *monty.ClassProxy:
+	case *montygo.ClassProxy:
 		writeJSON(b, x.Attributes)
 	case dictable:
 		writeJSON(b, x.asDict())
 	default:
-		writeJSONString(b, monty.Repr(x))
+		writeJSONString(b, montygo.Repr(x))
 	}
 }
 

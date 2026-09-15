@@ -1,11 +1,10 @@
-package monty
+package montygo
 
 import (
 	"context"
 	"errors"
 	"os"
 	"sort"
-	"sync"
 
 	"github.com/asalimonov/montygo/internal/pool"
 	"github.com/asalimonov/montygo/internal/wire"
@@ -40,35 +39,107 @@ type LoadSnapshotOptions struct {
 type Session struct {
 	pool       *Pool
 	co         *pool.Checkout
-	mu         sync.Mutex
-	closed     bool
 	driven     bool
-	broken     error
 	store      *instanceStore
 	scriptName string
+	host       *Host
+	limits     sessionLimits
+	life       lifecycle
 }
 
-func (s *Session) ensureUsable() error {
-	if s.closed {
-		return ErrSessionClosed
+func (s *Session) ensureUsable() error { return s.Err() }
+
+func (s *Session) poison(err error) error { return s.terminateSession(err) }
+
+// Done closes when this session becomes terminal, independently of host callbacks.
+func (s *Session) Done() <-chan struct{} { return s.life.done }
+
+// Err is the canonical terminal cause; nil does not reserve execution admission.
+func (s *Session) Err() error {
+	s.life.mu.Lock()
+	defer s.life.mu.Unlock()
+	return s.life.terminal
+}
+
+// SessionStats are host-side counters of one session.
+type SessionStats struct {
+	HostObjects     int
+	PeakHostObjects int
+	PendingFutures  int
+}
+
+// Stats reports the session's host-side counters.
+func (s *Session) Stats() SessionStats {
+	count, peak := s.store.stats()
+	return SessionStats{HostObjects: count, PeakHostObjects: peak, PendingFutures: s.pendingCount()}
+}
+
+// SessionState is the coarse state of a session.
+type SessionState uint8
+
+const (
+	// SessionIdle: no execution; Go and FeedRun are admitted.
+	SessionIdle SessionState = iota
+	// SessionRunning: an execution or a control operation owns the worker.
+	SessionRunning
+	// SessionPaused: a FeedStart snapshot is pending.
+	SessionPaused
+	// SessionClosed: terminal; Err says why.
+	SessionClosed
+)
+
+var sessionStateNames = [...]string{"idle", "running", "paused", "closed"}
+
+func (s SessionState) String() string {
+	if int(s) < len(sessionStateNames) {
+		return sessionStateNames[s]
 	}
-	return s.broken
+	return "unknown"
 }
 
-func (s *Session) poison(err error) error {
-	s.broken = err
-	return err
+// State reports the session's coarse state.
+func (s *Session) State() SessionState {
+	s.life.mu.Lock()
+	defer s.life.mu.Unlock()
+	switch {
+	case s.life.terminal != nil:
+		return SessionClosed
+	case s.life.closeAttempt != nil || s.life.controlDone != nil:
+		return SessionRunning
+	case s.life.current == nil:
+		return SessionIdle
+	case s.life.current.phase == executionPaused:
+		return SessionPaused
+	}
+	return SessionRunning
 }
 
 // mapError converts a pool failure, poisoning the session when it is lost.
 func (s *Session) mapError(err error) error {
+	var aborted *abortedTurn
+	if errors.As(err, &aborted) {
+		err = aborted.cause
+	}
 	var perr *pool.Error
 	if !errors.As(err, &perr) {
+		if errors.Is(err, ErrSessionLost) {
+			return s.poison(err)
+		}
 		return err
+	}
+	if terminal := s.Err(); terminal != nil {
+		return terminal
 	}
 	switch perr.Kind {
 	case pool.KindRuntime:
-		return errorFromException(perr.Exception)
+		result := errorFromException(perr.Exception)
+		if perr.WorkerLost {
+			if re, ok := result.(*RuntimeError); ok {
+				re.lost = true
+			}
+			return s.poison(result)
+		}
+		return result
 	case pool.KindTyping:
 		return &TypingError{Diagnostics: perr.Diagnostics}
 	case pool.KindTimeout:
@@ -76,13 +147,12 @@ func (s *Session) mapError(err error) error {
 	case pool.KindCrashed:
 		return s.poison(&CrashedError{Message: perr.Error(), ExitStatus: perr.Status.String()})
 	case pool.KindDisconnected:
-		return s.poison(&DisconnectError{Message: perr.Error()})
+		return s.poison(&DisconnectError{Message: perr.Error(), Code: perr.CloseCode, Reason: perr.CloseReason})
 	case pool.KindShutdown:
 		return s.poison(&ShutdownError{Message: perr.Error(), Dump: perr.Dump})
 	case pool.KindCancelled:
 		if perr.Cause != nil {
-			s.broken = &ProtocolError{Message: perr.Error(), cause: ErrTurnCancelled}
-			return perr.Cause
+			return s.poison(&ProtocolError{Message: perr.Error(), cause: errors.Join(ErrTurnCancelled, perr.Cause)})
 		}
 		return s.poison(&ProtocolError{Message: perr.Error(), cause: ErrTurnCancelled})
 	}
@@ -113,18 +183,21 @@ func cwdPtr(cwd string) *string {
 	return &cwd
 }
 
-// FeedRun executes a snippet, answering external calls, OS calls and name
-// lookups on the host, and returns the snippet's trailing expression value.
+// FeedRun executes one snippet. An overlapping operation returns ErrSessionBusy.
 func (s *Session) FeedRun(ctx context.Context, code string, opts *FeedOptions) (any, error) {
-	if opts == nil {
-		opts = &FeedOptions{}
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.ensureUsable(); err != nil {
+	e, err := s.reserveExecution(ctx)
+	if err != nil {
 		return nil, err
 	}
-	s.driven = true
+	v, err := s.feedRun(ctx, e, code, copyFeedOptions(opts))
+	s.finishExecution(e, v, err)
+	return e.value, e.err
+}
+
+func (s *Session) feedRun(ctx context.Context, e *execution, code string, opts *FeedOptions) (any, error) {
+	if err := s.beginExecution(e); err != nil {
+		return nil, err
+	}
 	inputs, err := s.prepareInputs(opts.Inputs)
 	if err != nil {
 		return nil, err
@@ -133,29 +206,49 @@ func (s *Session) FeedRun(ctx context.Context, code string, opts *FeedOptions) (
 	if err != nil {
 		return nil, err
 	}
-	pt := newPrintTarget(ctx, s.co, opts.Print)
-	ans := &answerer{s: s, lookup: opts.ExternalLookup, os: opts.OS, pt: pt, futures: map[uint32]*Future{}}
-	ev, err := s.co.Feed(ctx, code, inputs, mounts, first, cwdPtr(opts.Cwd), opts.SkipTypeCheck, pt.onPrint)
-	return s.drive(ctx, ev, err, pt, ans)
+	// The feed context ends the run through the stop policy, never the wire.
+	wctx := context.WithoutCancel(ctx)
+	pt := newPrintTarget(wctx, s.co, opts.Print)
+	pt.exec = e
+	e.print = pt
+	ans := s.newAnswerer(e, opts.ExternalLookup, opts.OS, pt)
+	if err := s.beginSend(e); err != nil {
+		return nil, err
+	}
+	ev, err := s.co.Feed(wctx, code, inputs, mounts, first, cwdPtr(opts.Cwd), opts.SkipTypeCheck, pt.onPrint)
+	return s.drive(wctx, e, ev, err, pt, ans)
 }
 
-func (s *Session) drive(ctx context.Context, ev *wire.Event, err error, pt *printTarget, ans *answerer) (any, error) {
+func (s *Session) newAnswerer(e *execution, lookup map[string]any, os OSHandler, pt *printTarget) *answerer {
+	return &answerer{s: s, exec: e, lookup: lookup, host: s.host, os: os, pt: pt}
+}
+
+func (s *Session) drive(ctx context.Context, e *execution, ev *wire.Event, err error, pt *printTarget, ans *answerer) (any, error) {
 	for {
+		s.receivedTurn(e)
+		if terminal := s.Err(); terminal != nil {
+			return nil, terminal
+		}
 		if err != nil {
 			var perr *pool.Error
-			if errors.As(err, &perr) && (perr.Kind == pool.KindRuntime || perr.Kind == pool.KindTyping) && pt.failure != nil {
-				return nil, pt.failure
+			if errors.As(err, &perr) && (perr.Kind == pool.KindRuntime || perr.Kind == pool.KindTyping) || e.aborted {
+				if ferr := pt.finish(); ferr != nil {
+					return nil, ferr
+				}
+				if pt.failure != nil {
+					return nil, pt.failure
+				}
 			}
 			var hf *hostFailure
 			if errors.As(err, &hf) {
-				if s.broken == nil {
-					s.broken = hf.err
-				}
-				return nil, hf.err
+				return nil, s.poison(hf.err)
 			}
 			return nil, s.mapError(err)
 		}
 		if ev.Kind == wire.EventComplete {
+			if ferr := pt.finish(); ferr != nil {
+				return nil, ferr
+			}
 			if pt.failure != nil {
 				return nil, pt.failure
 			}
@@ -168,17 +261,21 @@ func (s *Session) drive(ctx context.Context, ev *wire.Event, err error, pt *prin
 	}
 }
 
-// FeedStart starts a snippet and returns a snapshot at its first suspension.
-func (s *Session) FeedStart(ctx context.Context, code string, opts *FeedOptions) (Snapshot, error) {
-	if opts == nil {
-		opts = &FeedOptions{}
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.ensureUsable(); err != nil {
+// FeedStart starts a snippet and retains ownership across its snapshot chain.
+func (s *Session) FeedStart(ctx context.Context, code string, opts *FeedOptions) (snap Snapshot, err error) {
+	e, err := s.reserveExecution(ctx)
+	if err != nil {
 		return nil, err
 	}
-	s.driven = true
+	defer func() {
+		if err != nil {
+			s.finishExecution(e, nil, err)
+		}
+	}()
+	if err = s.beginExecution(e); err != nil {
+		return nil, err
+	}
+	opts = copyFeedOptions(opts)
 	inputs, err := s.prepareInputs(opts.Inputs)
 	if err != nil {
 		return nil, err
@@ -187,14 +284,20 @@ func (s *Session) FeedStart(ctx context.Context, code string, opts *FeedOptions)
 	if err != nil {
 		return nil, err
 	}
-	d := s.newDriver(ctx, opts.Print, opts.ExternalLookup, opts.OS)
-	ev, err := s.co.Feed(ctx, code, inputs, mounts, first, cwdPtr(opts.Cwd), opts.SkipTypeCheck, d.pt.onPrint)
+	wctx := context.WithoutCancel(ctx)
+	d := s.newDriver(e, wctx, opts.Print, opts.ExternalLookup, opts.OS)
+	if err = s.beginSend(e); err != nil {
+		return nil, err
+	}
+	ev, err := s.co.Feed(wctx, code, inputs, mounts, first, cwdPtr(opts.Cwd), opts.SkipTypeCheck, d.pt.onPrint)
 	return d.advance(ev, err)
 }
 
-func (s *Session) newDriver(ctx context.Context, print PrintTarget, lookup map[string]any, os OSHandler) *snapshotDriver {
+func (s *Session) newDriver(e *execution, ctx context.Context, print PrintTarget, lookup map[string]any, os OSHandler) *snapshotDriver {
 	pt := newPrintTarget(ctx, s.co, print)
-	return &snapshotDriver{s: s, pt: pt, ans: &answerer{s: s, lookup: lookup, os: os, pt: pt, futures: map[uint32]*Future{}}}
+	pt.exec = e
+	e.print = pt
+	return &snapshotDriver{s: s, exec: e, pt: pt, ans: s.newAnswerer(e, lookup, os, pt)}
 }
 
 func (s *Session) claimFresh() error {
@@ -204,30 +307,31 @@ func (s *Session) claimFresh() error {
 	if s.driven {
 		return ErrNotFresh
 	}
-	s.driven = true
 	return nil
 }
 
-func (s *Session) failedLoad(err error) error {
-	if s.broken == nil {
-		s.broken = err
-	}
-	_ = s.co.Finish(context.Background())
-	return err
-}
+func (s *Session) failedLoad(err error) error { return s.poison(err) }
 
-// LoadSession restores an idle session dump into this fresh session.
+// LoadSession restores an idle dump into a fresh session.
 func (s *Session) LoadSession(ctx context.Context, state []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	release, err := s.reserveControl(ctx, false)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if s.host != nil {
+		if err := s.host.Restorable(); err != nil {
+			return err
+		}
+	}
 	if err := s.claimFresh(); err != nil {
 		return err
 	}
+	s.driven = true
 	pt := newPrintTarget(ctx, s.co, nil)
 	ev, _, err := s.co.Restore(ctx, state, nil, pt.onPrint)
 	if err != nil {
-		mapped := s.mapError(err)
-		return s.failedLoad(mapped)
+		return s.failedLoad(s.mapError(err))
 	}
 	if ev != nil {
 		return s.failedLoad(ErrDumpIsSuspended)
@@ -235,42 +339,57 @@ func (s *Session) LoadSession(ctx context.Context, state []byte) error {
 	return nil
 }
 
-// LoadSnapshot restores a suspended dump and returns the snapshot to resume.
-func (s *Session) LoadSnapshot(ctx context.Context, state []byte, opts *LoadSnapshotOptions) (Snapshot, error) {
+// LoadSnapshot restores a suspended dump into a fresh session.
+func (s *Session) LoadSnapshot(ctx context.Context, state []byte, opts *LoadSnapshotOptions) (snap Snapshot, err error) {
+	e, err := s.reserveExecution(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			s.finishExecution(e, nil, err)
+		}
+	}()
+	if s.host != nil {
+		if err := s.host.Restorable(); err != nil {
+			return nil, err
+		}
+	}
+	if err = s.claimFresh(); err != nil {
+		return nil, err
+	}
+	if err = s.beginExecution(e); err != nil {
+		return nil, err
+	}
 	if opts == nil {
 		opts = &LoadSnapshotOptions{}
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.claimFresh(); err != nil {
-		return nil, err
-	}
 	mounts, _, err := buildMounts(opts.Mount)
 	if err != nil {
-		return nil, s.failedLoad(err)
+		return nil, err
 	}
-	d := s.newDriver(ctx, opts.Print, opts.ExternalLookup, opts.OS)
-	ev, _, err := s.co.Restore(ctx, state, mounts, d.pt.onPrint)
+	wctx := context.WithoutCancel(ctx)
+	d := s.newDriver(e, wctx, opts.Print, opts.ExternalLookup, opts.OS)
+	if err = s.beginSend(e); err != nil {
+		return nil, err
+	}
+	ev, _, err := s.co.Restore(wctx, state, mounts, d.pt.onPrint)
 	if err != nil {
 		return nil, s.failedLoad(s.mapError(err))
 	}
 	if ev == nil {
 		return nil, s.failedLoad(ErrDumpIsIdle)
 	}
-	snap, err := d.advance(ev, nil)
-	if err != nil {
-		return nil, s.failedLoad(err)
-	}
-	return snap, nil
+	return d.advance(ev, nil)
 }
 
-// Dump serializes the session; it stays usable.
+// Dump serializes an idle or paused session; a running turn returns ErrSessionBusy.
 func (s *Session) Dump(ctx context.Context) ([]byte, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.ensureUsable(); err != nil {
+	release, err := s.reserveControl(ctx, true)
+	if err != nil {
 		return nil, err
 	}
+	defer release()
 	state, err := s.co.Dump(ctx)
 	if err != nil {
 		return nil, s.mapError(err)
@@ -280,44 +399,40 @@ func (s *Session) Dump(ctx context.Context) ([]byte, error) {
 
 // InstallDependencies installs packages into a CPython worker's session.
 func (s *Session) InstallDependencies(ctx context.Context, requirements []string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.ensureUsable(); err != nil {
+	release, err := s.reserveControl(ctx, false)
+	if err != nil {
 		return err
 	}
+	defer release()
 	s.driven = true
-	if err := s.co.InstallDependencies(ctx, requirements); err != nil {
-		return s.mapError(err)
-	}
-	return nil
+	return s.mapError(s.co.InstallDependencies(ctx, requirements))
 }
 
-// WorkerPID is the worker's process id; false for non-process workers or while a turn runs.
+// WorkerPID reports the worker process ID when no turn is running.
 func (s *Session) WorkerPID() (int, bool) { return s.co.PID() }
 
-// ScriptName is the session's script name.
+// ScriptName reports the session's traceback name.
 func (s *Session) ScriptName() string { return s.scriptName }
 
-// Close ends the session and returns its worker to the pool.
-func (s *Session) Close(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil
-	}
-	s.closed = true
-	err := s.co.Finish(ctx)
-	if err != nil {
-		return s.mapError(err)
-	}
-	return nil
-}
-
 type printTarget struct {
+	exec    *execution
 	ctx     context.Context
 	co      *pool.Checkout
 	target  PrintTarget
 	failure error
+}
+
+// finish flushes a buffering target at the end of a turn.
+func (p *printTarget) finish() error {
+	f, ok := p.target.(FlushingPrintTarget)
+	if !ok || p.failure != nil {
+		return nil
+	}
+	if err := f.Flush(); err != nil {
+		p.failure = err
+		return err
+	}
+	return nil
 }
 
 func newPrintTarget(ctx context.Context, co *pool.Checkout, target PrintTarget) *printTarget {
@@ -347,7 +462,11 @@ func (p *printTarget) onPrint(stream uint8, text string) {
 	}()
 	var err error
 	if ct, ok := p.target.(ContextPrintTarget); ok {
-		err = ct.PrintContext(p.co.CallbackContext(p.ctx), st, text)
+		cb := p.co.CallbackContext(p.ctx)
+		if p.exec != nil {
+			cb = callbackContext{Context: p.exec.callbackCtx, values: cb}
+		}
+		err = ct.PrintContext(cb, st, text)
 	} else {
 		err = p.target.Print(st, text)
 	}

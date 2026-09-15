@@ -9,7 +9,7 @@ import (
 	"io"
 	"os"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/examples/internal/montyenv"
 )
 
@@ -29,8 +29,8 @@ func main() {
 	}
 }
 
-func withSession(ctx context.Context, pool *monty.Pool, fn func(*monty.Session) error) error {
-	session, err := pool.Checkout(ctx, monty.CheckoutOptions{})
+func withSession(ctx context.Context, pool *montygo.Pool, fn func(*montygo.Session) error) error {
+	session, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
 	if err != nil {
 		return err
 	}
@@ -39,23 +39,23 @@ func withSession(ctx context.Context, pool *monty.Pool, fn func(*monty.Session) 
 }
 
 func run(ctx context.Context, out io.Writer) error {
-	pool, err := monty.New(ctx, montyenv.PoolOptions())
+	pool, err := montygo.New(ctx, montyenv.PoolOptions())
 	if err != nil {
 		return err
 	}
 	defer pool.Close(ctx)
 
-	err = withSession(ctx, pool, func(session *monty.Session) error {
-		wrapper, err := monty.NewClassInstance(newConfig(), monty.ClassInstanceOptions{LazyAttrs: monty.Names("retries")})
+	err = withSession(ctx, pool, func(session *montygo.Session) error {
+		wrapper, err := montygo.NewClassInstance(newConfig(), montygo.ClassInstanceOptions{LazyAttrs: montygo.Names("retries")})
 		if err != nil {
 			return err
 		}
-		result, err := session.FeedRun(ctx, "cfg.retries", &monty.FeedOptions{Inputs: map[string]any{"cfg": wrapper}})
+		result, err := session.FeedRun(ctx, "cfg.retries", &montygo.FeedOptions{Inputs: map[string]any{"cfg": wrapper}})
 		if err != nil {
 			return err
 		}
-		if !monty.Equal(result, 3) {
-			return fmt.Errorf("assertion failed: cfg.retries == %s", monty.Repr(result))
+		if !montygo.Equal(result, 3) {
+			return fmt.Errorf("assertion failed: cfg.retries == %s", montygo.Repr(result))
 		}
 		return nil
 	})
@@ -63,13 +63,13 @@ func run(ctx context.Context, out io.Writer) error {
 		return err
 	}
 
-	return withSession(ctx, pool, func(session *monty.Session) error {
-		wrapper, err := monty.NewClassInstance(newConfig(), monty.ClassInstanceOptions{LazyAttrs: monty.Names("retries")})
+	return withSession(ctx, pool, func(session *montygo.Session) error {
+		wrapper, err := montygo.NewClassInstance(newConfig(), montygo.ClassInstanceOptions{LazyAttrs: montygo.Names("retries")})
 		if err != nil {
 			return err
 		}
-		_, err = session.FeedRun(ctx, "cfg.api_key", &monty.FeedOptions{Inputs: map[string]any{"cfg": wrapper}})
-		var exc *monty.RuntimeError
+		_, err = session.FeedRun(ctx, "cfg.api_key", &montygo.FeedOptions{Inputs: map[string]any{"cfg": wrapper}})
+		var exc *montygo.RuntimeError
 		switch {
 		case errors.As(err, &exc):
 			fmt.Fprintf(out, "denied as expected: %v\n", exc)

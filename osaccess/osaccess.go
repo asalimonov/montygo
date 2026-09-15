@@ -6,7 +6,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 // OSAccess is an in-memory virtual filesystem and environment for sandboxed code.
@@ -44,13 +44,13 @@ func New(files []File, environ map[string]string, opts ...Option) (*OSAccess, er
 	o.tree.set("/", newDir())
 	root := parsePath(cfg.rootDir)
 	if !root.isAbs() {
-		return nil, monty.Raise("AssertionError", "Root directory must be absolute, got "+root.String())
+		return nil, montygo.Raise("AssertionError", "Root directory must be absolute, got "+root.String())
 	}
 	for _, f := range o.Files {
 		p := parsePath(string(f.Path()))
 		if !p.isAbs() {
 			p = root.join(p)
-			f.SetPath(monty.Path(p.String()))
+			f.SetPath(montygo.Path(p.String()))
 		}
 		parts := p.allParts()
 		sub := o.tree
@@ -58,7 +58,7 @@ func New(files []File, environ map[string]string, opts ...Option) (*OSAccess, er
 			entry := sub.setdefault(part)
 			d, ok := entry.(*dir)
 			if !ok {
-				return nil, monty.Raise("ValueError", fmt.Sprintf("Cannot put file %s within sub-directory of file %s", describe(f), describe(entry)))
+				return nil, montygo.Raise("ValueError", fmt.Sprintf("Cannot put file %s within sub-directory of file %s", describe(f), describe(entry)))
 			}
 			sub = d
 		}
@@ -67,8 +67,8 @@ func New(files []File, environ map[string]string, opts ...Option) (*OSAccess, er
 	return o, nil
 }
 
-// Handler returns the monty.OSHandler backed by o.
-func (o *OSAccess) Handler() monty.OSHandler { return Handler(o) }
+// Handler returns the montygo.OSHandler backed by o.
+func (o *OSAccess) Handler() montygo.OSHandler { return Handler(o) }
 
 func (o *OSAccess) String() string {
 	o.mu.Lock()
@@ -77,39 +77,39 @@ func (o *OSAccess) String() string {
 	for i, f := range o.Files {
 		files[i] = describe(f)
 	}
-	return fmt.Sprintf("OSAccess(files=[%s], environ=%s)", strings.Join(files, ", "), monty.Repr(environDict(o.Environ)))
+	return fmt.Sprintf("OSAccess(files=[%s], environ=%s)", strings.Join(files, ", "), montygo.Repr(environDict(o.Environ)))
 }
 
-func (o *OSAccess) PathExists(path monty.Path) (bool, error) {
+func (o *OSAccess) PathExists(path montygo.Path) (bool, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.entry(parsePath(string(path))) != nil, nil
 }
 
-func (o *OSAccess) PathIsFile(path monty.Path) (bool, error) {
+func (o *OSAccess) PathIsFile(path montygo.Path) (bool, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	_, ok := o.entry(parsePath(string(path))).(File)
 	return ok, nil
 }
 
-func (o *OSAccess) PathIsDir(path monty.Path) (bool, error) {
+func (o *OSAccess) PathIsDir(path montygo.Path) (bool, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	_, ok := o.entry(parsePath(string(path))).(*dir)
 	return ok, nil
 }
 
-func (o *OSAccess) PathIsSymlink(monty.Path) (bool, error) { return false, nil }
+func (o *OSAccess) PathIsSymlink(montygo.Path) (bool, error) { return false, nil }
 
 // PathOpen validates mode before any side effect, then applies the open-time effect of r, w or a.
-func (o *OSAccess) PathOpen(path monty.Path, mode string) (*monty.FileHandle, error) {
+func (o *OSAccess) PathOpen(path montygo.Path, mode string) (*montygo.FileHandle, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	p := parsePath(string(path))
-	h, err := monty.NewFileHandle(p.String(), mode, 0)
+	h, err := montygo.NewFileHandle(p.String(), mode, 0)
 	if err != nil {
-		return nil, monty.Raise("ValueError", err.Error())
+		return nil, montygo.Raise("ValueError", err.Error())
 	}
 	var empty any = ""
 	if h.Binary() {
@@ -140,7 +140,7 @@ func (o *OSAccess) PathOpen(path monty.Path, mode string) (*monty.FileHandle, er
 	return h, nil
 }
 
-func (o *OSAccess) PathReadText(path monty.Path) (string, error) {
+func (o *OSAccess) PathReadText(path montygo.Path) (string, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	f, err := o.file(parsePath(string(path)))
@@ -154,7 +154,7 @@ func (o *OSAccess) PathReadText(path monty.Path) (string, error) {
 	return contentText(content)
 }
 
-func (o *OSAccess) PathReadBytes(path monty.Path) ([]byte, error) {
+func (o *OSAccess) PathReadBytes(path montygo.Path) ([]byte, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	f, err := o.file(parsePath(string(path)))
@@ -169,7 +169,7 @@ func (o *OSAccess) PathReadBytes(path monty.Path) ([]byte, error) {
 }
 
 // PathWriteText returns the number of characters written.
-func (o *OSAccess) PathWriteText(path monty.Path, data string) (int, error) {
+func (o *OSAccess) PathWriteText(path montygo.Path, data string) (int, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if err := o.writeFile(parsePath(string(path)), data); err != nil {
@@ -178,7 +178,7 @@ func (o *OSAccess) PathWriteText(path monty.Path, data string) (int, error) {
 	return utf8.RuneCountInString(data), nil
 }
 
-func (o *OSAccess) PathWriteBytes(path monty.Path, data []byte) (int, error) {
+func (o *OSAccess) PathWriteBytes(path montygo.Path, data []byte) (int, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if err := o.writeFile(parsePath(string(path)), append([]byte{}, data...)); err != nil {
@@ -188,7 +188,7 @@ func (o *OSAccess) PathWriteBytes(path monty.Path, data []byte) (int, error) {
 }
 
 // PathAppendText keeps text storage text; bytes storage is decoded first. It returns the character count.
-func (o *OSAccess) PathAppendText(path monty.Path, data string) (int, error) {
+func (o *OSAccess) PathAppendText(path montygo.Path, data string) (int, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if err := o.appendData(parsePath(string(path)), data); err != nil {
@@ -197,7 +197,7 @@ func (o *OSAccess) PathAppendText(path monty.Path, data string) (int, error) {
 	return utf8.RuneCountInString(data), nil
 }
 
-func (o *OSAccess) PathAppendBytes(path monty.Path, data []byte) (int, error) {
+func (o *OSAccess) PathAppendBytes(path montygo.Path, data []byte) (int, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if err := o.appendData(parsePath(string(path)), append([]byte{}, data...)); err != nil {
@@ -206,7 +206,7 @@ func (o *OSAccess) PathAppendBytes(path monty.Path, data []byte) (int, error) {
 	return len(data), nil
 }
 
-func (o *OSAccess) PathMkdir(path monty.Path, parents, existOK bool) error {
+func (o *OSAccess) PathMkdir(path montygo.Path, parents, existOK bool) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	p := parsePath(string(path))
@@ -240,7 +240,7 @@ func (o *OSAccess) PathMkdir(path monty.Path, parents, existOK bool) error {
 	return nil
 }
 
-func (o *OSAccess) PathUnlink(path monty.Path) error {
+func (o *OSAccess) PathUnlink(path montygo.Path) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	p := parsePath(string(path))
@@ -256,7 +256,7 @@ func (o *OSAccess) PathUnlink(path monty.Path) error {
 	return parent.del(f.Name())
 }
 
-func (o *OSAccess) PathRmdir(path monty.Path) error {
+func (o *OSAccess) PathRmdir(path montygo.Path) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	p := parsePath(string(path))
@@ -265,7 +265,7 @@ func (o *OSAccess) PathRmdir(path monty.Path) error {
 		return err
 	}
 	if d.len() > 0 {
-		return monty.Raise("OSError", "[Errno 39] Directory not empty: "+monty.Repr(p.String()))
+		return montygo.Raise("OSError", "[Errno 39] Directory not empty: "+montygo.Repr(p.String()))
 	}
 	parent, err := o.parentDir(p)
 	if err != nil {
@@ -275,7 +275,7 @@ func (o *OSAccess) PathRmdir(path monty.Path) error {
 }
 
 // PathIterdir returns full child paths in insertion order.
-func (o *OSAccess) PathIterdir(path monty.Path) ([]monty.Path, error) {
+func (o *OSAccess) PathIterdir(path montygo.Path) ([]montygo.Path, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	p := parsePath(string(path))
@@ -283,14 +283,14 @@ func (o *OSAccess) PathIterdir(path monty.Path) ([]monty.Path, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]monty.Path, 0, d.len())
+	out := make([]montygo.Path, 0, d.len())
 	for _, name := range d.names {
-		out = append(out, monty.Path(p.join(parsePath(name)).String()))
+		out = append(out, montygo.Path(p.join(parsePath(name)).String()))
 	}
 	return out, nil
 }
 
-func (o *OSAccess) PathStat(path monty.Path) (StatResult, error) {
+func (o *OSAccess) PathStat(path montygo.Path) (StatResult, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	p := parsePath(string(path))
@@ -314,14 +314,14 @@ func (o *OSAccess) PathStat(path monty.Path) (StatResult, error) {
 }
 
 // PathRename moves a file or directory. A moved file keeps its Path; files inside a moved directory are rebased.
-func (o *OSAccess) PathRename(path, target monty.Path) error {
+func (o *OSAccess) PathRename(path, target montygo.Path) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	src, dst := parsePath(string(path)), parsePath(string(target))
-	pair := monty.Repr(src.String()) + " -> " + monty.Repr(dst.String())
+	pair := montygo.Repr(src.String()) + " -> " + montygo.Repr(dst.String())
 	srcEntry := o.entry(src)
 	if srcEntry == nil {
-		return monty.Raise("FileNotFoundError", "[Errno 2] No such file or directory: "+pair)
+		return montygo.Raise("FileNotFoundError", "[Errno 2] No such file or directory: "+pair)
 	}
 	parent, err := o.parentDir(src)
 	if err != nil {
@@ -329,13 +329,13 @@ func (o *OSAccess) PathRename(path, target monty.Path) error {
 	}
 	targetParent, ok := o.entry(dst.parent()).(*dir)
 	if !ok {
-		return monty.Raise("FileNotFoundError", "[Errno 2] No such file or directory: "+pair)
+		return montygo.Raise("FileNotFoundError", "[Errno 2] No such file or directory: "+pair)
 	}
 	targetEntry := o.entry(dst)
 	if f, isFile := srcEntry.(File); isFile {
 		switch t := targetEntry.(type) {
 		case *dir:
-			return monty.Raise("IsADirectoryError", "[Errno 21] Is a directory: "+pair)
+			return montygo.Raise("IsADirectoryError", "[Errno 21] Is a directory: "+pair)
 		case File:
 			t.Delete()
 		}
@@ -348,14 +348,14 @@ func (o *OSAccess) PathRename(path, target monty.Path) error {
 	srcDir := srcEntry.(*dir)
 	switch t := targetEntry.(type) {
 	case File:
-		return monty.Raise("NotADirectoryError", "[Errno 20] Not a directory: "+pair)
+		return montygo.Raise("NotADirectoryError", "[Errno 20] Not a directory: "+pair)
 	case *dir:
 		if t.len() > 0 {
-			return monty.Raise("OSError", "[Errno 66] Directory not empty: "+pair)
+			return montygo.Raise("OSError", "[Errno 66] Directory not empty: "+pair)
 		}
 	}
 	if srcDir.contains(targetParent) {
-		return monty.Raise("OSError", "[Errno 22] Invalid argument: "+pair)
+		return montygo.Raise("OSError", "[Errno 22] Invalid argument: "+pair)
 	}
 	if err := parent.del(src.name()); err != nil {
 		return err
@@ -364,10 +364,10 @@ func (o *OSAccess) PathRename(path, target monty.Path) error {
 	return rebasePaths(srcDir, src, dst)
 }
 
-func (o *OSAccess) PathResolve(path monty.Path) (string, error) { return o.PathAbsolute(path) }
+func (o *OSAccess) PathResolve(path montygo.Path) (string, error) { return o.PathAbsolute(path) }
 
 // PathAbsolute treats "/" as the working directory.
-func (o *OSAccess) PathAbsolute(path monty.Path) (string, error) {
+func (o *OSAccess) PathAbsolute(path montygo.Path) (string, error) {
 	p := parsePath(string(path))
 	if p.isAbs() {
 		return p.String(), nil
@@ -391,9 +391,9 @@ func (o *OSAccess) GetEnviron() (map[string]string, error) {
 	return o.Environ, nil
 }
 
-func (o *OSAccess) DateToday() (monty.Date, error) { return Base{}.DateToday() }
+func (o *OSAccess) DateToday() (montygo.Date, error) { return Base{}.DateToday() }
 
-func (o *OSAccess) DatetimeNow(tz *monty.TimeZone) (monty.DateTime, error) {
+func (o *OSAccess) DatetimeNow(tz *montygo.TimeZone) (montygo.DateTime, error) {
 	return Base{}.DatetimeNow(tz)
 }
 
@@ -449,7 +449,7 @@ func (o *OSAccess) parentDir(p purePath) (*dir, error) {
 	entry := o.entry(p.parent())
 	d, ok := entry.(*dir)
 	if !ok {
-		return nil, monty.Raise("AssertionError", "Expected parent of a file to always be a directory, got "+describe(entry))
+		return nil, montygo.Raise("AssertionError", "Expected parent of a file to always be a directory, got "+describe(entry))
 	}
 	return d, nil
 }
@@ -503,9 +503,9 @@ func rebasePaths(d *dir, oldPrefix, newPrefix purePath) error {
 			current := parsePath(string(entry.Path()))
 			rel, ok := current.relativeTo(oldPrefix)
 			if !ok {
-				return monty.Raise("ValueError", fmt.Sprintf("%s is not in the subpath of %s", monty.Repr(current.String()), monty.Repr(oldPrefix.String())))
+				return montygo.Raise("ValueError", fmt.Sprintf("%s is not in the subpath of %s", montygo.Repr(current.String()), montygo.Repr(oldPrefix.String())))
 			}
-			entry.SetPath(monty.Path(newPrefix.join(rel).String()))
+			entry.SetPath(montygo.Path(newPrefix.join(rel).String()))
 		case *dir:
 			if err := rebasePaths(entry, oldPrefix, newPrefix); err != nil {
 				return err
@@ -516,19 +516,19 @@ func rebasePaths(d *dir, oldPrefix, newPrefix purePath) error {
 }
 
 func errNotFound(p purePath) error {
-	return monty.Raise("FileNotFoundError", "[Errno 2] No such file or directory: "+monty.Repr(p.String()))
+	return montygo.Raise("FileNotFoundError", "[Errno 2] No such file or directory: "+montygo.Repr(p.String()))
 }
 
 func errIsDir(p purePath) error {
-	return monty.Raise("IsADirectoryError", "[Errno 21] Is a directory: "+monty.Repr(p.String()))
+	return montygo.Raise("IsADirectoryError", "[Errno 21] Is a directory: "+montygo.Repr(p.String()))
 }
 
 func errNotDir(p purePath) error {
-	return monty.Raise("NotADirectoryError", "[Errno 20] Not a directory: "+monty.Repr(p.String()))
+	return montygo.Raise("NotADirectoryError", "[Errno 20] Not a directory: "+montygo.Repr(p.String()))
 }
 
 func errExists(p purePath) error {
-	return monty.Raise("FileExistsError", "[Errno 17] File exists: "+monty.Repr(p.String()))
+	return montygo.Raise("FileExistsError", "[Errno 17] File exists: "+montygo.Repr(p.String()))
 }
 
 func describe(v any) string {
@@ -570,7 +570,7 @@ func (d *dir) setdefault(name string) any {
 
 func (d *dir) del(name string) error {
 	if _, ok := d.entries[name]; !ok {
-		return monty.Raise("KeyError", monty.Repr(name))
+		return montygo.Raise("KeyError", montygo.Repr(name))
 	}
 	delete(d.entries, name)
 	for i, n := range d.names {
@@ -601,7 +601,7 @@ func (d *dir) String() string {
 		if i > 0 {
 			b.WriteString(", ")
 		}
-		b.WriteString(monty.Repr(name) + ": " + describe(d.entries[name]))
+		b.WriteString(montygo.Repr(name) + ": " + describe(d.entries[name]))
 	}
 	b.WriteByte('}')
 	return b.String()

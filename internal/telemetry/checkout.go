@@ -17,13 +17,13 @@ type Checkout struct {
 
 // NewCheckout returns the observer of a checkout whose session span is a
 // child of the span in parent, or nil when it would record nothing.
-func NewCheckout(parent context.Context, pid int, hasPID, metered bool) *Checkout {
+func NewCheckout(r *Recorder, parent context.Context, pid int, hasPID, metered bool) *Checkout {
 	c := &Checkout{}
-	if r := Current(); r.Tracing() || r.Logging() {
+	if r.Tracing() || r.Logging() {
 		c.spans = NewSpans(r, parent, pid, hasPID)
 	}
-	if metered {
-		c.metrics = &TurnMetrics{}
+	if metered && r.Metering() {
+		c.metrics = &TurnMetrics{r: r}
 	}
 	if c.spans == nil && c.metrics == nil {
 		return nil

@@ -1,7 +1,9 @@
-package monty_test
+package montygo_test
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"io"
 	"net/http"
@@ -19,13 +21,17 @@ import (
 // wsRelay bridges each WebSocket connection to a fresh `monty subprocess`
 // child, translating one binary message per frame to 4-byte-LE-prefixed stdio.
 type wsRelay struct {
-	URL     string
+	URL string
+	// TLS trusts the relay certificate; it is nil for a ws:// relay.
+	TLS     *tls.Config
 	mu      sync.Mutex
 	headers []http.Header
+	health  []http.Header
 }
 
-// wsStartRelay serves the relay on an ephemeral loopback port for the test's lifetime.
-func wsStartRelay(t *testing.T) *wsRelay {
+// wsStartRelay serves the relay on an ephemeral loopback port for the test's
+// lifetime, over TLS when secure is set. GET /health answers 200.
+func wsStartRelay(t *testing.T, secure bool) *wsRelay {
 	t.Helper()
 	bin := os.Getenv("MONTY_BIN")
 	if bin == "" {
@@ -37,7 +43,14 @@ func wsStartRelay(t *testing.T) *wsRelay {
 	relay := &wsRelay{}
 	ctx, cancel := context.WithCancel(context.Background())
 	var bridges sync.WaitGroup
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/health" {
+			relay.mu.Lock()
+			relay.health = append(relay.health, r.Header.Clone())
+			relay.mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		relay.mu.Lock()
 		relay.headers = append(relay.headers, r.Header.Clone())
 		relay.mu.Unlock()
@@ -49,7 +62,16 @@ func wsStartRelay(t *testing.T) *wsRelay {
 		defer bridges.Done()
 		wsBridge(ctx, conn, bin)
 	}))
-	relay.URL = "ws" + strings.TrimPrefix(srv.URL, "http")
+	if secure {
+		srv.StartTLS()
+		roots := x509.NewCertPool()
+		roots.AddCert(srv.Certificate())
+		relay.TLS = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+		relay.URL = "wss" + strings.TrimPrefix(srv.URL, "https")
+	} else {
+		srv.Start()
+		relay.URL = "ws" + strings.TrimPrefix(srv.URL, "http")
+	}
 	t.Cleanup(func() {
 		srv.Close()
 		cancel()
@@ -72,6 +94,13 @@ func (r *wsRelay) captured() []http.Header {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]http.Header(nil), r.headers...)
+}
+
+// healthChecks returns the headers of every health request received so far.
+func (r *wsRelay) healthChecks() []http.Header {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]http.Header(nil), r.health...)
 }
 
 func wsBridge(ctx context.Context, conn *websocket.Conn, bin string) {

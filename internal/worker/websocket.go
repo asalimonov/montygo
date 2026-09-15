@@ -2,8 +2,10 @@ package worker
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -44,10 +46,15 @@ func ConnectHeaders(ctx context.Context) [][2]string {
 // message per protocol frame, no length prefix.
 type WebSocketDialer struct {
 	URL string
-	// DialTimeout bounds DNS, TCP, TLS and the upgrade: 0 means DefaultDialTimeout.
+	// DialTimeout bounds DNS, TCP, TLS and the upgrade, or a health check:
+	// 0 means DefaultDialTimeout, a negative value leaves only ctx.
 	DialTimeout time.Duration
 	// UserAgent replaces DefaultUserAgent when set.
 	UserAgent string
+	// TLSConfig is cloned into the transport; nil keeps http.DefaultTransport's settings.
+	TLSConfig *tls.Config
+	// DialContext replaces net.Dialer.DialContext for the TCP connection.
+	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 func (d *WebSocketDialer) Kind() Kind                  { return KindWebSocket }
@@ -71,22 +78,10 @@ func (d *WebSocketDialer) Spawn(ctx context.Context) (Worker, error) {
 	if err != nil {
 		return nil, err
 	}
-	timeout := d.DialTimeout
-	if timeout <= 0 {
-		timeout = DefaultDialTimeout
-	}
-	dctx, cancel := context.WithTimeout(ctx, timeout)
+	dctx, timeout, cancel := d.bound(ctx)
 	defer cancel()
 	var raw atomic.Pointer[net.Conn]
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	netDialer := &net.Dialer{}
-	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		c, err := netDialer.DialContext(ctx, network, addr)
-		if err == nil {
-			raw.Store(&c)
-		}
-		return c, err
-	}
+	transport := d.transport(&raw)
 	defer transport.CloseIdleConnections()
 	conn, _, err := websocket.Dial(dctx, d.URL, &websocket.DialOptions{
 		HTTPClient:      &http.Client{Transport: transport},
@@ -115,6 +110,100 @@ func (d *WebSocketDialer) Spawn(ctx context.Context) (Worker, error) {
 	}
 	go w.read()
 	return w, nil
+}
+
+func (d *WebSocketDialer) bound(ctx context.Context) (context.Context, time.Duration, context.CancelFunc) {
+	timeout := d.DialTimeout
+	if timeout == 0 {
+		timeout = DefaultDialTimeout
+	}
+	if timeout < 0 {
+		bounded, cancel := context.WithCancel(ctx)
+		return bounded, timeout, cancel
+	}
+	bounded, cancel := context.WithTimeout(ctx, timeout)
+	return bounded, timeout, cancel
+}
+
+func (d *WebSocketDialer) transport(raw *atomic.Pointer[net.Conn]) *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	if d.TLSConfig != nil {
+		t.TLSClientConfig = d.TLSConfig.Clone()
+	}
+	dial := d.DialContext
+	if dial == nil {
+		dial = (&net.Dialer{}).DialContext
+	}
+	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		c, err := dial(ctx, network, addr)
+		if err == nil && raw != nil {
+			raw.Store(&c)
+		}
+		return c, err
+	}
+	return t
+}
+
+// HealthCheck reports nil when GET <path>/health on the dialer's server answers 200.
+func (d *WebSocketDialer) HealthCheck(ctx context.Context, headers [][2]string) error {
+	target, err := healthURL(d.URL)
+	if err != nil {
+		return fmt.Errorf("%s: %w", d.URL, err)
+	}
+	header, host, err := d.upgradeHeader(headers)
+	if err != nil {
+		return err
+	}
+	hctx, timeout, cancel := d.bound(ctx)
+	defer cancel()
+	transport := d.transport(nil)
+	defer transport.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(hctx, http.MethodGet, target, nil)
+	if err != nil {
+		return fmt.Errorf("%s: %w", target, err)
+	}
+	req.Header = header
+	if host != "" {
+		req.Host = host
+	}
+	resp, err := (&http.Client{Transport: transport}).Do(req)
+	switch {
+	case err != nil && ctx.Err() != nil:
+		return ctx.Err()
+	case err != nil && hctx.Err() != nil:
+		return fmt.Errorf("%s: health check timed out after %s", target, timeout)
+	case err != nil:
+		return fmt.Errorf("%s: %w", target, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: health check returned %d", target, resp.StatusCode)
+	}
+	return nil
+}
+
+func healthURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			err = uerr.Err
+		}
+		return "", err
+	}
+	switch u.Scheme {
+	case "ws", "http":
+		u.Scheme = "http"
+	case "wss", "https":
+		u.Scheme = "https"
+	default:
+		return "", fmt.Errorf("unsupported URL scheme %q", u.Scheme)
+	}
+	u.Path = strings.TrimSuffix(u.Path, "/") + "/health"
+	u.RawPath = ""
+	u.RawQuery, u.Fragment, u.RawFragment = "", "", ""
+	return u.String(), nil
 }
 
 func (d *WebSocketDialer) upgradeHeader(pairs [][2]string) (http.Header, string, error) {
@@ -178,6 +267,21 @@ type wsWorker struct {
 	stopOnce  sync.Once
 	dropOnce  sync.Once
 	closeOnce sync.Once
+	errMu     sync.Mutex
+	err       error
+}
+
+// ClosedError reports a close frame received from the peer.
+type ClosedError struct {
+	Code   int
+	Reason string
+}
+
+func (e *ClosedError) Error() string {
+	if e.Reason == "" {
+		return fmt.Sprintf("closed by server (%d)", e.Code)
+	}
+	return fmt.Sprintf("closed by server (%d): %s", e.Code, e.Reason)
 }
 
 func (w *wsWorker) read() {
@@ -185,6 +289,7 @@ func (w *wsWorker) read() {
 	for {
 		typ, data, err := w.conn.Read(context.Background())
 		if err != nil || typ != websocket.MessageBinary {
+			w.setErr(err, typ)
 			w.drop()
 			return
 		}
@@ -194,6 +299,33 @@ func (w *wsWorker) read() {
 			return
 		}
 	}
+}
+
+func (w *wsWorker) setErr(err error, typ websocket.MessageType) {
+	w.errMu.Lock()
+	defer w.errMu.Unlock()
+	var ce websocket.CloseError
+	switch {
+	case errors.As(err, &ce):
+		if ce.Code == websocket.StatusNormalClosure && w.stopped() {
+			return
+		}
+		w.err = &ClosedError{Code: int(ce.Code), Reason: ce.Reason}
+	case err != nil:
+		if !w.stopped() {
+			w.err = err
+		}
+	default:
+		w.err = fmt.Errorf("unexpected %s message", typ)
+	}
+}
+
+func (w *wsWorker) Done() <-chan struct{} { return w.done }
+
+func (w *wsWorker) Err() error {
+	w.errMu.Lock()
+	defer w.errMu.Unlock()
+	return w.err
 }
 
 func (w *wsWorker) stopped() bool {
@@ -210,6 +342,14 @@ func (w *wsWorker) signalStop() { w.stopOnce.Do(func() { close(w.stop) }) }
 func (w *wsWorker) Send(ctx context.Context, payload []byte) error {
 	if len(payload) > wire.MaxFrameLen {
 		return &wire.FrameTooLargeError{Len: len(payload), Max: wire.MaxFrameLen}
+	}
+	select {
+	case <-w.done:
+		if cause := w.Err(); cause != nil {
+			return fmt.Errorf("%w: %w", ErrWorkerGone, cause)
+		}
+		return ErrWorkerGone
+	default:
 	}
 	if w.stopped() {
 		return ErrWorkerGone

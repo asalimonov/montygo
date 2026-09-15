@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 const customersFixture = "First,Last,Email,Total Purchased,Score,Note\n" +
@@ -23,12 +23,12 @@ func TestBindParameters(t *testing.T) {
 	require.Equal(t, `SELECT * FROM data WHERE "Email" IN (?, ?) AND n > ?`, query)
 	require.Equal(t, []any{"a@x", "b@x", int64(3)}, args)
 
-	query, args, err = bindParameters("SELECT '$a', \"$b\", 'it''s $c' -- $d\n/* $e */ FROM data WHERE x = $f", map[string]any{"f": monty.Path("/p")})
+	query, args, err = bindParameters("SELECT '$a', \"$b\", 'it''s $c' -- $d\n/* $e */ FROM data WHERE x = $f", map[string]any{"f": montygo.Path("/p")})
 	require.NoError(t, err)
 	require.Equal(t, "SELECT '$a', \"$b\", 'it''s $c' -- $d\n/* $e */ FROM data WHERE x = ?", query)
 	require.Equal(t, []any{"/p"}, args)
 
-	query, args, err = bindParameters("SELECT 1 WHERE x IN $empty", map[string]any{"empty": monty.Tuple{}})
+	query, args, err = bindParameters("SELECT 1 WHERE x IN $empty", map[string]any{"empty": montygo.Tuple{}})
 	require.NoError(t, err)
 	require.Equal(t, "SELECT 1 WHERE x IN ()", query)
 	require.Empty(t, args)
@@ -37,7 +37,7 @@ func TestBindParameters(t *testing.T) {
 	require.EqualError(t, err, "Invalid Input Error: Values were not provided for the following prepared statement parameters: missing")
 	_, _, err = bindParameters("SELECT $1", map[string]any{})
 	require.ErrorContains(t, err, `positional parameter "$1" is not supported`)
-	_, _, err = bindParameters("SELECT $d", map[string]any{"d": monty.NewDict()})
+	_, _, err = bindParameters("SELECT $d", map[string]any{"d": montygo.NewDict()})
 	require.EqualError(t, err, "TypeError: parameter 'd' has unsupported type dict")
 }
 
@@ -50,12 +50,12 @@ func TestQueryCSVNumericTyping(t *testing.T) {
         `, nil)
 	require.NoError(t, err)
 	require.Len(t, rows, 4)
-	first := rows[0].(*monty.Dict)
+	first := rows[0].(*montygo.Dict)
 	require.Equal(t, []any{"First", "Email", "TotalPurchased", "Score", "Note"}, first.Keys())
 	require.Equal(t, []any{"Bill", "bmelator@einrot.com", int64(6090), float64(2), "vip"}, first.Values())
-	require.Equal(t, []any{"Barb ", "bbarion@superrito.com", int64(950), -0.25, "a, b"}, rows[1].(*monty.Dict).Values())
-	require.Equal(t, []any{"Al", "afresco@dayrep.com", int64(45), 1.5, nil}, rows[2].(*monty.Dict).Values())
-	require.Equal(t, []any{"Dan", "ddelyons@dayrep.com", nil, 300.0, "x"}, rows[3].(*monty.Dict).Values())
+	require.Equal(t, []any{"Barb ", "bbarion@superrito.com", int64(950), -0.25, "a, b"}, rows[1].(*montygo.Dict).Values())
+	require.Equal(t, []any{"Al", "afresco@dayrep.com", int64(45), 1.5, nil}, rows[2].(*montygo.Dict).Values())
+	require.Equal(t, []any{"Dan", "ddelyons@dayrep.com", nil, 300.0, "x"}, rows[3].(*montygo.Dict).Values())
 }
 
 func TestQueryCSVListParameter(t *testing.T) {
@@ -66,8 +66,8 @@ func TestQueryCSVListParameter(t *testing.T) {
         `, map[string]any{"emails": []any{"bmelator@einrot.com", "ddelyons@dayrep.com", "nobody@x"}})
 	require.NoError(t, err)
 	require.Equal(t, []any{
-		monty.NewDict(monty.Pair{Key: "Email", Value: "bmelator@einrot.com"}, monty.Pair{Key: "Name", Value: "Bill"}),
-		monty.NewDict(monty.Pair{Key: "Email", Value: "ddelyons@dayrep.com"}, monty.Pair{Key: "Name", Value: "Dan"}),
+		montygo.NewDict(montygo.Pair{Key: "Email", Value: "bmelator@einrot.com"}, montygo.Pair{Key: "Name", Value: "Bill"}),
+		montygo.NewDict(montygo.Pair{Key: "Email", Value: "ddelyons@dayrep.com"}, montygo.Pair{Key: "Name", Value: "Dan"}),
 	}, rows)
 }
 

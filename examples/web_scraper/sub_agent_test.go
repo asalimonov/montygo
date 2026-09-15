@@ -8,11 +8,11 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
-func pyDict(kv ...any) *monty.Dict {
-	d := monty.NewDict()
+func pyDict(kv ...any) *montygo.Dict {
+	d := montygo.NewDict()
 	for i := 0; i < len(kv); i += 2 {
 		d.Set(kv[i], kv[i+1])
 	}
@@ -48,7 +48,7 @@ func TestFormatAsXML(t *testing.T) {
 func TestRecordModelInfoValidInputSkipsSubAgent(t *testing.T) {
 	llm := &fakeMessages{}
 	records := newRecordModels(&subAgent{llm: llm, model: "test-model"})
-	got, err := records.recordModelInfo(t.Context(), nil, monty.Kwargs{"model_information": pyDict("unique_id", "m", "name", "M", "input_mtok", 1.0, "output_mtok", 2.0)})
+	got, err := records.recordModelInfo(t.Context(), nil, montygo.Kwargs{"model_information": pyDict("unique_id", "m", "name", "M", "input_mtok", 1.0, "output_mtok", 2.0)})
 	require.NoError(t, err)
 	require.Equal(t, "Model information recorded successfully for m", got)
 	require.Empty(t, llm.requests)

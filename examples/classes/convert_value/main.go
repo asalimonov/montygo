@@ -8,7 +8,7 @@ import (
 	"io"
 	"os"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/examples/internal/montyenv"
 )
 
@@ -20,10 +20,10 @@ func (w *Wallet) Pay(amount int) *Wallet {
 	return &Wallet{Balance: w.Balance - amount}
 }
 
-func walletWrapper(w *Wallet) (*monty.ClassInstance, error) {
-	return monty.NewClassInstance(w, monty.ClassInstanceOptions{
-		EagerAttrs:     monty.All,
-		AllowedMethods: monty.Names("pay"),
+func walletWrapper(w *Wallet) (*montygo.ClassInstance, error) {
+	return montygo.NewClassInstance(w, montygo.ClassInstanceOptions{
+		EagerAttrs:     montygo.All(),
+		AllowedMethods: montygo.Names("pay"),
 		ConvertValue:   convertValue,
 	})
 }
@@ -43,14 +43,14 @@ func main() {
 }
 
 func run(ctx context.Context, out io.Writer) error {
-	pool, err := monty.New(ctx, montyenv.PoolOptions())
+	pool, err := montygo.New(ctx, montyenv.PoolOptions())
 	if err != nil {
 		return err
 	}
 	defer pool.Close(ctx)
 
 	result, err := func() (any, error) {
-		session, err := pool.Checkout(ctx, monty.CheckoutOptions{})
+		session, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
 		if err != nil {
 			return nil, err
 		}
@@ -59,15 +59,15 @@ func run(ctx context.Context, out io.Writer) error {
 		if err != nil {
 			return nil, err
 		}
-		return session.FeedRun(ctx, "w.pay(30).pay(20).balance", &monty.FeedOptions{Inputs: map[string]any{"w": w}})
+		return session.FeedRun(ctx, "w.pay(30).pay(20).balance", &montygo.FeedOptions{Inputs: map[string]any{"w": w}})
 	}()
 	if err != nil {
 		return err
 	}
 
-	if !monty.Equal(result, 50) {
-		return fmt.Errorf("assertion failed: result == %s", monty.Repr(result))
+	if !montygo.Equal(result, 50) {
+		return fmt.Errorf("assertion failed: result == %s", montygo.Repr(result))
 	}
-	fmt.Fprintf(out, "balance after two payments: %s\n", monty.Repr(result))
+	fmt.Fprintf(out, "balance after two payments: %s\n", montygo.Repr(result))
 	return nil
 }

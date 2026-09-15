@@ -30,3 +30,38 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## `monty-server` image
+
+The image built from `docker/Dockerfile` redistributes:
+
+- the upstream `monty` worker binary, built from pydantic/monty at the same commit (MIT, licence above), together with the upstream crates it links. The image also ships the upstream licence at `/usr/share/licenses/monty/LICENSE`;
+- the upstream crates `monty-pool`, `monty-proto`, `monty-types`, `monty-fs` and `monty-macros` from the same commit (MIT, licence above), linked into `monty-server`;
+- the Rust dependency tree recorded in `server/Cargo.lock`, statically linked into `monty-server`;
+- the Debian `ca-certificates` bundle (the Mozilla CA certificate list, MPL-2.0) at `/etc/ssl/certs/ca-certificates.crt`.
+
+The main crates of the `monty-server` dependency tree:
+
+| Crate | Licence |
+|---|---|
+| `tokio`, `tokio-util` | MIT |
+| `axum` | MIT |
+| `hyper` | MIT |
+| `tokio-tungstenite` | MIT |
+| `tungstenite` | MIT OR Apache-2.0 |
+| `bytes` | MIT |
+| `futures-util` | MIT OR Apache-2.0 |
+| `prost` | Apache-2.0 |
+| `clap` | MIT OR Apache-2.0 |
+| `hmac`, `sha2` | MIT OR Apache-2.0 |
+| `prometheus-client` | Apache-2.0 OR MIT |
+| `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp` | Apache-2.0 |
+| `logfire` | MIT |
+| `reqwest` | MIT OR Apache-2.0 |
+| `rustls` | Apache-2.0 OR ISC OR MIT |
+| `aws-lc-rs` | ISC AND (Apache-2.0 OR ISC) |
+| `aws-lc-sys` | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) |
+
+Each crate's licence text is included in its source package on crates.io. `cargo tree --manifest-path server/Cargo.toml` lists the full tree.
+
+The `monty-pyclient` image built from `docker/pyclient.Dockerfile` is a test fixture for `tests/network` and is not distributed.

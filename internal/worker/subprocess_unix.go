@@ -18,6 +18,9 @@ import (
 type SubprocessSpawner struct {
 	BinaryPath string
 	Stderr     io.Writer
+	// MaxPendingBytes bounds frames buffered per worker; 0 or less means unbounded.
+	MaxPendingBytes int64
+	PendingBytes    PendingBytesObserver
 }
 
 func (s *SubprocessSpawner) Kind() Kind                  { return KindSubprocess }
@@ -42,7 +45,7 @@ func (s *SubprocessSpawner) Spawn(ctx context.Context) (Worker, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("%s: %w", s.BinaryPath, err)
 	}
-	w := &subprocess{cmd: cmd, stdin: stdin, queue: newFrameQueue(), done: make(chan struct{})}
+	w := &subprocess{cmd: cmd, stdin: stdin, queue: newFrameQueue(s.MaxPendingBytes, s.PendingBytes), done: make(chan struct{})}
 	go func() {
 		pumpFrames(wire.NewFrameReader(stdout), w.queue)
 		_ = cmd.Wait()
@@ -101,6 +104,7 @@ func (w *subprocess) Kill() {
 	w.kill.Do(func() {
 		_ = w.cmd.Process.Kill()
 		_ = w.stdin.Close()
+		w.queue.close()
 	})
 }
 
@@ -126,6 +130,9 @@ func (w *subprocess) Alive() bool {
 		return true
 	}
 }
+
+func (w *subprocess) Done() <-chan struct{} { return w.done }
+func (w *subprocess) Err() error            { return w.queue.terminalErr() }
 
 // CloseStdin closes the worker's stdin so it exits at a frame boundary.
 func (w *subprocess) CloseStdin() error { return w.stdin.Close() }

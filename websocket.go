@@ -1,7 +1,9 @@
-package monty
+package montygo
 
 import (
 	"context"
+	"crypto/tls"
+	"net"
 	"time"
 
 	"github.com/asalimonov/montygo/internal/worker"
@@ -25,6 +27,14 @@ type WebSocketOptions struct {
 	// ConnectHeaders supplies upgrade headers. Checkout calls it once with its
 	// ctx, before waiting for capacity and dialing; its error fails the checkout unchanged.
 	ConnectHeaders func(ctx context.Context) (map[string]string, error)
+	// TLSConfig configures wss:// and https:// dials; nil uses the system roots. It is cloned per dial.
+	TLSConfig *tls.Config
+	// DialContext opens TCP connections; nil uses a net.Dialer.
+	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+	// Telemetry selects this pool's telemetry; nil uses the process-wide installation.
+	Telemetry *TelemetryComponents
+	// Stop is the default stop policy of this pool's sessions; zero fields inherit DefaultStopPolicy.
+	Stop StopPolicy
 }
 
 // NewWebSocket creates a pool whose sessions each dial a fresh, single-use
@@ -37,15 +47,44 @@ func NewWebSocket(ctx context.Context, opts WebSocketOptions) (*Pool, error) {
 	case timeout < 0:
 		timeout = 0
 	}
-	dialer := &worker.WebSocketDialer{URL: opts.URL, DialTimeout: timeout}
 	p, err := newPool(ctx, Options{
 		MaxProcesses:    opts.MaxProcesses,
 		CheckoutTimeout: opts.CheckoutTimeout,
 		RequestTimeout:  timeout,
-	}, dialer, BackendWebSocket, "", true)
+		Stop:            opts.Stop,
+	}, opts.dialer(timeout), BackendWebSocket, "", true, resolveRecorder(opts.Telemetry))
 	if err != nil {
 		return nil, err
 	}
 	p.connectHeaders = opts.ConnectHeaders
 	return p, nil
+}
+
+// CheckWebSocketHealth reports nil when the server behind opts.URL answers
+// GET <path>/health with 200. It sends the ConnectHeaders and is bounded by
+// RequestTimeout: 0 means 10s, NoRequestTimeout leaves only ctx.
+func CheckWebSocketHealth(ctx context.Context, opts WebSocketOptions) error {
+	timeout := opts.RequestTimeout
+	if timeout == 0 {
+		timeout = defaultWebSocketRequestTimeout
+	}
+	var headers [][2]string
+	if opts.ConnectHeaders != nil {
+		extra, err := opts.ConnectHeaders(ctx)
+		if err != nil {
+			return err
+		}
+		headers = sortedHeaders(extra)
+	}
+	return opts.dialer(timeout).HealthCheck(ctx, headers)
+}
+
+func (o WebSocketOptions) dialer(timeout time.Duration) *worker.WebSocketDialer {
+	return &worker.WebSocketDialer{
+		URL:         o.URL,
+		DialTimeout: timeout,
+		UserAgent:   userAgent(),
+		TLSConfig:   o.TLSConfig,
+		DialContext: o.DialContext,
+	}
 }

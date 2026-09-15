@@ -1,7 +1,9 @@
-package monty
+package montygo
 
 import (
 	"errors"
+	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/asalimonov/montygo/internal/wire"
@@ -49,11 +51,14 @@ func typeMsg(typeName, message string) string {
 
 // RuntimeError is a Python exception raised by the sandboxed code.
 type RuntimeError struct {
+	lost      bool
 	TypeName  string
 	Message   string
 	Frames    []Frame
 	Traceback string
 }
+
+func (e *RuntimeError) Is(target error) bool { return e.lost && target == ErrSessionLost }
 
 func (e *RuntimeError) Error() string            { return typeMsg(e.TypeName, e.Message) }
 func (e *RuntimeError) Exception() ExceptionInfo { return ExceptionInfo{e.TypeName, e.Message} }
@@ -123,6 +128,7 @@ type CrashedError struct {
 
 func (e *CrashedError) Error() string            { return typeMsg("RuntimeError", e.Message) }
 func (e *CrashedError) Exception() ExceptionInfo { return ExceptionInfo{"RuntimeError", e.Message} }
+func (e *CrashedError) Is(target error) bool     { return target == ErrSessionLost }
 
 func (e *CrashedError) Display(format DisplayFormat) string {
 	if format == DisplayTypeMsg || format == DisplayTraceback {
@@ -134,10 +140,14 @@ func (e *CrashedError) Display(format DisplayFormat) string {
 // DisconnectError reports a remote worker connection that closed mid-session.
 type DisconnectError struct {
 	Message string
+	// Code and Reason carry the server's close frame; Code is 0 when the connection dropped without one.
+	Code   int
+	Reason string
 }
 
 func (e *DisconnectError) Error() string            { return typeMsg("RuntimeError", e.Message) }
 func (e *DisconnectError) Exception() ExceptionInfo { return ExceptionInfo{"RuntimeError", e.Message} }
+func (e *DisconnectError) Is(target error) bool     { return target == ErrSessionLost }
 
 func (e *DisconnectError) Display(format DisplayFormat) string {
 	if format == DisplayMsg {
@@ -154,6 +164,7 @@ type ShutdownError struct {
 
 func (e *ShutdownError) Error() string            { return typeMsg("RuntimeError", e.Message) }
 func (e *ShutdownError) Exception() ExceptionInfo { return ExceptionInfo{"RuntimeError", e.Message} }
+func (e *ShutdownError) Is(target error) bool     { return target == ErrSessionLost }
 
 func (e *ShutdownError) Display(format DisplayFormat) string {
 	if format == DisplayMsg {
@@ -168,8 +179,41 @@ type ProtocolError struct {
 	cause   error
 }
 
-func (e *ProtocolError) Error() string { return e.Message }
-func (e *ProtocolError) Unwrap() error { return e.cause }
+func (e *ProtocolError) Error() string        { return e.Message }
+func (e *ProtocolError) Unwrap() error        { return e.cause }
+func (e *ProtocolError) Is(target error) bool { return target == ErrSessionLost }
+
+// ResourceError reports a host-side limit the sandbox reached; it raises a
+// RuntimeError inside the sandbox and leaves the session usable.
+type ResourceError struct {
+	Resource string
+	Limit    uint64
+}
+
+func (e *ResourceError) Error() string {
+	return fmt.Sprintf("%s limit %d exceeded", e.Resource, e.Limit)
+}
+func (e *ResourceError) Exception() ExceptionInfo {
+	return ExceptionInfo{"RuntimeError", e.Error()}
+}
+func (e *ResourceError) Display(DisplayFormat) string { return typeMsg("RuntimeError", e.Error()) }
+
+// sessionClosedError distinguishes deliberate closure from unexpected loss.
+type sessionClosedError struct{}
+
+func (sessionClosedError) Error() string { return "the session is closed — check out a new one" }
+
+var (
+	ErrSessionBusy   = errors.New("session already has an active operation")
+	ErrSnapshotStale = errors.New("snapshot does not own the current suspension")
+)
+
+// SessionKilledError reports forced termination after an interrupt's grace.
+type SessionKilledError struct{ Reason error }
+
+func (e *SessionKilledError) Error() string        { return "session killed to interrupt execution" }
+func (e *SessionKilledError) Unwrap() error        { return e.Reason }
+func (e *SessionKilledError) Is(target error) bool { return target == ErrSessionLost }
 
 // ConversionError reports a host value that cannot cross into the sandbox.
 type ConversionError struct {
@@ -204,8 +248,13 @@ func (e *RaisedError) Error() string { return typeMsg(e.ExcType, e.Message) }
 func Raise(excType, message string) error { return &RaisedError{ExcType: excType, Message: message} }
 
 var (
-	ErrPoolClosed      = errors.New("the pool is closed — create a new Monty pool")
-	ErrSessionClosed   = errors.New("the session is closed — check out a new one")
+	ErrPoolClosed = errors.New("the pool is closed — create a new Monty pool")
+	// ErrSessionClosed is returned by every call on a closed session.
+	ErrSessionClosed error = sessionClosedError{}
+	// ErrSessionLost matches unexpected terminal failures: a crash, timeout,
+	// lost connection, server shutdown, protocol violation or forced interrupt.
+	// Deliberate ErrSessionClosed does not match it.
+	ErrSessionLost     = errors.New("montygo: session lost")
 	ErrNotFresh        = errors.New("loadSession / loadSnapshot is only valid on a fresh session, before any feedRun / feedStart / loadSession / loadSnapshot")
 	ErrDumpIsSuspended = errors.New("this dump is a suspended snapshot — use loadSnapshot() to resume it")
 	ErrDumpIsIdle      = errors.New("this dump is an idle session — use loadSession() to restore it")
@@ -217,8 +266,17 @@ var (
 	ErrTelemetryPresent = errors.New("Monty telemetry is already configured")
 )
 
-// PythonExceptionNames are the exception types host errors may raise by name.
-var PythonExceptionNames = map[string]struct{}{}
+var knownExceptions = map[string]struct{}{}
+
+// KnownExceptionNames lists the Python exception types host errors may raise by name, sorted.
+func KnownExceptionNames() []string {
+	names := make([]string, 0, len(knownExceptions))
+	for name := range knownExceptions {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
 
 var excParents = map[string]string{
 	"BaseException": "", "SystemExit": "BaseException", "KeyboardInterrupt": "BaseException", "Exception": "BaseException",
@@ -238,7 +296,7 @@ var excParents = map[string]string{
 
 func init() {
 	for name := range excParents {
-		PythonExceptionNames[name] = struct{}{}
+		knownExceptions[name] = struct{}{}
 	}
 }
 
@@ -325,7 +383,7 @@ func errorFromException(exc *wire.Exception) error {
 func exceptionParts(err error) (string, string) {
 	var raised *RaisedError
 	if errors.As(err, &raised) {
-		if _, ok := PythonExceptionNames[raised.ExcType]; ok {
+		if _, ok := knownExceptions[raised.ExcType]; ok {
 			return raised.ExcType, raised.Message
 		}
 		return "RuntimeError", raised.Message
