@@ -1,4 +1,4 @@
-package monty
+package montygo
 
 import (
 	"context"
@@ -23,7 +23,22 @@ type AttrPolicy struct {
 }
 
 // All exposes every public name.
-var All = AttrPolicy{set: true, all: true}
+func All() AttrPolicy { return AttrPolicy{set: true, all: true} }
+
+// Expose exposes exactly the methods of the interface T under their sandbox
+// names, so widening the surface means editing the interface. T MUST be an
+// interface type.
+func Expose[T any]() AttrPolicy {
+	t := reflect.TypeFor[T]()
+	if t.Kind() != reflect.Interface {
+		panic(fmt.Sprintf("montygo.Expose: %s is not an interface type", t))
+	}
+	names := make([]string, 0, t.NumMethod())
+	for i := 0; i < t.NumMethod(); i++ {
+		names = append(names, SandboxName(t.Method(i).Name))
+	}
+	return Names(names...)
+}
 
 // Names exposes exactly the given sandbox names.
 func Names(names ...string) AttrPolicy { return AttrPolicy{set: true, names: names} }
@@ -566,11 +581,21 @@ type wrapper interface {
 }
 
 type instanceStore struct {
-	mu sync.Mutex
-	m  map[string]wrapper
+	mu    sync.Mutex
+	m     map[string]wrapper
+	limit uint64
+	peak  int
 }
 
-func newInstanceStore() *instanceStore { return &instanceStore{m: map[string]wrapper{}} }
+func newInstanceStore(limit uint64) *instanceStore {
+	return &instanceStore{m: map[string]wrapper{}, limit: limit}
+}
+
+func (s *instanceStore) stats() (count, peak int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.m), s.peak
+}
 
 func sameObject(a, b any) bool {
 	if ta, ok := a.(reflect.Type); ok {
@@ -601,8 +626,16 @@ func (s *instanceStore) put(w wrapper, onlyIfAbsent bool) error {
 		if onlyIfAbsent {
 			return nil
 		}
+		s.m[w.wrapperID()] = w
+		return nil
+	}
+	if s.limit != Unlimited && uint64(len(s.m)) >= s.limit {
+		return &ResourceError{Resource: "host object", Limit: s.limit}
 	}
 	s.m[w.wrapperID()] = w
+	if len(s.m) > s.peak {
+		s.peak = len(s.m)
+	}
 	return nil
 }
 

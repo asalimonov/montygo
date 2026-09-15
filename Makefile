@@ -7,12 +7,30 @@ SDKROOT ?= $(shell xcrun --sdk macosx26.5 --show-sdk-path 2>/dev/null || xcrun -
 export SDKROOT
 endif
 
+ifeq ($(origin VERSION), undefined)
+VERSION := $(shell scripts/version.sh)
+endif
+GO_LDFLAGS := -X github.com/asalimonov/montygo.buildVersion=$(VERSION)
+
 WASM_TARGET := worker-wasm/target/wasm32-wasip1/release/monty-wasi-worker.wasm
 PATCH := patch."https://github.com/pydantic/monty"
 
 .PHONY: help
 help: ## Show targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "%-16s %s\n", $$1, $$2}'
+
+.PHONY: version
+version: ## Print the version scripts/version.sh derives from git
+	@echo $(VERSION)
+
+.PHONY: check-pins
+check-pins: ## Check every copy of the upstream revision and Monty version against proto/PROTO_REV and montygo.go
+	scripts/check-pins.sh
+
+.PHONY: test-scripts
+test-scripts: ## Run the shell script tests in scripts/
+	scripts/version_test.sh
+	scripts/check_pins_test.sh
 
 .PHONY: generate
 generate: ## Regenerate montypb from the vendored proto
@@ -41,26 +59,24 @@ vet: ## Run go vet
 
 .PHONY: test
 test: ## Run all tests on the native and wasm backends
-	$(GO) test -count=1 ./...
+	$(GO) test -count=1 -ldflags '$(GO_LDFLAGS)' ./...
 
 .PHONY: test-native
 test-native: ## Run tests on the native backend only
-	MONTY_TEST_BACKENDS=native $(GO) test -count=1 ./...
+	MONTY_TEST_BACKENDS=native $(GO) test -count=1 -ldflags '$(GO_LDFLAGS)' ./...
 
 .PHONY: test-wasm
 test-wasm: ## Run tests on the wasm backend only
-	MONTY_TEST_BACKENDS=wasm $(GO) test -count=1 ./...
+	MONTY_TEST_BACKENDS=wasm $(GO) test -count=1 -ldflags '$(GO_LDFLAGS)' ./...
 
 .PHONY: examples
 examples: ## Run every example program's tests
-	cd examples && $(GO) test -count=1 ./...
+	cd examples && $(GO) test -count=1 -ldflags '$(GO_LDFLAGS)' ./...
 
-VERSION := $(shell sed -n 's/^[[:space:]]*Version = "\(.*\)"/\1/p' monty.go)
-UPSTREAM_REV := $(shell sed -n 's/^[[:space:]]*UpstreamRev = "\(.*\)"/\1/p' monty.go)
 MONTY_REV_FULL := $(shell sed -n 's/^[[:space:]]*MONTY_REV: //p' .github/workflows/ci.yml)
 IMAGE ?= monty-server
 PYCLIENT_IMAGE ?= monty-pyclient
-IMAGE_TAG ?= $(VERSION)-$(UPSTREAM_REV)
+IMAGE_TAG ?= $(VERSION)
 PLATFORMS ?= linux/amd64,linux/arm64
 MONTY_DOCKER_SRC ?= auto
 DOCKER_SRC_STAGE := build/monty-src
@@ -74,6 +90,9 @@ else
 DOCKER_SRC_CONTEXT :=
 endif
 BUILDX_CACHE := $(if $(BUILDX_CACHE_FROM),--cache-from $(BUILDX_CACHE_FROM),) $(if $(BUILDX_CACHE_TO),--cache-to $(BUILDX_CACHE_TO),)
+DOCKER_BUILD_ARGS := --build-arg MONTY_REV=$(MONTY_REV_FULL) \
+	--build-arg MONTY_SERVER_VERSION=$(VERSION) \
+	--build-arg MONTYGO_REVISION=$(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 
 .PHONY: docker-stage-src
 docker-stage-src: ## Stage tracked MONTY_SRC files (no target/) as the override build context
@@ -86,9 +105,7 @@ docker-stage-src: ## Stage tracked MONTY_SRC files (no target/) as the override 
 .PHONY: docker-build
 docker-build: docker-stage-src ## Build monty-server images for PLATFORMS and load them
 	docker buildx build --platform $(PLATFORMS) --load -f docker/Dockerfile \
-		--build-arg MONTY_REV=$(MONTY_REV_FULL) \
-		--build-arg MONTYGO_REVISION=$(shell git rev-parse HEAD 2>/dev/null || echo unknown) \
-		$(DOCKER_SRC_CONTEXT) $(BUILDX_CACHE) \
+		$(DOCKER_BUILD_ARGS) $(DOCKER_SRC_CONTEXT) $(BUILDX_CACHE) \
 		-t $(IMAGE):$(IMAGE_TAG) -t $(IMAGE):latest .
 
 .PHONY: docker-build-pyclient
@@ -98,12 +115,10 @@ docker-build-pyclient: docker-stage-src ## Build the Python client test image (h
 		-t $(PYCLIENT_IMAGE):$(IMAGE_TAG) -t $(PYCLIENT_IMAGE):latest .
 
 .PHONY: docker-push
-docker-push: docker-stage-src ## Push the multi-arch monty-server manifest to REGISTRY
+docker-push: docker-stage-src ## Push the multi-arch monty-server manifest with SBOM and provenance to REGISTRY
 	@test -n "$(REGISTRY)" || { echo "REGISTRY is required" >&2; exit 2; }
-	docker buildx build --platform $(PLATFORMS) --push -f docker/Dockerfile \
-		--build-arg MONTY_REV=$(MONTY_REV_FULL) \
-		--build-arg MONTYGO_REVISION=$(shell git rev-parse HEAD 2>/dev/null || echo unknown) \
-		$(DOCKER_SRC_CONTEXT) \
+	docker buildx build --platform $(PLATFORMS) --push --sbom=true --provenance=true -f docker/Dockerfile \
+		$(DOCKER_BUILD_ARGS) $(DOCKER_SRC_CONTEXT) \
 		-t $(REGISTRY)/$(IMAGE):$(IMAGE_TAG) .
 
 .PHONY: server-check
@@ -118,14 +133,28 @@ test-docker: ## Run the root suite on the websocket backend against the image
 	trap 'docker stop $$cid >/dev/null' EXIT && \
 	port=$$(docker port $$cid 8000/tcp | head -1 | sed 's/.*://') && \
 	for i in $$(seq 1 100); do curl -sf http://127.0.0.1:$$port/health >/dev/null && break; sleep 0.1; done && \
-	MONTY_TEST_WS_URL=ws://127.0.0.1:$$port/ MONTY_TEST_BACKENDS=websocket $(GO) test -count=1 -timeout 30m .
+	MONTY_TEST_WS_URL=ws://127.0.0.1:$$port/ MONTY_TEST_BACKENDS=websocket $(GO) test -count=1 -timeout 30m -ldflags '$(GO_LDFLAGS)' .
 
 .PHONY: test-network
 test-network: ## Run tests/network against the images
-	cd tests/network && MONTYGO_NETWORK_TESTS=1 \
+	cd tests/network && MONTYGO_NETWORK_TESTS=1 MONTYGO_BUILD_VERSION=$(VERSION) \
 		MONTYGO_TEST_IMAGE=$(IMAGE):$(IMAGE_TAG) MONTYGO_PYCLIENT_IMAGE=$(PYCLIENT_IMAGE):$(IMAGE_TAG) \
-		$(GO) test -count=1 -timeout 25m -parallel $${MONTYGO_TEST_PARALLEL:-4} ./...
+		$(GO) test -count=1 -timeout 25m -parallel $${MONTYGO_TEST_PARALLEL:-4} -ldflags '$(GO_LDFLAGS)' ./...
 
 .PHONY: test-network-clean
 test-network-clean: ## Remove leaked test containers
 	docker ps -aq --filter label=montygo.test | xargs -r docker rm -f
+
+FUZZTIME ?= 30s
+FUZZ_TARGETS := $(shell grep -ho '^func Fuzz[A-Za-z0-9_]*' internal/wire/*_test.go | cut -c6-)
+
+.PHONY: fuzz
+fuzz: ## Run each wire codec fuzz target for FUZZTIME
+	@for f in $(FUZZ_TARGETS); do \
+		echo "fuzz $$f"; \
+		$(GO) test ./internal/wire -run='^$$' -fuzz="^$$f$$" -fuzztime=$(FUZZTIME) || exit $$?; \
+	done
+
+.PHONY: bench
+bench: ## Run the wire codec benchmarks against the generated protobuf code
+	$(GO) test ./internal/wire -run='^$$' -bench=. -benchmem

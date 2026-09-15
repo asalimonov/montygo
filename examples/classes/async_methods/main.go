@@ -7,14 +7,14 @@ import (
 	"io"
 	"os"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/examples/internal/montyenv"
 )
 
 type Fetcher struct{}
 
-func (f *Fetcher) Fetch(ctx context.Context, url string) *monty.Future {
-	return monty.Async(func() (any, error) {
+func (f *Fetcher) Fetch(ctx context.Context, url string) *montygo.Future {
+	return montygo.Async(func() (any, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -30,30 +30,30 @@ func main() {
 }
 
 func run(ctx context.Context, out io.Writer) error {
-	pool, err := monty.New(ctx, montyenv.PoolOptions())
+	pool, err := montygo.New(ctx, montyenv.PoolOptions())
 	if err != nil {
 		return err
 	}
 	defer pool.Close(ctx)
 
 	result, err := func() (any, error) {
-		session, err := pool.Checkout(ctx, monty.CheckoutOptions{})
+		session, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
 		if err != nil {
 			return nil, err
 		}
 		defer session.Close(ctx)
-		client, err := monty.NewClassInstance(&Fetcher{}, monty.ClassInstanceOptions{AllowedMethods: monty.Names("fetch")})
+		client, err := montygo.NewClassInstance(&Fetcher{}, montygo.ClassInstanceOptions{AllowedMethods: montygo.Names("fetch")})
 		if err != nil {
 			return nil, err
 		}
-		return session.FeedRun(ctx, `await client.fetch("https://example.com")`, &monty.FeedOptions{Inputs: map[string]any{"client": client}})
+		return session.FeedRun(ctx, `await client.fetch("https://example.com")`, &montygo.FeedOptions{Inputs: map[string]any{"client": client}})
 	}()
 	if err != nil {
 		return err
 	}
 
 	if result != "contents of https://example.com" {
-		return fmt.Errorf("assertion failed: result == %s", monty.Repr(result))
+		return fmt.Errorf("assertion failed: result == %s", montygo.Repr(result))
 	}
 	fmt.Fprintln(out, result)
 	return nil

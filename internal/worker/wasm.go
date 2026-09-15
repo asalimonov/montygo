@@ -22,6 +22,9 @@ type WasmSpawner struct {
 	rt       wazero.Runtime
 	compiled wazero.CompiledModule
 	Stderr   io.Writer
+	// MaxPendingBytes bounds frames buffered per worker; 0 or less means unbounded.
+	MaxPendingBytes int64
+	PendingBytes    PendingBytesObserver
 }
 
 type wasmKey struct {
@@ -84,10 +87,15 @@ func (s *WasmSpawner) Spawn(ctx context.Context) (Worker, error) {
 
 // SpawnWithStderr instantiates a worker writing diagnostics to stderr.
 func (s *WasmSpawner) SpawnWithStderr(ctx context.Context, stderr io.Writer) (Worker, error) {
+	return s.SpawnWith(ctx, stderr, s.MaxPendingBytes, s.PendingBytes)
+}
+
+// SpawnWith instantiates a worker with its own stderr and frame bound.
+func (s *WasmSpawner) SpawnWith(ctx context.Context, stderr io.Writer, maxPending int64, observe PendingBytesObserver) (Worker, error) {
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
 	runCtx, cancel := context.WithCancel(context.Background())
-	w := &wasmWorker{stdin: inW, stdinR: inR, queue: newFrameQueue(), cancel: cancel, done: make(chan struct{})}
+	w := &wasmWorker{stdin: inW, stdinR: inR, queue: newFrameQueue(maxPending, observe), cancel: cancel, done: make(chan struct{})}
 	if stderr == nil {
 		stderr = os.Stderr
 	}
@@ -178,6 +186,7 @@ func (w *wasmWorker) Kill() {
 		w.cancel()
 		_ = w.stdin.CloseWithError(io.EOF)
 		_ = w.stdinR.CloseWithError(io.EOF)
+		w.queue.close()
 	})
 }
 
@@ -192,8 +201,10 @@ func (w *wasmWorker) Wait(ctx context.Context) (Status, bool) {
 	}
 }
 
-func (w *wasmWorker) PID() (int, bool) { return 0, false }
-func (w *wasmWorker) Kind() Kind       { return KindWasm }
+func (w *wasmWorker) Done() <-chan struct{} { return w.done }
+func (w *wasmWorker) Err() error            { return w.queue.terminalErr() }
+func (w *wasmWorker) PID() (int, bool)      { return 0, false }
+func (w *wasmWorker) Kind() Kind            { return KindWasm }
 
 func (w *wasmWorker) Alive() bool {
 	select {

@@ -7,6 +7,7 @@ pub mod events;
 pub mod http;
 pub mod identity;
 pub mod inbound;
+pub mod info;
 pub mod limits;
 pub mod logline;
 pub mod metrics;

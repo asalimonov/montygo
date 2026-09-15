@@ -8,7 +8,7 @@ import (
 	"io"
 	"os"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/examples/internal/montyenv"
 )
 
@@ -20,7 +20,7 @@ type Person struct {
 func (p *Person) Greeting() string { return "hi " + p.Name }
 
 func (p *Person) String() string {
-	return fmt.Sprintf("Person(name=%s, age=%d)", monty.Repr(p.Name), p.Age)
+	return fmt.Sprintf("Person(name=%s, age=%d)", montygo.Repr(p.Name), p.Age)
 }
 
 func main() {
@@ -33,25 +33,25 @@ func main() {
 func run(ctx context.Context, out io.Writer) error {
 	person := &Person{Name: "Samuel", Age: 4}
 
-	pool, err := monty.New(ctx, montyenv.PoolOptions())
+	pool, err := montygo.New(ctx, montyenv.PoolOptions())
 	if err != nil {
 		return err
 	}
 	defer pool.Close(ctx)
 
 	result, err := func() (any, error) {
-		session, err := pool.Checkout(ctx, monty.CheckoutOptions{})
+		session, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
 		if err != nil {
 			return nil, err
 		}
 		defer session.Close(ctx)
-		user, err := monty.NewClassInstance(person, monty.ClassInstanceOptions{EagerAttrs: monty.All, AllowedMethods: monty.Names("greeting")})
+		user, err := montygo.NewClassInstance(person, montygo.ClassInstanceOptions{EagerAttrs: montygo.All(), AllowedMethods: montygo.Names("greeting")})
 		if err != nil {
 			return nil, err
 		}
 		return session.FeedRun(ctx,
 			"assert user.name == \"Samuel\"\nassert user.greeting() == \"hi Samuel\"\nuser",
-			&monty.FeedOptions{Inputs: map[string]any{"user": user}},
+			&montygo.FeedOptions{Inputs: map[string]any{"user": user}},
 		)
 	}()
 	if err != nil {

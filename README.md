@@ -21,21 +21,37 @@ It tracks Monty `0.0.23` plus upstream `main@f8acf4fa` (wire protocol version 3)
 go get github.com/asalimonov/montygo
 ```
 
+```go
+import "github.com/asalimonov/montygo"
+```
+
 The embedded wasm worker works immediately. For the native backend, install a
 protocol-3 `monty` binary (build `cargo build -p monty-runtime` from a Monty
 checkout at `f8acf4fa` or newer) and point `MONTY_BIN` at it.
+
+## Versions
+
+`montygo.MontyVersion` is the upstream Monty release the binding tracks;
+`montygo.BindingVersion()` is this module's own release. `BindingVersion()`
+returns the value stamped with `-ldflags "-X github.com/asalimonov/montygo.buildVersion=<version>"`,
+else the module version from the binary's build info (`0.1.0` after
+`go get github.com/asalimonov/montygo@v0.1.0`, `(devel)` under a directory
+`replace`), else `0.0.0-unknown`. `make version` prints the version
+`scripts/version.sh` derives from git tags, and every `make` target stamps it.
+`Version` is a deprecated alias of `MontyVersion`. See
+[docs/architecture/versioning.md](docs/architecture/versioning.md).
 
 ## Basic usage
 
 ```go
 ctx := context.Background()
-pool, err := monty.New(ctx, monty.Options{})
+pool, err := montygo.New(ctx, montygo.Options{})
 if err != nil {
 	return err
 }
 defer pool.Close(ctx)
 
-session, err := pool.Checkout(ctx, monty.CheckoutOptions{})
+session, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
 if err != nil {
 	return err
 }
@@ -53,6 +69,43 @@ session.FeedRun(ctx, "x * 2", nil) // int64(42)
 
 `CheckoutOptions.ScriptName` names the script in tracebacks and type-checking diagnostics.
 
+`Session.Close` waits for a running call and returns the worker to the pool.
+`Session.CloseNow` ends a running feed with `ErrSessionClosed` and kills the
+worker. `Session.Done` and `Session.Err` report a session that was closed or
+lost, including a worker that died while idle.
+
+## Interrupting a feed
+
+`Session.Go` runs a feed on its own goroutine and returns a `*Run`.
+`Session.Interrupt` (or `Run.Interrupt`) stops it from any goroutine:
+
+```go
+started := make(chan struct{})
+lookup := map[string]any{"wait": func(ctx context.Context) error {
+	close(started)
+	<-ctx.Done() // the host call's context ends on Interrupt
+	return ctx.Err()
+}}
+run := session.Go(ctx, "wait()", &montygo.FeedOptions{ExternalLookup: lookup})
+<-started
+session.Interrupt(ctx, nil)
+_, err := run.Wait()                    // *RuntimeError, TypeName KeyboardInterrupt
+session.FeedRun(ctx, "1 + 1", nil)      // the session is still usable
+```
+
+While the worker waits on a host call, the call's context is cancelled and the
+feed ends inside the sandbox with `KeyboardInterrupt`, or the exception a
+non-nil `reason` maps to (`montygo.Raise("TimeoutError", "budget spent")`).
+The sandbox cannot catch it. Cancelling the feed's own context during a host
+call has the same effect. While Python is executing, `Interrupt` waits
+`CheckoutOptions.InterruptGrace` (default 100 ms) and then kills the worker, so
+the session is lost. Interrupting a suspended `FeedStart` snapshot aborts it,
+and the next `Resume*` returns the `KeyboardInterrupt` error.
+
+`montygo.AsyncContext(ctx, fn)` starts asynchronous host work under the
+callback context, so it observes the same cancellation; `montygo.Async` cannot
+be cancelled.
+
 ## Backends
 
 `Options.Backend` selects the transport:
@@ -68,10 +121,34 @@ The native binary resolves from `Options.BinaryPath`, then `MONTY_BIN`, then
 `PATH`, then a cargo `target/` directory in an ancestor or a sibling `monty`
 checkout. Pin `BinaryPath` when the environment is not trusted.
 
+### Pool lifecycle
+
+`MinProcesses` (default 1) workers are prewarmed and `MaxProcesses` caps live
+workers. `Pool.Stats` counts them by state, and `Pool.Shutdown` waits for open
+sessions and retiring workers, where `Pool.Close` only retires idle workers:
+
+```go
+pool, _ := montygo.New(ctx, montygo.Options{MaxProcesses: 2})
+session, _ := pool.Checkout(ctx, montygo.CheckoutOptions{})
+fmt.Printf("%+v\n", pool.Stats()) // {Starting:0 Active:1 Idle:0 Retiring:0}
+
+go func() {
+	session.FeedRun(ctx, "1 + 1", nil)
+	session.Close(ctx)
+}()
+pool.Shutdown(ctx) // waits for the session and every worker
+```
+
+A worker leaving a session is retired asynchronously and counts toward
+`MaxProcesses` until it has exited. When `Shutdown`'s context ends first, open
+sessions are closed with `CloseNow`, the wait continues for 5 s, and the
+context error is returned when workers remain. `Checkout` after `Shutdown`
+returns `ErrPoolClosed`.
+
 ## Inputs
 
 ```go
-session.FeedRun(ctx, "x + y", &monty.FeedOptions{Inputs: map[string]any{"x": 10, "y": 20}}) // 30
+session.FeedRun(ctx, "x + y", &montygo.FeedOptions{Inputs: map[string]any{"x": 10, "y": 20}}) // 30
 ```
 
 ## External lookup
@@ -83,24 +160,50 @@ read; an absent name raises `NameError`.
 ```go
 lookup := map[string]any{
 	"add": func(a, b int) int { return a + b },
-	"fetch_data": func(url string) *monty.Future {
-		return monty.Async(func() (any, error) { return download(url) })
+	"fetch_data": func(url string) *montygo.Future {
+		return montygo.Async(func() (any, error) { return download(url) })
 	},
 	"greeting": "hello ",
 }
-session.FeedRun(ctx, "add(2, 3)", &monty.FeedOptions{ExternalLookup: lookup})                   // 5
-session.FeedRun(ctx, "await fetch_data('https://example.com')", &monty.FeedOptions{ExternalLookup: lookup})
+session.FeedRun(ctx, "add(2, 3)", &montygo.FeedOptions{ExternalLookup: lookup})                   // 5
+session.FeedRun(ctx, "await fetch_data('https://example.com')", &montygo.FeedOptions{ExternalLookup: lookup})
 ```
 
 Plain Go functions are adapted by reflection: arguments convert to the parameter
 types, an optional leading `context.Context` receives the callback context, a
-trailing `monty.Kwargs` parameter receives keyword arguments, and results may be
-`(T)`, `(error)` or `(T, error)`. Return a `*monty.Future` (`monty.Async` or
-`monty.NewFuture`) to let other sandbox tasks run while the call completes.
-`monty.Function` and `monty.FunctionFunc` give full control.
+trailing `montygo.Kwargs` parameter receives keyword arguments, and results may be
+`(T)`, `(error)` or `(T, error)`. Return a `*montygo.Future` (`montygo.Async` or
+`montygo.NewFuture`) to let other sandbox tasks run while the call completes.
+`montygo.Function` and `montygo.FunctionFunc` give full control.
 
-Errors cross into the sandbox as Python exceptions: `monty.Raise("KeyError", "missing")`
-raises that type, any other error (or a panic) raises `RuntimeError`.
+Errors cross into the sandbox as Python exceptions: `montygo.Raise("KeyError", "missing")`
+raises that type (`montygo.KnownExceptionNames()` lists them), any other error
+(or a panic) raises `RuntimeError`.
+
+### Host registry
+
+`montygo.Host` validates functions and objects when they are registered
+instead of when the sandbox calls them, and `CheckoutOptions.Host` exposes
+them to every feed of the session. Names must be Python identifiers and unique;
+`FeedOptions.ExternalLookup` entries override them. `Host.Stubs` renders Python
+stubs for `TypeCheckStubs`.
+
+```go
+host := montygo.NewHost()
+host.Func("add", func(a, b int) int { return a + b })
+host.Object("wallet", &Wallet{Balance: 100}, montygo.ClassInstanceOptions{
+	AllowedMethods: montygo.Expose[Payer](), // exactly the methods of interface Payer
+})
+session, _ := pool.Checkout(ctx, montygo.CheckoutOptions{Host: host, TypeCheck: true, TypeCheckStubs: host.Stubs()})
+session.FeedRun(ctx, "add(1, wallet.pay(30).balance)", nil) // 71
+```
+
+Stubs declare functions and allowed methods; attributes are not declared, so a
+type-checked feed reads them through a method or `Any`. Set
+`ClassInstanceOptions.ID` on every object that a dump must find again after
+`LoadSession` on another checkout with the same `Host`; `Host.Restorable`
+reports the first object without one as `ErrHostObjectNotRestorable`, and
+`LoadSession` returns that error before loading.
 
 ## Class instances
 
@@ -113,10 +216,10 @@ type Wallet struct{ Balance int }
 
 func (w *Wallet) Pay(amount int) *Wallet { return &Wallet{Balance: w.Balance - amount} }
 
-func wrapWallet(w *Wallet) *monty.ClassInstance {
-	return monty.MustClassInstance(w, monty.ClassInstanceOptions{
-		EagerAttrs:     monty.All,
-		AllowedMethods: monty.All,
+func wrapWallet(w *Wallet) *montygo.ClassInstance {
+	return montygo.MustClassInstance(w, montygo.ClassInstanceOptions{
+		EagerAttrs:     montygo.All(),
+		AllowedMethods: montygo.All(),
 		ConvertValue: func(_ string, v any) (any, error) {
 			if next, ok := v.(*Wallet); ok {
 				return wrapWallet(next), nil
@@ -126,18 +229,29 @@ func wrapWallet(w *Wallet) *monty.ClassInstance {
 	})
 }
 
-session.FeedRun(ctx, "w.pay(30).balance", &monty.FeedOptions{Inputs: map[string]any{"w": wrapWallet(&Wallet{100})}}) // 70
+session.FeedRun(ctx, "w.pay(30).balance", &montygo.FeedOptions{Inputs: map[string]any{"w": wrapWallet(&Wallet{100})}}) // 70
 ```
 
 Exported fields and methods are visible under snake_case names (`Balance` →
 `balance`, `GetText` → `get_text`), or under a `monty:"name"` field tag
-(`monty:"-"` hides a field). Unexported members are never reachable.
-`AttrProvider`, `AttrLister` and `MethodProvider` replace reflection for dynamic
-objects. Names outside the policy raise `AttributeError`; sandbox mutations stay
-on the sandbox copy. Every wrapper sent into a session is retained until the
-session closes.
+(`monty:"-"` hides a field). Unexported members are never reachable. A policy
+is `montygo.All()` (every public name), `montygo.Names("pay", "balance")`, or
+`montygo.Expose[Payer]()`, which exposes exactly the methods of an interface,
+so a method added to the Go type later is not callable until the interface
+names it. `AttrProvider`, `AttrLister` and `MethodProvider` replace reflection
+for dynamic objects. Names outside the policy raise `AttributeError`; sandbox
+mutations stay on the sandbox copy. Every wrapper sent into a session is
+retained until the session closes, bounded by `CheckoutOptions.MaxHostObjects`
+(default 10 000; instances and their class types both count). Past the bound
+the sandbox raises `RuntimeError: host object limit N exceeded`, and the host
+sees a `*montygo.ResourceError`. `Session.Stats` reports the counts.
 
-Instances defined inside the sandbox come back as read-only `*monty.ClassProxy`
+Plain structs cross as named tuples: `montygo.AsNamedTuple(value)` converts a
+struct's exported fields in declaration order, and
+`montygo.NewNamedTuple("Point", montygo.Pair{Key: "x", Value: 1})` builds one
+by hand.
+
+Instances defined inside the sandbox come back as read-only `*montygo.ClassProxy`
 values (`Name`, `ID`, `IsDataclass`, `Attributes`); passing a proxy back hands
 the sandbox its original object.
 
@@ -149,12 +263,12 @@ sandbox construct instances, which cross back under the `Instance*` policies.
 Without a `Constructor`, construction fills exported fields positionally or by keyword.
 
 ```go
-walletClass := monty.MustClassType[Wallet](monty.ClassTypeOptions{
+walletClass := montygo.MustClassType[Wallet](montygo.ClassTypeOptions{
 	Init:                   true,
-	InstanceEagerAttrs:     monty.All,
-	InstanceAllowedMethods: monty.All,
+	InstanceEagerAttrs:     montygo.All(),
+	InstanceAllowedMethods: montygo.All(),
 })
-session.FeedRun(ctx, "w = Wallet(100)\nw.balance", &monty.FeedOptions{Inputs: map[string]any{"Wallet": walletClass}}) // 100
+session.FeedRun(ctx, "w = Wallet(100)\nw.balance", &montygo.FeedOptions{Inputs: map[string]any{"Wallet": walletClass}}) // 100
 ```
 
 Without `Init`, calling the class raises `TypeError: cannot instantiate host class 'Wallet'`.
@@ -165,10 +279,10 @@ Without `Init`, calling the class raises `TypeError: cannot instantiate host cla
 instead of driving the snippet to completion.
 
 ```go
-snap, _ := session.FeedStart(ctx, `greet(name) + "!"`, &monty.FeedOptions{Inputs: map[string]any{"name": "Ada"}})
-if call, ok := snap.(*monty.FunctionSnapshot); ok {
+snap, _ := session.FeedStart(ctx, `greet(name) + "!"`, &montygo.FeedOptions{Inputs: map[string]any{"name": "Ada"}})
+if call, ok := snap.(*montygo.FunctionSnapshot); ok {
 	done, _ := call.Resume(ctx, "hello Ada")
-	fmt.Println(done.(*monty.Complete).Output) // hello Ada!
+	fmt.Println(done.(*montygo.Complete).Output) // hello Ada!
 }
 ```
 
@@ -189,13 +303,28 @@ The worker batches output (`CheckoutOptions.PrintFlushInterval`, default 5 ms;
 `0` delivers one callback per line). A print target returning an error fails the feed.
 
 ```go
-text, _ := monty.NewCollectString(monty.DefaultMaxPrintCollectBytes)
-session.FeedRun(ctx, `print("hello")`, &monty.FeedOptions{Print: text})
+text, _ := montygo.NewCollectString(montygo.DefaultMaxPrintCollectBytes)
+session.FeedRun(ctx, `print("hello")`, &montygo.FeedOptions{Print: text})
 text.Output() // "hello\n"
 ```
 
 `CollectStreams` keeps the stream of each chunk. Both collectors cap host memory
 at 10 MiB by default; exceeding the cap raises `MemoryError`.
+
+`montygo.Lines` delivers complete lines per stream without their newline. A
+trailing partial line is delivered when the feed ends, because a
+`FlushingPrintTarget` has its `Flush` called at every turn end:
+
+```go
+lines := montygo.Lines(func(stream montygo.Stream, line string) error {
+	fmt.Printf("%s: %q\n", stream, line)
+	return nil
+})
+session.FeedRun(ctx, "print('a\\nb')\nprint('c', end='')", &montygo.FeedOptions{Print: lines})
+// stdout: "a"
+// stdout: "b"
+// stdout: "c"
+```
 
 ## Filesystem
 
@@ -203,9 +332,9 @@ Mount host directories at virtual POSIX paths. Mount I/O is serviced host-side,
 so mounts work with every backend.
 
 ```go
-mount, _ := monty.NewMountDir(monty.MountDirOptions{HostPath: "/path/on/host", VirtualPath: "/mnt/data", Mode: monty.MountReadOnly})
+mount, _ := montygo.NewMountDir(montygo.MountDirOptions{HostPath: "/path/on/host", VirtualPath: "/mnt/data", Mode: montygo.MountReadOnly})
 defer mount.Close()
-session.FeedRun(ctx, "open('/mnt/data/file.txt').read()", &monty.FeedOptions{Mount: []*monty.MountDir{mount}})
+session.FeedRun(ctx, "open('/mnt/data/file.txt').read()", &montygo.FeedOptions{Mount: []*montygo.MountDir{mount}})
 ```
 
 Modes are `read-only`, `read-write` and `overlay` (default: writes stay in memory
@@ -214,14 +343,14 @@ and are discarded when the feed ends). Each mount has a 100 MB memory budget
 defaults to the first mount's virtual path and persists across feeds; `Cwd`
 switches it.
 
-OS calls no mount covers reach `FeedOptions.OS`; return `monty.NotHandled` to decline:
+OS calls no mount covers reach `FeedOptions.OS`; return `montygo.NotHandled` to decline:
 
 ```go
-handler := func(ctx context.Context, name string, args []any, kwargs monty.Kwargs) (any, error) {
+handler := func(ctx context.Context, name string, args []any, kwargs montygo.Kwargs) (any, error) {
 	if name == "os.getenv" && args[0] == "HOME" {
 		return "/home/user", nil
 	}
-	return monty.NotHandled, nil
+	return montygo.NotHandled, nil
 }
 ```
 
@@ -231,7 +360,7 @@ Package `osaccess` provides a ready-made in-memory filesystem (`OSAccess`,
 ## Resource limits
 
 ```go
-pool.Checkout(ctx, monty.CheckoutOptions{Limits: &monty.ResourceLimits{
+pool.Checkout(ctx, montygo.CheckoutOptions{Limits: &montygo.ResourceLimits{
 	MaxMemory:         100 << 20,
 	MaxDuration:       5 * time.Second,
 	MaxRecursionDepth: 100,
@@ -241,60 +370,98 @@ pool.Checkout(ctx, monty.CheckoutOptions{Limits: &monty.ResourceLimits{
 `MaxDuration` counts execution time only (not time suspended on the host) and is
 backstopped by killing the worker `Options.DurationLimitGrace` (default 1 s)
 after the budget expires. `Options.RequestTimeout` bounds every protocol turn.
-`MaxSuspensions` (default 1000) bounds host round trips per feed. `MaxMemory` is
-also enforced by the worker's allocator; a worker that breaches it is replaced
-and the feed fails with `MemoryError`.
+`MaxSuspensions` (default 1000) bounds host round trips per session; the count
+is reset by `LoadSession` and `LoadSnapshot`. `MaxMemory` is also enforced by
+the worker's allocator; a worker that breaches it is replaced and the feed
+fails with `MemoryError`.
+
+A zero limit keeps the default. `montygo.Unlimited` disables `MaxMemory`,
+`MaxSuspensions`, `MaxHostObjects` and `MaxPendingFutures`;
+`montygo.UnlimitedDuration` disables `MaxDuration`. `MaxRecursionDepth` cannot
+be unlimited.
+
+Host-side bounds keep a long session in check: `CheckoutOptions.MaxHostObjects`
+(default 10 000) bounds retained host objects and `MaxPendingFutures` (default
+1000) bounds unresolved futures per feed. Exceeding either raises
+`RuntimeError: <resource> limit N exceeded` in the sandbox; the host sees a
+`*montygo.ResourceError` and the session stays usable. `Options.MaxPendingBytes`
+(default 64 MiB, `montygo.UnlimitedPendingBytes` disables) bounds the worker
+output buffered by the parent for native and wasm workers; past it the reader
+blocks and the worker stalls on its write instead of growing host memory.
 
 ## Type checking
 
 ```go
-session, _ := pool.Checkout(ctx, monty.CheckoutOptions{TypeCheck: true, TypeCheckStubs: "def fetch(url: str) -> str: ..."})
+session, _ := pool.Checkout(ctx, montygo.CheckoutOptions{TypeCheck: true, TypeCheckStubs: "def fetch(url: str) -> str: ..."})
 _, err := session.FeedRun(ctx, "fetch(123)", nil)
-var typingErr *monty.TypingError // errors.As(err, &typingErr); typingErr.Diagnostics
+var typingErr *montygo.TypingError // errors.As(err, &typingErr); typingErr.Diagnostics
 ```
 
 `TypeCheckFormat` picks ty's rendering (`full`, `concise`, `json`, ...) and
 `TypeCheckColor` adds ANSI colour. A snippet that fails type checking does not run.
 
 `AssertMessageAnnotations` controls pytest-style `assert` messages
-(`monty.Uint32(0)` restores CPython's bare `AssertionError`).
+(`montygo.Uint32(0)` restores CPython's bare `AssertionError`).
 
 ## Errors
 
 | Type | Meaning |
 |---|---|
-| `*monty.RuntimeError` | a Python exception (`TypeName`, `Message`, `Frames`, `Display(monty.DisplayTraceback)`) |
-| `*monty.SyntaxError` | the snippet did not parse |
-| `*monty.TypingError` | type checking rejected the snippet |
-| `*monty.CrashedError` | the worker died or timed out; the session is lost, the pool recovers |
-| `*monty.DisconnectError`, `*monty.ShutdownError` | WebSocket workers only |
-| `*monty.ProtocolError` | a protocol violation; the session is lost |
-| `*monty.ConversionError` | a host value cannot cross into the sandbox |
+| `*montygo.RuntimeError` | a Python exception (`TypeName`, `Message`, `Frames`, `Display(montygo.DisplayTraceback)`) |
+| `*montygo.SyntaxError` | the snippet did not parse |
+| `*montygo.TypingError` | type checking rejected the snippet |
+| `*montygo.CrashedError` | the worker died or timed out; the session is lost, the pool recovers |
+| `*montygo.DisconnectError`, `*montygo.ShutdownError` | WebSocket workers only; `DisconnectError` carries the close frame's `Code` and `Reason` |
+| `*montygo.ProtocolError` | a protocol violation; the session is lost |
+| `*montygo.ResourceError` | a host-side bound (`MaxHostObjects`, `MaxPendingFutures`) was reached; the session stays usable |
+| `*montygo.ConversionError` | a host value cannot cross into the sandbox |
 
-All sandbox errors implement `monty.Error`.
+All sandbox errors implement `montygo.Error`. Every error that leaves a session
+unusable, including `ErrSessionClosed`, matches `montygo.ErrSessionLost`:
+
+```go
+if _, err := session.FeedRun(ctx, code, nil); errors.Is(err, montygo.ErrSessionLost) {
+	session, err = pool.Checkout(ctx, montygo.CheckoutOptions{}) // check out a new one
+}
+```
 
 ## WebSocket workers
 
 ```go
-opts := monty.WebSocketOptions{
+opts := montygo.WebSocketOptions{
 	URL:       "wss://monty.example.com/",
 	TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 	ConnectHeaders: func(ctx context.Context) (map[string]string, error) {
 		return map[string]string{"authorization": "Bearer ..."}, nil
 	},
 }
-if err := monty.CheckWebSocketHealth(ctx, opts); err != nil {
+if err := montygo.CheckWebSocketHealth(ctx, opts); err != nil {
 	fmt.Println("server unavailable:", err)
 	return
 }
-pool, _ := monty.NewWebSocket(ctx, opts)
+pool, _ := montygo.NewWebSocket(ctx, opts)
 ```
 
 Each checkout dials a single-use worker. `TLSConfig` configures `wss://` dials
 and `DialContext` replaces the TCP dialer. `CheckWebSocketHealth` sends
 `GET <path>/health` through the same transport with the connect headers. A dropped connection raises
-`*monty.DisconnectError`; a draining server raises `*monty.ShutdownError` whose
+`*montygo.DisconnectError`; a draining server raises `*montygo.ShutdownError` whose
 `Dump` restores the session elsewhere.
+
+`montygo.FetchServerInfo` reads `GET <path>/info` from a `monty-server` and
+returns its version, upstream revision, protocol version and effective limits,
+so a client can size its pool and detect drift before dialing:
+
+```go
+info, err := montygo.FetchServerInfo(ctx, opts)
+if errors.Is(err, montygo.ErrNoServerInfo) {
+	// a server built before /info existed
+}
+fmt.Println(info.Version, info.MontyRev, info.ProtocolVersion, info.Limits.MaxSessions, info.Limits.SessionTimeout)
+```
+
+A zero duration or count in `ServerLimits` means the server has that limit
+disabled.
 
 ## Dockerized server
 
@@ -313,8 +480,8 @@ docker run --rm \
 ```
 
 The server prints `ws://0.0.0.0:8000/` when it is ready. Connect with
-`monty.NewWebSocket(ctx, monty.WebSocketOptions{URL: "ws://127.0.0.1:8000/"})`,
-and probe readiness first with `monty.CheckWebSocketHealth`. The REPL example
+`montygo.NewWebSocket(ctx, montygo.WebSocketOptions{URL: "ws://127.0.0.1:8000/"})`,
+and probe readiness first with `montygo.CheckWebSocketHealth`. The REPL example
 connects with `go run ./repl -ws ws://127.0.0.1:8000/` from `examples/`.
 
 Each session runs in a fresh worker process. The server clamps client limits to
@@ -333,14 +500,23 @@ ingress or reverse proxy and dial it with a `wss://` URL and `TLSConfig`, as in
 ## Observability
 
 ```go
-monty.Instrument(monty.TelemetryComponents{Tracer: tracer, Meter: meter, Logger: logger})
+montygo.Instrument(montygo.TelemetryComponents{Tracer: tracer, Meter: meter, Logger: logger})
 ```
 
 Instrumentation is process-wide and must be installed before creating a pool.
+`Options.Telemetry` and `WebSocketOptions.Telemetry` give one pool its own
+components instead: nil uses the process-wide installation, and a value with
+no components records nothing for that pool.
+
+```go
+pool, _ := montygo.New(ctx, montygo.Options{Telemetry: &montygo.TelemetryComponents{Tracer: tracer}})
+```
+
 Each checkout records a `session {script_name}` span, each run a `run code`
 span, each host round trip a child span, printed output as log records, and pool
-metrics such as `monty.pool.workers.live` and `monty.run.duration`. Recorded
-values include source code, inputs, outputs and printed text.
+metrics such as `monty.pool.workers.live`, `monty.pool.workers.retiring`,
+`monty.pool.pending_frame_bytes` and `monty.run.duration`. Recorded values
+include source code, inputs, outputs and printed text.
 
 ## Values
 
@@ -351,14 +527,14 @@ values include source code, inputs, outputs and printed text.
 | `int` | `int64` (`*big.Int` beyond int64) |
 | `float` | `float64` |
 | `str` / `bytes` | `string` / `[]byte` |
-| `list` / `tuple` | `[]any` / `monty.Tuple` |
-| `dict` | `*monty.Dict` (insertion-ordered) |
-| `set` / `frozenset` | `*monty.Set` / `*monty.FrozenSet` |
-| `date`, `datetime`, `time`, `timedelta`, `timezone` | `monty.Date`, `monty.DateTime`, `monty.Time`, `monty.TimeDelta`, `monty.TimeZone` |
-| `pathlib.Path` | `monty.Path` |
-| named tuple | `monty.NamedTuple` |
-| file handle | `*monty.FileHandle` |
-| class instance | the original host object, or `*monty.ClassProxy` |
+| `list` / `tuple` | `[]any` / `montygo.Tuple` |
+| `dict` | `*montygo.Dict` (insertion-ordered) |
+| `set` / `frozenset` | `*montygo.Set` / `*montygo.FrozenSet` |
+| `date`, `datetime`, `time`, `timedelta`, `timezone` | `montygo.Date`, `montygo.DateTime`, `montygo.Time`, `montygo.TimeDelta`, `montygo.TimeZone` |
+| `pathlib.Path` | `montygo.Path` |
+| named tuple | `montygo.NamedTuple` |
+| file handle | `*montygo.FileHandle` |
+| class instance | the original host object, or `*montygo.ClassProxy` |
 
 Inputs also accept Go integer and float kinds, slices, arrays and maps (keys sorted).
 
@@ -367,7 +543,11 @@ Inputs also accept Go integer and float kinds, slices, arrays and maps (keys sor
 ```bash
 make build-worker   # native worker in ../monty (MONTY_SRC)
 make build-wasm     # rebuild the embedded wasm worker (Rust + wasm32-wasip1)
+make version        # version derived from git tags (scripts/version.sh)
+make check-pins     # every copy of the upstream pin agrees
 make test           # both backends
+make bench          # wire codec benchmarks against the generated protobuf code
+make fuzz           # wire codec fuzz targets
 make server-check   # clippy and tests for server/
 make docker-build   # monty-server image
 make test-docker    # root suite on the websocket backend against the image

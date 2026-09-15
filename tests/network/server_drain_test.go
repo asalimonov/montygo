@@ -8,20 +8,20 @@ import (
 	"github.com/coder/websocket"
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 // waitListenerClosed returns once the drained server refuses new HTTP connections.
 func waitListenerClosed(t *testing.T, s *TestServer) {
 	t.Helper()
 	require.Eventually(t, func() bool {
-		return monty.CheckWebSocketHealth(context.Background(), monty.WebSocketOptions{URL: s.URL(), RequestTimeout: time.Second}) != nil
+		return montygo.CheckWebSocketHealth(context.Background(), montygo.WebSocketOptions{URL: s.URL(), RequestTimeout: time.Second}) != nil
 	}, 10*time.Second, 50*time.Millisecond)
 }
 
-func requireShutdown(t *testing.T, err error) *monty.ShutdownError {
+func requireShutdown(t *testing.T, err error) *montygo.ShutdownError {
 	t.Helper()
-	var se *monty.ShutdownError
+	var se *montygo.ShutdownError
 	require.ErrorAs(t, err, &se)
 	return se
 }
@@ -30,8 +30,8 @@ func TestDrain_IdleSessionGetsShutdownDump(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--drain-grace", "10"))
 	ctx := testCtx(t)
-	p := s.NewPool(monty.WebSocketOptions{})
-	session := s.Checkout(ctx, p, monty.CheckoutOptions{})
+	p := s.NewPool(montygo.WebSocketOptions{})
+	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	_, err := session.FeedRun(ctx, "x = 41", nil)
 	require.NoError(t, err)
 
@@ -60,7 +60,7 @@ func TestDrain_BeforeConfigureCarriesNoDump(t *testing.T) {
 
 	s.Signal("TERM")
 	waitListenerClosed(t, s)
-	require.NoError(t, sendRequest(ctx, c, configureRequest(monty.ProtocolVersion)))
+	require.NoError(t, sendRequest(ctx, c, configureRequest(montygo.ProtocolVersion)))
 	ev, err := readEvent(ctx, c)
 	require.NoError(t, err)
 	require.NotNil(t, ev.GetShutdown(), "expected ShutdownDump, got %v", ev)
@@ -73,8 +73,8 @@ func TestDrain_InFlightTurnFinishesFirst(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--drain-grace", "20"))
 	ctx := testCtx(t)
-	p := s.NewPool(monty.WebSocketOptions{})
-	session := s.Checkout(ctx, p, monty.CheckoutOptions{})
+	p := s.NewPool(montygo.WebSocketOptions{})
+	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 
 	type result struct {
 		value any
@@ -83,7 +83,7 @@ func TestDrain_InFlightTurnFinishesFirst(t *testing.T) {
 	done := make(chan result, 1)
 	started := make(chan struct{})
 	go func() {
-		v, err := session.FeedRun(ctx, "total = 0\nfor i in range(4000000):\n    total += i\ntotal", &monty.FeedOptions{})
+		v, err := session.FeedRun(ctx, "total = 0\nfor i in range(4000000):\n    total += i\ntotal", &montygo.FeedOptions{})
 		done <- result{v, err}
 	}()
 	go func() {
@@ -105,8 +105,8 @@ func TestDrain_SilentSessionDroppedAfterGrace(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--drain-grace", "1"))
 	ctx := testCtx(t)
-	p := s.NewPool(monty.WebSocketOptions{})
-	session := s.Checkout(ctx, p, monty.CheckoutOptions{})
+	p := s.NewPool(montygo.WebSocketOptions{})
+	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	_, err := session.FeedRun(ctx, "x = 1", nil)
 	require.NoError(t, err)
 
@@ -120,8 +120,8 @@ func TestDrain_SecondSignalDropsImmediately(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--drain-grace", "60"))
 	ctx := testCtx(t)
-	p := s.NewPool(monty.WebSocketOptions{})
-	session := s.Checkout(ctx, p, monty.CheckoutOptions{})
+	p := s.NewPool(montygo.WebSocketOptions{})
+	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	_, err := session.FeedRun(ctx, "x = 1", nil)
 	require.NoError(t, err)
 

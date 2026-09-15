@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
-    Router,
+    Json, Router,
     extract::{
         ConnectInfo, State,
         ws::{WebSocketUpgrade, rejection::WebSocketUpgradeRejection},
@@ -14,7 +14,8 @@ use monty_proto::MAX_FRAME_LEN;
 use tokio_util::task::TaskTracker;
 
 use crate::{
-    admission::Rejection, app::Shared, identity::client_id, logline, metrics::RejectReason, session::Session, texts,
+    admission::Rejection, app::Shared, identity::client_id, info::ServerInfo, logline, metrics::RejectReason,
+    session::Session, texts,
 };
 
 #[derive(Clone)]
@@ -28,6 +29,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(root))
         .route("/health", get(health))
+        .route("/info", get(info))
         .route("/metrics", get(metrics))
         .with_state(state)
 }
@@ -101,6 +103,10 @@ async fn health(State(state): State<AppState>) -> Response {
     } else {
         StatusCode::OK.into_response()
     }
+}
+
+async fn info(State(state): State<AppState>) -> Response {
+    Json(ServerInfo::from_config(&state.shared.config)).into_response()
 }
 
 async fn metrics(State(state): State<AppState>) -> Response {

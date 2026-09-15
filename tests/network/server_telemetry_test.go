@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 const (
@@ -21,12 +21,12 @@ func TestTelemetry_TraceparentParentsConnectionSpan(t *testing.T) {
 	receiver := startOTLPReceiver(t)
 	s := SetupServer(t, WithArgs("--otlp-endpoint", receiver.Endpoint()))
 	ctx := testCtx(t)
-	p := s.NewPool(monty.WebSocketOptions{
+	p := s.NewPool(montygo.WebSocketOptions{
 		ConnectHeaders: func(context.Context) (map[string]string, error) {
 			return map[string]string{"traceparent": "00-" + testTraceID + "-" + testParentSpanID + "-01"}, nil
 		},
 	})
-	session, err := p.Checkout(ctx, monty.CheckoutOptions{})
+	session, err := p.Checkout(ctx, montygo.CheckoutOptions{})
 	require.NoError(t, err)
 	_, err = session.FeedRun(ctx, "1 + 1", nil)
 	require.NoError(t, err)
@@ -46,8 +46,8 @@ func TestTelemetry_PolicyEventOnConnectionSpan(t *testing.T) {
 	receiver := startOTLPReceiver(t)
 	s := SetupServer(t, WithArgs("--otlp-endpoint", receiver.Endpoint(), "--idle-timeout", "1"))
 	ctx := testCtx(t)
-	p := s.NewPool(monty.WebSocketOptions{})
-	session := s.Checkout(ctx, p, monty.CheckoutOptions{})
+	p := s.NewPool(montygo.WebSocketOptions{})
+	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	_, err := session.FeedRun(ctx, "1", nil)
 	require.NoError(t, err)
 

@@ -6,14 +6,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 func TestRepl_StatePersistsAcrossFeeds(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t)
 	ctx := testCtx(t)
-	session := s.Checkout(ctx, s.NewPool(monty.WebSocketOptions{}), monty.CheckoutOptions{})
+	session := s.Checkout(ctx, s.NewPool(montygo.WebSocketOptions{}), montygo.CheckoutOptions{})
 
 	_, err := session.FeedRun(ctx, "counter = 0", nil)
 	require.NoError(t, err)
@@ -30,7 +30,7 @@ func TestRepl_ErrorKeepsSession(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t)
 	ctx := testCtx(t)
-	session := s.Checkout(ctx, s.NewPool(monty.WebSocketOptions{}), monty.CheckoutOptions{})
+	session := s.Checkout(ctx, s.NewPool(montygo.WebSocketOptions{}), montygo.CheckoutOptions{})
 
 	_, err := session.FeedRun(ctx, "x = 1", nil)
 	require.NoError(t, err)
@@ -42,7 +42,7 @@ func TestRepl_ErrorKeepsSession(t *testing.T) {
 		"    1 / 0",
 		"    ~~~~~",
 		"ZeroDivisionError: division by zero",
-	}, "\n"), re.Display(monty.DisplayTraceback))
+	}, "\n"), re.Display(montygo.DisplayTraceback))
 	v, err := session.FeedRun(ctx, "x", nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), v)
@@ -52,7 +52,7 @@ func TestRepl_DumpRestoreAcrossRecreate(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t)
 	ctx := testCtx(t)
-	session := s.Checkout(ctx, s.NewPool(monty.WebSocketOptions{}), monty.CheckoutOptions{})
+	session := s.Checkout(ctx, s.NewPool(montygo.WebSocketOptions{}), montygo.CheckoutOptions{})
 	_, err := session.FeedRun(ctx, "x = 40", nil)
 	require.NoError(t, err)
 	_, err = session.FeedRun(ctx, "x = x + 1", nil)
@@ -72,15 +72,15 @@ func TestRepl_DrainRestoresSuspendedFeed(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--drain-grace", "20"))
 	ctx := testCtx(t)
-	session := s.Checkout(ctx, s.NewPool(monty.WebSocketOptions{}), monty.CheckoutOptions{})
+	session := s.Checkout(ctx, s.NewPool(montygo.WebSocketOptions{}), montygo.CheckoutOptions{})
 
 	snap, err := session.FeedStart(ctx, "r = ext(7)\nr * 2", nil)
 	require.NoError(t, err)
-	if lookup, ok := snap.(*monty.NameLookupSnapshot); ok {
+	if lookup, ok := snap.(*montygo.NameLookupSnapshot); ok {
 		snap, err = lookup.ResumeFunction(ctx, "ext")
 		require.NoError(t, err)
 	}
-	call, ok := snap.(*monty.FunctionSnapshot)
+	call, ok := snap.(*montygo.FunctionSnapshot)
 	require.True(t, ok, "expected a function snapshot, got %T", snap)
 	require.Equal(t, "ext", call.FunctionName)
 
@@ -91,15 +91,15 @@ func TestRepl_DrainRestoresSuspendedFeed(t *testing.T) {
 	require.NotEmpty(t, shutdown.Dump)
 
 	s.Recreate()
-	fresh := s.Checkout(ctx, s.NewPool(monty.WebSocketOptions{}), monty.CheckoutOptions{})
+	fresh := s.Checkout(ctx, s.NewPool(montygo.WebSocketOptions{}), montygo.CheckoutOptions{})
 	restored, err := fresh.LoadSnapshot(ctx, shutdown.Dump, nil)
 	require.NoError(t, err)
-	again, ok := restored.(*monty.FunctionSnapshot)
+	again, ok := restored.(*montygo.FunctionSnapshot)
 	require.True(t, ok, "expected a restored function snapshot, got %T", restored)
 	require.Equal(t, "ext", again.FunctionName)
 	final, err := again.Resume(ctx, 21)
 	require.NoError(t, err)
-	complete, ok := final.(*monty.Complete)
+	complete, ok := final.(*montygo.Complete)
 	require.True(t, ok, "expected completion, got %T", final)
 	require.Equal(t, int64(42), complete.Output)
 }
@@ -108,17 +108,17 @@ func TestRepl_TypeCheckStubsAcrossFeeds(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t)
 	ctx := testCtx(t)
-	session := s.Checkout(ctx, s.NewPool(monty.WebSocketOptions{}), monty.CheckoutOptions{
+	session := s.Checkout(ctx, s.NewPool(montygo.WebSocketOptions{}), montygo.CheckoutOptions{
 		TypeCheck:      true,
 		TypeCheckStubs: "def ext(x: int) -> int: ...",
 	})
 
-	_, err := session.FeedRun(ctx, "y: int = 1", &monty.FeedOptions{
+	_, err := session.FeedRun(ctx, "y: int = 1", &montygo.FeedOptions{
 		ExternalLookup: map[string]any{"ext": func(x int) int { return x }},
 	})
 	require.NoError(t, err)
 	_, err = session.FeedRun(ctx, "z: str = ext(y)", nil)
-	var typing *monty.TypingError
+	var typing *montygo.TypingError
 	require.ErrorAs(t, err, &typing)
 	require.Contains(t, typing.Diagnostics, "str")
 }

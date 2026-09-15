@@ -267,6 +267,21 @@ type wsWorker struct {
 	stopOnce  sync.Once
 	dropOnce  sync.Once
 	closeOnce sync.Once
+	errMu     sync.Mutex
+	err       error
+}
+
+// ClosedError reports a close frame received from the peer.
+type ClosedError struct {
+	Code   int
+	Reason string
+}
+
+func (e *ClosedError) Error() string {
+	if e.Reason == "" {
+		return fmt.Sprintf("closed by server (%d)", e.Code)
+	}
+	return fmt.Sprintf("closed by server (%d): %s", e.Code, e.Reason)
 }
 
 func (w *wsWorker) read() {
@@ -274,6 +289,7 @@ func (w *wsWorker) read() {
 	for {
 		typ, data, err := w.conn.Read(context.Background())
 		if err != nil || typ != websocket.MessageBinary {
+			w.setErr(err, typ)
 			w.drop()
 			return
 		}
@@ -283,6 +299,33 @@ func (w *wsWorker) read() {
 			return
 		}
 	}
+}
+
+func (w *wsWorker) setErr(err error, typ websocket.MessageType) {
+	w.errMu.Lock()
+	defer w.errMu.Unlock()
+	var ce websocket.CloseError
+	switch {
+	case errors.As(err, &ce):
+		if ce.Code == websocket.StatusNormalClosure && w.stopped() {
+			return
+		}
+		w.err = &ClosedError{Code: int(ce.Code), Reason: ce.Reason}
+	case err != nil:
+		if !w.stopped() {
+			w.err = err
+		}
+	default:
+		w.err = fmt.Errorf("unexpected %s message", typ)
+	}
+}
+
+func (w *wsWorker) Done() <-chan struct{} { return w.done }
+
+func (w *wsWorker) Err() error {
+	w.errMu.Lock()
+	defer w.errMu.Unlock()
+	return w.err
 }
 
 func (w *wsWorker) stopped() bool {
@@ -299,6 +342,14 @@ func (w *wsWorker) signalStop() { w.stopOnce.Do(func() { close(w.stop) }) }
 func (w *wsWorker) Send(ctx context.Context, payload []byte) error {
 	if len(payload) > wire.MaxFrameLen {
 		return &wire.FrameTooLargeError{Len: len(payload), Max: wire.MaxFrameLen}
+	}
+	select {
+	case <-w.done:
+		if cause := w.Err(); cause != nil {
+			return fmt.Errorf("%w: %w", ErrWorkerGone, cause)
+		}
+		return ErrWorkerGone
+	default:
 	}
 	if w.stopped() {
 		return ErrWorkerGone

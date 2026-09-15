@@ -20,6 +20,7 @@ const (
 type Metrics interface {
 	WorkersLive(delta int64)
 	WorkersIdle(delta int64)
+	WorkersRetiring(delta int64)
 	CheckoutWait(d time.Duration, outcome string)
 	WorkerTerminated(reason string)
 	SessionDuration(d time.Duration, outcome string)
@@ -77,22 +78,36 @@ type Config struct {
 	MontyVersion          string
 	ProtocolVersion       uint32
 	Metrics               Metrics
+	// OnShutdown is called by Shutdown when its context ends with sessions still checked out.
+	OnShutdown func()
 }
 
 type slot struct {
 	w      worker.Worker
 	served int
 	obs    *observer
+	killed bool
 }
 
-// Pool is an elastic set of workers.
+// Stats counts the workers a pool holds by state.
+type Stats struct {
+	Starting, Active, Idle, Retiring int
+}
+
+// Pool is an elastic set of workers. Starting, active, idle and retiring
+// workers all count toward MaxProcesses.
 type Pool struct {
-	cfg    Config
-	mu     sync.Mutex
-	idle   []*slot
-	total  int
-	notify chan struct{}
-	closed bool
+	cfg      Config
+	mu       sync.Mutex
+	idle     []*slot
+	starting int
+	active   int
+	retiring int
+	notify   chan struct{}
+	closed   bool
+	reaper   chan *slot
+	reapers  sync.WaitGroup
+	reaped   bool
 }
 
 // WithConnectHeaders attaches per-checkout WebSocket upgrade headers.
@@ -105,6 +120,8 @@ func ConnectHeaders(ctx context.Context) [][2]string {
 	return worker.ConnectHeaders(ctx)
 }
 
+const maxReapers = 8
+
 // New creates a pool and prewarms MinProcesses workers.
 func New(ctx context.Context, cfg Config) (*Pool, error) {
 	if cfg.SingleUse {
@@ -116,7 +133,11 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 	if cfg.Metrics == nil {
 		cfg.Metrics = noopMetrics{}
 	}
-	p := &Pool{cfg: cfg, notify: make(chan struct{})}
+	p := &Pool{cfg: cfg, notify: make(chan struct{}), reaper: make(chan *slot, cfg.MaxProcesses)}
+	for i := 0; i < min(cfg.MaxProcesses, maxReapers); i++ {
+		p.reapers.Add(1)
+		go p.reap(p.reaper)
+	}
 	for i := 0; i < cfg.MinProcesses; i++ {
 		w, err := cfg.Spawner.Spawn(ctx)
 		if err != nil {
@@ -124,7 +145,6 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 			return nil, &Error{Kind: KindSpawn, Message: err.Error(), Cause: err}
 		}
 		p.mu.Lock()
-		p.total++
 		p.idle = append(p.idle, &slot{w: w})
 		p.mu.Unlock()
 		cfg.Metrics.WorkersLive(1)
@@ -133,8 +153,7 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 	return p, nil
 }
 
-// Config returns the pool configuration.
-func (p *Pool) Config() Config { return p.cfg }
+func (p *Pool) live() int { return p.starting + p.active + len(p.idle) + p.retiring }
 
 func (p *Pool) wakeLocked() {
 	close(p.notify)
@@ -163,22 +182,22 @@ func (p *Pool) acquire(ctx context.Context) (*slot, error) {
 			p.idle = p.idle[:len(p.idle)-1]
 			p.cfg.Metrics.WorkersIdle(-1)
 			if s.w.Alive() {
+				p.active++
 				p.mu.Unlock()
 				outcome = acquireOutcome(waited, "idle")
 				return s, nil
 			}
-			p.total--
 			p.cfg.Metrics.WorkersLive(-1)
 			p.cfg.Metrics.WorkerTerminated("died_idle")
 			s.w.Kill()
 		}
-		if p.total < p.cfg.MaxProcesses {
-			p.total++
+		if p.live() < p.cfg.MaxProcesses {
+			p.starting++
 			p.mu.Unlock()
 			w, err := p.cfg.Spawner.Spawn(ctx)
+			p.mu.Lock()
+			p.starting--
 			if err != nil {
-				p.mu.Lock()
-				p.total--
 				p.wakeLocked()
 				p.mu.Unlock()
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -190,6 +209,8 @@ func (p *Pool) acquire(ctx context.Context) (*slot, error) {
 				}
 				return nil, &Error{Kind: KindSpawn, Message: err.Error(), Cause: err}
 			}
+			p.active++
+			p.mu.Unlock()
 			p.cfg.Metrics.WorkersLive(1)
 			outcome = acquireOutcome(waited, "spawned")
 			return &slot{w: w}, nil
@@ -219,6 +240,7 @@ func (p *Pool) release(s *slot) {
 	obs := s.obs
 	s.obs = nil
 	p.mu.Lock()
+	p.active--
 	recycle := p.cfg.SingleUse || p.closed || !s.w.Alive() ||
 		(p.cfg.MaxCheckoutsPerWorker > 0 && s.served >= p.cfg.MaxCheckoutsPerWorker)
 	if recycle {
@@ -228,15 +250,14 @@ func (p *Pool) release(s *slot) {
 		} else if p.closed {
 			reason = "closed"
 		}
-		p.total--
-		p.cfg.Metrics.WorkersLive(-1)
 		p.cfg.Metrics.WorkerTerminated(reason)
 		if s.w.Kind() == worker.KindWebSocket {
 			// Nothing is sent to retire a remote worker, so its spans end before release returns.
 			obs.close()
 			obs = nil
 		}
-		go p.retire(s.w, obs)
+		s.obs = obs
+		p.retireLocked(s)
 	} else {
 		p.idle = append(p.idle, s)
 		p.cfg.Metrics.WorkersIdle(1)
@@ -248,23 +269,46 @@ func (p *Pool) release(s *slot) {
 	}
 }
 
-func (p *Pool) retire(w worker.Worker, obs *observer) {
-	defer obs.close()
-	shutdownWorker(w, obs)
+// retireLocked hands a worker to the reaper; it counts toward capacity until it has exited.
+func (p *Pool) retireLocked(s *slot) {
+	p.retiring++
+	p.cfg.Metrics.WorkersRetiring(1)
+	p.reaper <- s
 }
 
+func (p *Pool) reap(queue <-chan *slot) {
+	defer p.reapers.Done()
+	for s := range queue {
+		if s.killed {
+			wctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			s.w.Wait(wctx)
+			cancel()
+		} else {
+			shutdownWorker(s.w, s.obs)
+		}
+		s.obs.close()
+		p.mu.Lock()
+		p.retiring--
+		p.cfg.Metrics.WorkersRetiring(-1)
+		p.cfg.Metrics.WorkersLive(-1)
+		p.wakeLocked()
+		p.mu.Unlock()
+	}
+}
+
+// discard retires a worker whose session is lost: a local worker is killed at
+// once, a remote one gets its close frame from the reaper.
 func (p *Pool) discard(s *slot, reason string) {
 	obs := s.obs
 	s.obs = nil
-	if s.w.Kind() == worker.KindWebSocket {
-		go s.w.Close()
-	} else {
+	if s.w.Kind() != worker.KindWebSocket {
 		s.w.Kill()
+		s.killed = true
 	}
 	p.mu.Lock()
-	p.total--
-	p.cfg.Metrics.WorkersLive(-1)
+	p.active--
 	p.cfg.Metrics.WorkerTerminated(reason)
+	p.retireLocked(s)
 	p.wakeLocked()
 	p.mu.Unlock()
 	obs.close()
@@ -307,7 +351,6 @@ func (p *Pool) Close(ctx context.Context) error {
 	p.closed = true
 	idle := p.idle
 	p.idle = nil
-	p.total -= len(idle)
 	p.wakeLocked()
 	p.mu.Unlock()
 	var wg sync.WaitGroup
@@ -325,6 +368,56 @@ func (p *Pool) Close(ctx context.Context) error {
 	return nil
 }
 
+// Shutdown closes the pool and waits for every worker. When ctx ends first,
+// OnShutdown runs so the owner can end its sessions, and the wait continues briefly.
+func (p *Pool) Shutdown(ctx context.Context) error {
+	_ = p.Close(ctx)
+	if p.waitDrained(ctx) == nil {
+		p.stopReapers()
+		return nil
+	}
+	if p.cfg.OnShutdown != nil {
+		p.cfg.OnShutdown()
+	}
+	fctx, cancel := context.WithTimeout(context.Background(), shutdownForceGrace)
+	defer cancel()
+	err := p.waitDrained(fctx)
+	if err == nil {
+		p.stopReapers()
+		return nil
+	}
+	return ctx.Err()
+}
+
+const shutdownForceGrace = 5 * time.Second
+
+func (p *Pool) waitDrained(ctx context.Context) error {
+	for {
+		p.mu.Lock()
+		drained := p.live() == 0
+		wait := p.notify
+		p.mu.Unlock()
+		if drained {
+			return nil
+		}
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (p *Pool) stopReapers() {
+	p.mu.Lock()
+	if !p.reaped {
+		p.reaped = true
+		close(p.reaper)
+	}
+	p.mu.Unlock()
+	p.reapers.Wait()
+}
+
 // Closed reports whether Close was called.
 func (p *Pool) Closed() bool {
 	p.mu.Lock()
@@ -332,17 +425,25 @@ func (p *Pool) Closed() bool {
 	return p.closed
 }
 
+// Stats counts the workers by state.
+func (p *Pool) Stats() Stats {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return Stats{Starting: p.starting, Active: p.active, Idle: len(p.idle), Retiring: p.retiring}
+}
+
 // Size returns the live and idle worker counts.
 func (p *Pool) Size() (live, idle int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.total, len(p.idle)
+	return p.live(), len(p.idle)
 }
 
 type noopMetrics struct{}
 
 func (noopMetrics) WorkersLive(int64)                     {}
 func (noopMetrics) WorkersIdle(int64)                     {}
+func (noopMetrics) WorkersRetiring(int64)                 {}
 func (noopMetrics) CheckoutWait(time.Duration, string)    {}
 func (noopMetrics) WorkerTerminated(string)               {}
 func (noopMetrics) SessionDuration(time.Duration, string) {}

@@ -1,6 +1,6 @@
 //go:build unix
 
-package monty
+package montygo
 
 import (
 	"io"
@@ -10,6 +10,6 @@ import (
 
 const nativeSupported = true
 
-func newSubprocessSpawner(bin string, stderr io.Writer) worker.Spawner {
-	return &worker.SubprocessSpawner{BinaryPath: bin, Stderr: stderr}
+func newSubprocessSpawner(bin string, stderr io.Writer, pending int64, observe worker.PendingBytesObserver) worker.Spawner {
+	return &worker.SubprocessSpawner{BinaryPath: bin, Stderr: stderr, MaxPendingBytes: pending, PendingBytes: observe}
 }

@@ -60,6 +60,8 @@ type Checkout struct {
 	sent        bool
 	started     time.Time
 	obs         *observer
+	worker      worker.Worker
+	done        <-chan struct{}
 }
 
 // Checkout acquires a worker and configures its session.
@@ -70,7 +72,7 @@ func (p *Pool) Checkout(ctx context.Context, cfg wire.Configure, opts CheckoutOp
 	}
 	cfg.MontyVersion = p.cfg.MontyVersion
 	cfg.ProtocolVersion = p.cfg.ProtocolVersion
-	c := &Checkout{pool: p, slot: s, started: time.Now()}
+	c := &Checkout{pool: p, slot: s, started: time.Now(), worker: s.w, done: s.w.Done()}
 	if opts.Observe != nil {
 		pid, hasPID := s.w.PID()
 		if o := opts.Observe(pid, hasPID); o != nil {
@@ -277,7 +279,12 @@ func (c *Checkout) poison(doing string) error {
 	}
 	if s.w.Kind() == worker.KindWebSocket {
 		c.pool.discard(s, "disconnected")
-		return &Error{Kind: KindDisconnected, Message: doing, WorkerLost: true}
+		perr := &Error{Kind: KindDisconnected, Message: doing, WorkerLost: true}
+		var closed *worker.ClosedError
+		if errors.As(s.w.Err(), &closed) {
+			perr.CloseCode, perr.CloseReason = closed.Code, closed.Reason
+		}
+		return perr
 	}
 	status := reap(s.w, fatalExitGrace)
 	if status.Exited && status.Code == 65 {
@@ -624,6 +631,56 @@ func (c *Checkout) Finish(ctx context.Context) error {
 	c.pool.release(s)
 	c.pool.cfg.Metrics.SessionDuration(time.Since(c.started), "ok")
 	return nil
+}
+
+// Abort ends the pending suspension with exc. The worker MUST answer with an
+// Error, returned as a KindRuntime error; the session stays usable.
+func (c *Checkout) Abort(ctx context.Context, exc *wire.Exception, onPrint OnPrint) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.ensureReady(); err != nil {
+		return err
+	}
+	if c.pending.kind == pendingNone {
+		return protocolError("abort without a pending suspension")
+	}
+	c.pending = pending{}
+	c.abortFlight = true
+	ev, err := c.turn(ctx, wire.AbortFeed{Exception: exc}, false, onPrint)
+	if err != nil {
+		return err
+	}
+	c.discard("discarded")
+	return protocolError("unexpected reply to AbortFeed: %s", ev.Kind)
+}
+
+// KillWorker kills the worker without taking the checkout lock, so a turn in
+// flight fails; the caller MUST follow with Abandon or a failing turn.
+func (c *Checkout) KillWorker() {
+	if c.worker != nil {
+		c.worker.Kill()
+	}
+}
+
+// Pending reports whether a suspension awaits an answer.
+func (c *Checkout) Pending() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pending.kind != pendingNone
+}
+
+// Done is closed once the worker can no longer serve this checkout.
+func (c *Checkout) Done() <-chan struct{} { return c.done }
+
+// WorkerErr reports why the worker ended, when it did.
+func (c *Checkout) WorkerErr() error {
+	c.mu.Lock()
+	w := c.worker
+	c.mu.Unlock()
+	if w == nil {
+		return nil
+	}
+	return w.Err()
 }
 
 // Abandon kills the worker without resetting it.

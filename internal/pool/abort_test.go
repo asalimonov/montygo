@@ -22,13 +22,17 @@ type scriptedWorker struct {
 	requests []string
 	frames   [][]byte
 	notify   chan struct{}
+	done     chan struct{}
 	killed   bool
 	reply    func(tag string, requests []string) *montypb.ChildEvent
 }
 
 func newScriptedWorker(reply func(tag string, requests []string) *montypb.ChildEvent) *scriptedWorker {
-	return &scriptedWorker{notify: make(chan struct{}), reply: reply}
+	return &scriptedWorker{notify: make(chan struct{}), done: make(chan struct{}), reply: reply}
 }
+
+func (w *scriptedWorker) Done() <-chan struct{} { return w.done }
+func (w *scriptedWorker) Err() error            { return nil }
 
 func scriptedRequestTag(req *montypb.ParentRequest) string {
 	switch req.GetKind().(type) {
@@ -106,6 +110,7 @@ func (w *scriptedWorker) Kill() {
 	defer w.mu.Unlock()
 	if !w.killed {
 		w.killed = true
+		close(w.done)
 		close(w.notify)
 		w.notify = make(chan struct{})
 	}
@@ -193,9 +198,7 @@ func TestSuspensionAnsweringAbortFeedDiscardsWorker(t *testing.T) {
 	require.NoError(t, c.Finish(ctx))
 	requests, _ = w.snapshot()
 	require.Equal(t, []string{"configure", "feed", "resume-call", "abort-feed"}, requests)
-	live, idle := p.Size()
-	require.Zero(t, live)
-	require.Zero(t, idle)
+	require.Eventually(t, func() bool { live, idle := p.Size(); return live == 0 && idle == 0 }, 5*time.Second, 10*time.Millisecond)
 	metrics.mu.Lock()
 	require.Equal(t, []string{"discarded"}, metrics.reasons)
 	metrics.mu.Unlock()

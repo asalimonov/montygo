@@ -1,15 +1,15 @@
-package monty_test
+package montygo_test
 
 import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 func TestBasic(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b monty.Backend) {
+	eachBackend(t, func(t *testing.T, b montygo.Backend) {
 		t.Run("simple expression", func(t *testing.T) {
 			require.Equal(t, int64(3), mustRun(t, b, "1 + 2", runOptions{}))
 		})
@@ -24,7 +24,7 @@ func TestBasic(t *testing.T) {
 
 		t.Run("syntax error", func(t *testing.T) {
 			_, err := run(t, b, "def", runOptions{})
-			var syntaxErr *monty.SyntaxError
+			var syntaxErr *montygo.SyntaxError
 			require.ErrorAs(t, err, &syntaxErr)
 			require.Contains(t, err.Error(), "SyntaxError")
 		})
@@ -50,7 +50,7 @@ add(3, 4)
 
 		t.Run("session state persists across feeds", func(t *testing.T) {
 			ctx := testCtx(t)
-			session := newSession(t, b, monty.CheckoutOptions{})
+			session := newSession(t, b, montygo.CheckoutOptions{})
 			v, err := session.FeedRun(ctx, "x = 5", nil)
 			require.NoError(t, err)
 			require.Nil(t, v)
@@ -61,8 +61,8 @@ add(3, 4)
 
 		t.Run("sessions are isolated from each other", func(t *testing.T) {
 			ctx := testCtx(t)
-			a := newSession(t, b, monty.CheckoutOptions{})
-			other := newSession(t, b, monty.CheckoutOptions{})
+			a := newSession(t, b, montygo.CheckoutOptions{})
+			other := newSession(t, b, montygo.CheckoutOptions{})
 			_, err := a.FeedRun(ctx, "secret = 42", nil)
 			require.NoError(t, err)
 			_, err = other.FeedRun(ctx, "secret", nil)
@@ -72,9 +72,9 @@ add(3, 4)
 		t.Run("await using closes the session", func(t *testing.T) {
 			ctx := testCtx(t)
 			var result any
-			var session *monty.Session
+			var session *montygo.Session
 			func() {
-				s, err := sharedPool(t, b).Checkout(ctx, monty.CheckoutOptions{})
+				s, err := sharedPool(t, b).Checkout(ctx, montygo.CheckoutOptions{})
 				require.NoError(t, err)
 				session = s
 				defer func() { require.NoError(t, session.Close(ctx)) }()
@@ -83,7 +83,7 @@ add(3, 4)
 			}()
 			require.Equal(t, int64(42), result)
 			_, err := session.FeedRun(ctx, "21 * 2", nil)
-			require.ErrorIs(t, err, monty.ErrSessionClosed)
+			require.ErrorIs(t, err, montygo.ErrSessionClosed)
 		})
 	})
 }

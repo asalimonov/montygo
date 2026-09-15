@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/examples/internal/montyenv"
 )
 
@@ -75,13 +75,13 @@ var upstreamContinuationCases = []struct {
 
 func TestContinuationModeMatchesUpstream(t *testing.T) {
 	ctx := t.Context()
-	pool, err := monty.New(ctx, montyenv.PoolOptions())
+	pool, err := montygo.New(ctx, montyenv.PoolOptions())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pool.Close(context.Background()) })
-	session, err := pool.Checkout(ctx, monty.CheckoutOptions{})
+	session, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = session.Close(context.Background()) })
-	quiet := &monty.FeedOptions{Print: monty.PrintFunc(func(monty.Stream, string) error { return nil })}
+	quiet := &montygo.FeedOptions{Print: montygo.PrintFunc(func(montygo.Stream, string) error { return nil })}
 	for _, tc := range upstreamContinuationCases {
 		t.Run(fmt.Sprintf("%q", tc.source), func(t *testing.T) {
 			_, err := session.FeedRun(ctx, tc.source, quiet)

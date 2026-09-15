@@ -1,7 +1,13 @@
 # Telemetry
 
-- `monty.Instrument` or a `monty.Instrumentation` installs OpenTelemetry components process-wide. Pools created afterwards record into them. Supplying components opts in to recording fed code, inputs, call arguments, results, exceptions and print output.
+- `montygo.Instrument` or a `montygo.Instrumentation` installs OpenTelemetry components process-wide. Pools created afterwards record into them. Supplying components opts in to recording fed code, inputs, call arguments, results, exceptions and print output.
 - Each signal fails independently: a tracer, meter or logger that panics or errors turns off its own signal only. Uninstalling drops open spans without ending them.
+
+## Recorder per pool
+
+- Every pool records into one `Recorder`, resolved when the pool is created. `Options.Telemetry` and `WebSocketOptions.Telemetry` select it: nil uses the process-wide installation (`Global`) at that moment; a value with at least one component builds a recorder owned by the pool; a value with no components records nothing, whatever is installed.
+- Installing or uninstalling process-wide components after a pool exists does not affect that pool. Uninstalling closes the global recorder, so pools that resolved to it stop recording.
+- The instrumentation scope version is `BindingVersion()`.
 
 ## Protocol mirror
 
@@ -32,6 +38,8 @@
 | `monty.pool.workers.live` | up/down counter | `{worker}` | none |
 | `monty.pool.workers.idle` | up/down counter | `{worker}` | none |
 | `monty.pool.workers.suspended` | up/down counter | `{worker}` | none |
+| `monty.pool.workers.retiring` | up/down counter | `{worker}` | none; workers handed to a reaper that still count toward capacity |
+| `monty.pool.pending_frame_bytes` | up/down counter | `By` | none; bytes of worker frames buffered by the parent, subprocess and wasm only |
 | `monty.pool.checkout.wait` | histogram | `s` | `outcome`: idle, spawned, waited, exhausted, error |
 | `monty.pool.worker.terminated` | counter | `{worker}` | `reason` |
 | `monty.pool.session.duration` | histogram | `s` | `outcome`: ok, error, abandoned |
@@ -44,13 +52,13 @@
 | `monty.print.bytes` | counter | `By` | `stream` |
 | `monty.wire.frame.bytes` | histogram | `By` | `direction` |
 
-- Pool-level instruments come from the pool, per-turn instruments from the mirror.
+- Pool-level instruments come from the pool, per-turn instruments from the mirror. `monty.pool.workers.retiring` and `monty.pool.pending_frame_bytes` are montygo additions; the others match `monty-pool`.
 - Attribute values are closed sets. Sandbox-chosen names never become metric attributes; only the protocol's own OS call names do.
 
 ## Callback context
 
 - Host callbacks receive the caller's context with the checkout's innermost open span attached. That context reaches `Function.Call`, `OSHandler`, futures started from them, and `ContextPrintTarget`.
-- Caller values survive, so request-scoped values and baggage reach callbacks.
+- Caller values survive, so request-scoped values and baggage reach callbacks. Cancellation follows the feed context, so `Interrupt`, `CloseNow` and a cancelled caller context end the callback's context; see `session.md`.
 - A snapshot resumed with another context delivers that context's values.
 - When spans are not recorded, callbacks receive the caller's context unchanged.
 

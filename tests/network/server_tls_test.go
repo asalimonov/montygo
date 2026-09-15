@@ -14,7 +14,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 // tlsProxy terminates TLS in the test process and forwards to the server container.
@@ -35,14 +35,14 @@ func TestTLS_WSSThroughReverseProxy(t *testing.T) {
 	ctx := testCtx(t)
 	wss, tlsConfig := tlsProxy(t, s)
 
-	p := s.NewPool(monty.WebSocketOptions{URL: wss, TLSConfig: tlsConfig})
-	session := s.Checkout(ctx, p, monty.CheckoutOptions{})
+	p := s.NewPool(montygo.WebSocketOptions{URL: wss, TLSConfig: tlsConfig})
+	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	v, err := session.FeedRun(ctx, "x = 20\nx + 22", nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(42), v)
 
-	untrusted := s.NewPool(monty.WebSocketOptions{URL: wss})
-	_, err = untrusted.Checkout(ctx, monty.CheckoutOptions{})
+	untrusted := s.NewPool(montygo.WebSocketOptions{URL: wss})
+	_, err = untrusted.Checkout(ctx, montygo.CheckoutOptions{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "certificate")
 }
@@ -53,8 +53,8 @@ func TestTLS_HealthCheckOverTLS(t *testing.T) {
 	ctx := testCtx(t)
 	wss, tlsConfig := tlsProxy(t, s)
 
-	require.NoError(t, monty.CheckWebSocketHealth(ctx, monty.WebSocketOptions{URL: wss, TLSConfig: tlsConfig}))
-	require.Error(t, monty.CheckWebSocketHealth(ctx, monty.WebSocketOptions{URL: wss}))
+	require.NoError(t, montygo.CheckWebSocketHealth(ctx, montygo.WebSocketOptions{URL: wss, TLSConfig: tlsConfig}))
+	require.Error(t, montygo.CheckWebSocketHealth(ctx, montygo.WebSocketOptions{URL: wss}))
 }
 
 func TestTLS_DialContextIsUsed(t *testing.T) {
@@ -63,13 +63,13 @@ func TestTLS_DialContextIsUsed(t *testing.T) {
 	ctx := testCtx(t)
 	var dials atomic.Int32
 	dialer := &net.Dialer{}
-	p := s.NewPool(monty.WebSocketOptions{
+	p := s.NewPool(montygo.WebSocketOptions{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			dials.Add(1)
 			return dialer.DialContext(ctx, network, addr)
 		},
 	})
-	session := s.Checkout(ctx, p, monty.CheckoutOptions{})
+	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	_, err := session.FeedRun(ctx, "1", nil)
 	require.NoError(t, err)
 	require.Positive(t, dials.Load())

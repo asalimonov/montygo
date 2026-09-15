@@ -19,6 +19,7 @@ type suspension struct {
 // TurnMetrics mirrors one checkout's protocol turns into per-turn metrics.
 // Only protocol-fixed labels become attributes, never a sandbox-chosen name.
 type TurnMetrics struct {
+	r         *Recorder
 	feedStart time.Time
 	feed      bool
 	runActive bool
@@ -32,7 +33,7 @@ var printStreams = [...]string{"stdout", "stderr", "unspecified"}
 
 // Sent records a request that reached the wire.
 func (t *TurnMetrics) Sent(req wire.Request, frameLen int) {
-	record(FrameBytes, float64(frameLen), attribute.String("direction", "sent"))
+	t.r.Record(FrameBytes, float64(frameLen), attribute.String("direction", "sent"))
 	now := time.Now()
 	switch r := req.(type) {
 	case wire.Configure:
@@ -77,7 +78,7 @@ func (t *TurnMetrics) Sent(req wire.Request, frameLen int) {
 
 // Received records a decoded event.
 func (t *TurnMetrics) Received(ev *wire.Event, frameLen int) {
-	record(FrameBytes, float64(frameLen), attribute.String("direction", "received"))
+	t.r.Record(FrameBytes, float64(frameLen), attribute.String("direction", "received"))
 	if t.turn == "load" && ev.TotalExecutionMicros > t.reported {
 		t.reported = ev.TotalExecutionMicros
 	}
@@ -96,7 +97,7 @@ func (t *TurnMetrics) Received(ev *wire.Event, frameLen int) {
 		}
 		for i, n := range totals {
 			if n > 0 {
-				record(PrintBytes, float64(n), attribute.String("stream", printStreams[i]))
+				t.r.Record(PrintBytes, float64(n), attribute.String("stream", printStreams[i]))
 			}
 		}
 	case wire.EventFunctionCall:
@@ -128,7 +129,7 @@ func (t *TurnMetrics) Received(ev *wire.Event, frameLen int) {
 	case wire.EventTypingError:
 		t.endRun("typing_error", ev)
 	case wire.EventDumpResult:
-		record(SnapshotBytes, float64(len(ev.State)), attribute.String("op", "dump"))
+		t.r.Record(SnapshotBytes, float64(len(ev.State)), attribute.String("op", "dump"))
 		t.endTurn("ok")
 	case wire.EventOk:
 		t.endTurn("ok")
@@ -147,11 +148,11 @@ func (t *TurnMetrics) suspend(s *suspension) {
 		t.endTurn("ok")
 	}
 	t.runActive = true
-	record(Suspensions, 1, attribute.String("kind", s.kind))
+	t.r.Record(Suspensions, 1, attribute.String("kind", s.kind))
 	t.abandonPending()
 	s.start = time.Now()
 	t.pending = s
-	record(SuspendedWorkers, 1)
+	t.r.Record(SuspendedWorkers, 1)
 }
 
 func (t *TurnMetrics) closeSuspension(outcome string) {
@@ -163,7 +164,7 @@ func (t *TurnMetrics) closeSuspension(outcome string) {
 	if s.kind == "os" {
 		attrs = append(attrs, attribute.String("function", s.function))
 	}
-	record(ExtCallDuration, time.Since(s.start).Seconds(), attrs...)
+	t.r.Record(ExtCallDuration, time.Since(s.start).Seconds(), attrs...)
 }
 
 func (t *TurnMetrics) abandonPending() { t.takePending() }
@@ -172,7 +173,7 @@ func (t *TurnMetrics) takePending() *suspension {
 	s := t.pending
 	t.pending = nil
 	if s != nil {
-		record(SuspendedWorkers, -1)
+		t.r.Record(SuspendedWorkers, -1)
 	}
 	return s
 }
@@ -183,14 +184,14 @@ func (t *TurnMetrics) endRun(outcome string, ev *wire.Event) {
 	t.endTurn(outcome)
 	if t.feed {
 		t.feed = false
-		record(RunDuration, time.Since(t.feedStart).Seconds(), attribute.String("outcome", outcome))
+		t.r.Record(RunDuration, time.Since(t.feedStart).Seconds(), attribute.String("outcome", outcome))
 	}
 	var delta uint64
 	if total := ev.TotalExecutionMicros; total > t.reported {
 		delta = total - t.reported
 		t.reported = total
 	}
-	record(RunExecution, (time.Duration(delta) * time.Microsecond).Seconds())
+	t.r.Record(RunExecution, (time.Duration(delta) * time.Microsecond).Seconds())
 }
 
 func (t *TurnMetrics) endTerminal(outcome string, ev *wire.Event) {
@@ -203,7 +204,7 @@ func (t *TurnMetrics) endTerminal(outcome string, ev *wire.Event) {
 
 func (t *TurnMetrics) endTurn(outcome string) {
 	if t.turn != "" {
-		record(TurnDuration, time.Since(t.turnStart).Seconds(), attribute.String("turn", t.turn), attribute.String("outcome", outcome))
+		t.r.Record(TurnDuration, time.Since(t.turnStart).Seconds(), attribute.String("turn", t.turn), attribute.String("outcome", outcome))
 		t.turn = ""
 	}
 }

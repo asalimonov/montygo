@@ -2,7 +2,7 @@
 
 montygo is a Go parent for [Monty](https://github.com/pydantic/monty) workers. It runs untrusted Python in a child process, inside a WebAssembly sandbox, or on a remote host, never as host code. It has no native in-process interpreter and no cgo.
 
-The public surface is two packages: `monty` (pools, sessions, snapshots, host objects, mounts, telemetry) and `osaccess` (in-memory OS helpers). Everything else is internal.
+The public surface is two packages: `montygo` (pools, sessions, snapshots, host objects, mounts, telemetry) and `osaccess` (in-memory OS helpers). Everything else is internal.
 
 The repository also builds `monty-server`, a WebSocket server for Monty workers, and its Docker image.
 
@@ -10,7 +10,7 @@ The repository also builds `monty-server`, a WebSocket server for Monty workers,
 
 | Artifact | Built by | Contents |
 |---|---|---|
-| Go module `github.com/asalimonov/montygo` | `go build` | packages `monty` and `osaccess`, internal packages, the embedded wasm worker |
+| Go module `github.com/asalimonov/montygo` | `go build` | packages `montygo` and `osaccess`, internal packages, the embedded wasm worker |
 | `internal/wasmblob/monty.wasm.zst` | `make build-wasm` | the worker for `wasm32-wasip1`, zstd-compressed and checked in |
 | `examples` module | `make examples` | ports of the upstream examples and the REPL |
 | `monty-server` binary | `cargo build` in `server/` | WebSocket server that runs one `monty subprocess` per session |
@@ -38,7 +38,7 @@ The repository also builds `monty-server`, a WebSocket server for Monty workers,
 | testcontainers-go | `tests/network` | Starts, signals, recreates and removes server containers from Go tests. |
 | testify | tests | Assertions in the ported upstream suites. |
 
-Upstream is pinned in several places, which MUST move together: `proto/PROTO_REV`, `monty.UpstreamRev`, the git revisions in `worker-wasm/Cargo.toml` and `server/Cargo.toml`, `MONTY_REV` in `server/src/version.rs`, both Dockerfiles and `.github/workflows/ci.yml`. `CLAUDE.md` lists every place.
+Upstream is pinned in several places, which MUST move together: `proto/PROTO_REV` (the full SHA, the source of truth), `montygo.UpstreamRev`, the git revisions in `worker-wasm/Cargo.toml` and `server/Cargo.toml`, `MONTY_REV` in `server/src/version.rs`, both Dockerfiles and `.github/workflows/ci.yml`. `make check-pins` verifies every copy. The binding's own version comes from git tags through `scripts/version.sh`; see `versioning.md`.
 
 ## Process model
 
@@ -47,7 +47,7 @@ Upstream is pinned in several places, which MUST move together: `proto/PROTO_REV
 ┌─────────────────────────────────────────────┐
 │ application                                 │
 │   │                                         │
-│ package monty   Pool · Session · Snapshot   │
+│ package montygo Pool · Session · Snapshot   │
 │   │             answerer · host objects     │
 │ internal/pool   worker pool · turn engine   │
 │   │             mounts · telemetry observer │
@@ -120,7 +120,7 @@ See `protocol.md` for the codec and `pool.md` for deadlines and failure classifi
 - **Pool** (`internal/pool`) owns worker lifecycle and the turn engine. The engine enforces the pending suspension, deadlines, the suspension budget and failure classification. It services mount calls and feeds the telemetry observer.
 - **Mounts** (`internal/mountfs`) is a port of `monty-fs`. It serves read-only, read-write and overlay mounts from the host side. See `mounts.md`.
 - **Telemetry** (`internal/telemetry`) observes each checkout's requests and events and records spans, log records and metrics. See `telemetry.md`.
-- **Session** (package `monty`) is the Go analogue of `MontySession` in `@pydantic/monty`. It converts values in both directions, answers suspensions and exposes snapshots. See `session.md`.
+- **Session** (package `montygo`) is the Go analogue of `MontySession` in `@pydantic/monty`. It converts values in both directions, answers suspensions and exposes snapshots. See `session.md`.
 
 ### Request flow of `FeedRun`
 
@@ -135,12 +135,13 @@ See `protocol.md` for the codec and `pool.md` for deadlines and failure classifi
 
 - A pool is safe for concurrent use. Checkouts beyond `MaxProcesses` wait up to `CheckoutTimeout`.
 - A session holds its mutex for a whole call, host callbacks included. A callback MUST NOT call back into the same session.
-- Async host functions return a `*monty.Future` that settles on its own goroutine. The session collects settled futures at a `ResolveFutures` suspension, or awaits one directly when the worker allows an eager await.
-- Every blocking call takes a `context.Context`. Cancelling it mid-turn ends the worker (a kill, or a close frame for WebSocket) and poisons the session.
+- Async host functions return a `*montygo.Future` that settles on its own goroutine. The session collects settled futures at a `ResolveFutures` suspension, or awaits one directly when the worker allows an eager await.
+- Every blocking call takes a `context.Context`. Cancelling it while Python executes ends the worker (a kill, or a close frame for WebSocket) and poisons the session. Cancelling it while the worker waits on a host call aborts the feed with `KeyboardInterrupt` and keeps the session. `Session.Interrupt` and `Session.CloseNow` work from any goroutine; `Session.Done` and `Err` report a lost session. See `session.md`.
+- `Pool.Shutdown` waits for open sessions and retiring workers; `Pool.Close` retires idle workers only. See `pool.md`.
 
 ## Architectural constraints and principles
 
-- **The worker is untrusted.** Every frame is size-checked (256 MiB), and decoding is budgeted (1 GiB resident per frame) and validated. Values sent to the worker are depth-checked. A limit the worker reports can tighten the parent's view but never loosen it.
+- **The worker is untrusted.** Every frame is size-checked (256 MiB), and decoding is budgeted (1 GiB resident per frame) and validated. Frames queued host-side are bounded by `MaxPendingBytes`. Values sent to the worker are depth-checked. A limit the worker reports can tighten the parent's view but never loosen it.
 - **Isolation over speed.** Python runs in a separate process or a WebAssembly sandbox, never as host code. A crash, memory breach, protocol violation or deadline ends that worker. Its state is never reused, and the session is poisoned. `monty-server` likewise gives every session a fresh worker process.
 - **The worker's clock is the only execution clock.** Execution time comes from the worker's reported total, which only ratchets up. Parent deadlines are backstops: `RequestTimeout`, and the remaining `max_duration` plus grace.
 - **No ambient authority for sandboxed code.** Native workers start with an empty environment. The worker never receives host paths: filesystem access happens in the parent, through mounts bound to an `os.Root` descriptor, or through an OS handler the host supplies. Errors crossing into the sandbox never contain host paths.
@@ -156,8 +157,9 @@ See `protocol.md` for the codec and `pool.md` for deadlines and failure classifi
 | Document | Topic |
 |---|---|
 | `protocol.md` | framing, codec, value depth, exception rendering |
-| `pool.md` | pool lifecycle, deadlines, suspension budget, failure classification |
-| `session.md` | drive loop, print, value conversion, host objects |
+| `pool.md` | pool lifecycle, accounting, shutdown, frame byte bound, deadlines, suspension budget, failure classification |
+| `session.md` | lifecycle, interrupt, drive loop, print, value conversion, host objects, host registry |
+| `versioning.md` | `MontyVersion`, `BindingVersion`, `scripts/version.sh`, pins |
 | `mounts.md` | host filesystem mounts |
 | `wasm.md` | embedded wasm worker |
 | `websocket.md` | remote workers |

@@ -1,4 +1,4 @@
-package monty
+package montygo
 
 import (
 	"context"
@@ -29,9 +29,17 @@ type snapshotDriver struct {
 func (d *snapshotDriver) advance(ev *wire.Event, err error) (Snapshot, error) {
 	s := d.s
 	if err != nil {
+		if s.life.isClosing() {
+			return nil, ErrSessionClosed
+		}
 		var perr *pool.Error
-		if errors.As(err, &perr) && (perr.Kind == pool.KindRuntime || perr.Kind == pool.KindTyping) && d.pt.failure != nil {
-			return nil, d.pt.failure
+		if errors.As(err, &perr) && (perr.Kind == pool.KindRuntime || perr.Kind == pool.KindTyping) {
+			if ferr := d.pt.finish(); ferr != nil {
+				return nil, ferr
+			}
+			if d.pt.failure != nil {
+				return nil, d.pt.failure
+			}
 		}
 		var hf *hostFailure
 		if errors.As(err, &hf) {
@@ -40,6 +48,9 @@ func (d *snapshotDriver) advance(ev *wire.Event, err error) (Snapshot, error) {
 		return nil, s.mapError(err)
 	}
 	if ev.Kind == wire.EventComplete {
+		if ferr := d.pt.finish(); ferr != nil {
+			return nil, ferr
+		}
 		if d.pt.failure != nil {
 			return nil, d.pt.failure
 		}
@@ -73,26 +84,35 @@ func (d *snapshotDriver) restoreArgs(args []any) []any {
 
 func (d *snapshotDriver) lock() error {
 	d.s.mu.Lock()
-	if d.s.closed {
+	if d.s.closed || d.s.life.isClosing() {
 		d.s.mu.Unlock()
 		return ErrSessionClosed
 	}
 	return nil
 }
 
-func (d *snapshotDriver) run(fn func() (*wire.Event, error)) (Snapshot, error) {
+func (d *snapshotDriver) run(ctx context.Context, fn func() (*wire.Event, error)) (Snapshot, error) {
 	if err := d.lock(); err != nil {
 		return nil, err
 	}
 	defer d.s.mu.Unlock()
-	if d.s.broken != nil {
-		return nil, d.s.broken
+	if err := d.s.ensureUsable(); err != nil {
+		return nil, err
 	}
+	d.s.life.mu.Lock()
+	aborted := d.s.life.aborted
+	d.s.life.aborted = nil
+	d.s.life.mu.Unlock()
+	if aborted != nil {
+		return nil, aborted
+	}
+	d.s.life.beginFeed(ctx)
+	defer d.s.life.endFeed()
 	return d.advance(fn())
 }
 
 func (d *snapshotDriver) resume(ctx context.Context, fn func(ctx context.Context) (*wire.Event, error)) (Snapshot, error) {
-	return d.run(func() (*wire.Event, error) {
+	return d.run(ctx, func() (*wire.Event, error) {
 		d.pt.ctx = ctx
 		return fn(ctx)
 	})
@@ -120,7 +140,7 @@ func (d *snapshotDriver) dump(ctx context.Context) ([]byte, error) {
 }
 
 func (d *snapshotDriver) resumeAuto(ctx context.Context, ev *wire.Event) (Snapshot, error) {
-	return d.run(func() (*wire.Event, error) {
+	return d.run(ctx, func() (*wire.Event, error) {
 		d.pt.ctx = ctx
 		return d.ans.answer(ctx, ev)
 	})

@@ -11,9 +11,9 @@ Each directory is a `package main` whose sandbox code is byte-identical to upstr
 | `classes/convert_value` | `classes/convert_value.py` | `ConvertValue` wraps derived host objects as they cross |
 | `classes/class_type` | `classes/class_type.py` | Sandbox instantiates a host class only when `Init` is granted |
 | `classes/class_type_members` | `classes/class_type_members.py` | Class constants and class-level functions without construction |
-| `classes/sandbox_classes` | `classes/sandbox_classes.py` | Sandbox-defined dataclass returned as `*monty.ClassProxy` |
+| `classes/sandbox_classes` | `classes/sandbox_classes.py` | Sandbox-defined dataclass returned as `*montygo.ClassProxy` |
 | `classes/sandbox_round_trip` | `classes/sandbox_round_trip.py` | A proxy passed back resolves to the original sandbox object until freed |
-| `classes/async_methods` | `classes/async_methods.py` | Host method returning `*monty.Future`, awaited in the sandbox |
+| `classes/async_methods` | `classes/async_methods.py` | Host method returning `*montygo.Future`, awaited in the sandbox |
 | `expense_analysis` | `expense_analysis/main.py`, `data.py` | Type-checked analysis code calling async host tools with keyword arguments |
 | `sql_playground` | `sql_playground/main.py`, `external_functions.py` | SQL over CSV, JSON and sentiment tools reading a virtual filesystem (`osaccess`) |
 | `repl` | `monty` CLI REPL (`crates/monty-runtime/src/run.rs`, `crates/monty/src/repl.rs`) | Interactive REPL: one persistent session, CPython-style multi-line input, Ctrl-C, mounts and resource limits |

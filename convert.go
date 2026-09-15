@@ -1,4 +1,4 @@
-package monty
+package montygo
 
 import (
 	"fmt"
@@ -218,6 +218,53 @@ func prepareInner(v any, store *instanceStore, depth int) (any, error) {
 		return rv.String(), nil
 	}
 	return nil, &ConversionError{Message: fmt.Sprintf("Cannot convert Go %T to Monty value", v)}
+}
+
+// AsNamedTuple converts a struct to a named tuple of its exported fields, in
+// declaration order, named by their `monty` tags or snake_case names.
+func AsNamedTuple(v any) (NamedTuple, error) {
+	rv := reflect.ValueOf(v)
+	for rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return NamedTuple{}, &ConversionError{Message: "AsNamedTuple expects a struct, got nil"}
+		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() != reflect.Struct {
+		return NamedTuple{}, &ConversionError{Message: fmt.Sprintf("AsNamedTuple expects a struct, got %T", v)}
+	}
+	members := memberIndex(rv.Type())
+	out := NamedTuple{TypeName: rv.Type().Name(), FieldNames: append([]string(nil), members.fieldNames...)}
+	if out.TypeName == "" {
+		out.TypeName = "NamedTuple"
+	}
+	out.Values = make([]any, len(members.fieldNames))
+	for i, name := range members.fieldNames {
+		out.Values[i] = rv.FieldByIndex(members.fields[name]).Interface()
+	}
+	return out, nil
+}
+
+// NewNamedTuple builds a named tuple from field pairs; keys MUST be unique non-empty strings.
+func NewNamedTuple(typeName string, pairs ...Pair) (NamedTuple, error) {
+	if typeName == "" {
+		return NamedTuple{}, &ValueError{Message: "NewNamedTuple: type name must not be empty"}
+	}
+	out := NamedTuple{TypeName: typeName, FieldNames: make([]string, 0, len(pairs)), Values: make([]any, 0, len(pairs))}
+	seen := map[string]struct{}{}
+	for _, p := range pairs {
+		name, ok := p.Key.(string)
+		if !ok || name == "" {
+			return NamedTuple{}, &ValueError{Message: fmt.Sprintf("NewNamedTuple: field name must be a non-empty string, got %v", p.Key)}
+		}
+		if _, dup := seen[name]; dup {
+			return NamedTuple{}, &ValueError{Message: fmt.Sprintf("NewNamedTuple: duplicate field %q", name)}
+		}
+		seen[name] = struct{}{}
+		out.FieldNames = append(out.FieldNames, name)
+		out.Values = append(out.Values, p.Value)
+	}
+	return out, nil
 }
 
 func wrapHint(t reflect.Type) error {

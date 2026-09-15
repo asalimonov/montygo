@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/osaccess"
 )
 
@@ -16,7 +16,7 @@ import (
 // compat test runs only against OSAccess, once per backend.
 type montyRunner struct {
 	t       *testing.T
-	b       monty.Backend
+	b       montygo.Backend
 	files   []*osaccess.MemoryFile
 	environ map[string]string
 	fs      *osaccess.OSAccess
@@ -97,7 +97,7 @@ func pathParts(p string) []string {
 
 func compatTest(t *testing.T, name string, fn func(t *testing.T, r *montyRunner)) {
 	t.Helper()
-	montyTest(t, name, func(t *testing.T, b monty.Backend) {
+	montyTest(t, name, func(t *testing.T, b montygo.Backend) {
 		fn(t, &montyRunner{t: t, b: b, environ: map[string]string{}})
 	})
 }
@@ -179,7 +179,7 @@ func TestOSAccessCompat(t *testing.T) {
 		require.True(t, ok)
 		names := make([]string, len(result))
 		for i, p := range result {
-			names[i] = path.Base(string(p.(monty.Path)))
+			names[i] = path.Base(string(p.(montygo.Path)))
 		}
 		sort.Strings(names)
 		require.Equal(t, []string{"a.txt", "b.txt", "subdir"}, names)
@@ -275,7 +275,7 @@ func TestOSAccessCompat(t *testing.T) {
 
 	compatTest(t, "test_write_text_new_file", func(t *testing.T, r *montyRunner) {
 		result := r.mustRunCode("\ncount = Path('/new_file.txt').write_text('hello world')\n(count, Path('/new_file.txt').read_text())\n")
-		require.Equal(t, monty.Tuple{int64(11), "hello world"}, result)
+		require.Equal(t, montygo.Tuple{int64(11), "hello world"}, result)
 	})
 
 	compatTest(t, "test_write_text_overwrite", func(t *testing.T, r *montyRunner) {
@@ -288,7 +288,7 @@ func TestOSAccessCompat(t *testing.T) {
 count = Path('/new_binary.bin').write_bytes(b'\x00\x01\x02')
 (count, Path('/new_binary.bin').read_bytes())
 `)
-		require.Equal(t, monty.Tuple{int64(3), []byte{0, 1, 2}}, result)
+		require.Equal(t, montygo.Tuple{int64(3), []byte{0, 1, 2}}, result)
 	})
 
 	compatTest(t, "test_write_text_parent_not_found", func(t *testing.T, r *montyRunner) {

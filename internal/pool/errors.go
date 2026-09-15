@@ -42,6 +42,9 @@ type Error struct {
 	Diagnostics string
 	Dump        []byte
 	HasDump     bool
+	// CloseCode and CloseReason carry a WebSocket close frame; CloseCode is 0 without one.
+	CloseCode   int
+	CloseReason string
 	// WorkerLost is set when the failure took the worker with it.
 	WorkerLost bool
 	// PreSend is set when the request was rejected before any bytes were written.
@@ -82,7 +85,14 @@ func (e *Error) Error() string {
 	case KindFinished:
 		return "this checkout has already been finished"
 	case KindDisconnected:
-		return "monty worker connection closed while " + e.Message
+		s := "monty worker connection closed while " + e.Message
+		if e.CloseCode != 0 {
+			s += ": closed by server (" + strconv.Itoa(e.CloseCode) + ")"
+			if e.CloseReason != "" {
+				s += ": " + e.CloseReason
+			}
+		}
+		return s
 	case KindShutdown:
 		if e.HasDump {
 			return "monty server is shutting down; the request did not run (session dump attached)"

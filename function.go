@@ -1,4 +1,4 @@
-package monty
+package montygo
 
 import (
 	"context"

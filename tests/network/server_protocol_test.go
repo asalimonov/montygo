@@ -9,26 +9,26 @@ import (
 	"github.com/coder/websocket"
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 func TestProtocol_FeedRunAndIsolation(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t)
 	ctx := testCtx(t)
-	p := s.NewPool(monty.WebSocketOptions{})
+	p := s.NewPool(montygo.WebSocketOptions{})
 
-	first := s.Checkout(ctx, p, monty.CheckoutOptions{})
+	first := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	v, err := first.FeedRun(ctx, "leaked = 123\nleaked + 1", nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(124), v)
 	require.NoError(t, first.Close(ctx))
 
-	second := s.Checkout(ctx, p, monty.CheckoutOptions{})
+	second := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	_, err = second.FeedRun(ctx, "leaked", nil)
-	var re *monty.RuntimeError
+	var re *montygo.RuntimeError
 	require.ErrorAs(t, err, &re)
-	require.Equal(t, "name 'leaked' is not defined", re.Display(monty.DisplayMsg))
+	require.Equal(t, "name 'leaked' is not defined", re.Display(montygo.DisplayMsg))
 }
 
 func TestProtocol_VersionSkewIsFatal(t *testing.T) {
@@ -90,10 +90,10 @@ func TestProtocol_LargeFrameAccepted(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--max-memory-mib", "512"))
 	ctx := testCtx(t)
-	p := s.NewPool(monty.WebSocketOptions{})
-	session := s.Checkout(ctx, p, monty.CheckoutOptions{})
+	p := s.NewPool(montygo.WebSocketOptions{})
+	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 
-	v, err := session.FeedRun(ctx, "len(x)", &monty.FeedOptions{
+	v, err := session.FeedRun(ctx, "len(x)", &montygo.FeedOptions{
 		Inputs: map[string]any{"x": strings.Repeat("a", 16*1024*1024)},
 	})
 	require.NoError(t, err)
@@ -104,15 +104,15 @@ func TestProtocol_MemoryKillIsMemoryError(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t)
 	ctx := testCtx(t)
-	p := s.NewPool(monty.WebSocketOptions{})
-	session := s.Checkout(ctx, p, monty.CheckoutOptions{Limits: &monty.ResourceLimits{MaxMemory: 1024}})
+	p := s.NewPool(montygo.WebSocketOptions{})
+	session := s.Checkout(ctx, p, montygo.CheckoutOptions{Limits: &montygo.ResourceLimits{MaxMemory: 1024}})
 
 	_, err := session.FeedRun(ctx, "# "+strings.Repeat("a", 16*1024*1024), nil)
-	var re *monty.RuntimeError
+	var re *montygo.RuntimeError
 	require.ErrorAs(t, err, &re)
 	require.Equal(t, "MemoryError: the worker exceeded its memory limit and was terminated", re.Error())
 
-	next := s.Checkout(ctx, p, monty.CheckoutOptions{})
+	next := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	v, err := next.FeedRun(ctx, "1 + 1", nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(2), v)
@@ -127,8 +127,8 @@ func TestProtocol_RemoteDialByContainerIP(t *testing.T) {
 	ctx := testCtx(t)
 	ip, err := s.Unit.ContainerIP(ctx)
 	require.NoError(t, err)
-	p := s.NewPool(monty.WebSocketOptions{URL: "ws://" + ip + ":8000/"})
-	session := s.Checkout(ctx, p, monty.CheckoutOptions{})
+	p := s.NewPool(montygo.WebSocketOptions{URL: "ws://" + ip + ":8000/"})
+	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	v, err := session.FeedRun(ctx, "6 * 7", nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(42), v)

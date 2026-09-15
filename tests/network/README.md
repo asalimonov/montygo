@@ -81,9 +81,9 @@ MONTYGO_NETWORK_TESTS=1 MONTYGO_TEST_IMAGE=monty-server:0.0.23-f8acf4fa \
   - `WithArgs(flags...)` appends server flags;
   - `WithEnv(key, value)` sets a container variable.
 - Clients:
-  - `s.NewPool(monty.WebSocketOptions{...})` fills `URL` and a 30 s `RequestTimeout`, and closes the pool at test end;
+  - `s.NewPool(montygo.WebSocketOptions{...})` fills `URL` and a 30 s `RequestTimeout`, and closes the pool at test end;
   - `s.Checkout(ctx, pool, opts)` closes the session at test end;
-  - `s.WSOptions()` returns options for `monty.CheckWebSocketHealth`;
+  - `s.WSOptions()` returns options for `montygo.CheckWebSocketHealth`;
   - `s.RawDial(ctx, header)` with `sendRequest`, `readEvent`, `rawConfigured` and `requireClose` from `wire.go` speaks raw protocol frames.
 - HTTP: `s.Get(ctx, path)` and `s.Metrics(ctx)`.
 - Metrics:

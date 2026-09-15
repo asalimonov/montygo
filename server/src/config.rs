@@ -11,7 +11,7 @@ use crate::{envelope::DumpKeys, limits::Ceilings};
 #[derive(clap::Parser, Debug, Clone)]
 #[command(
     name = "monty-server",
-    version,
+    version = crate::version::SERVER_VERSION,
     about = "WebSocket server hosting Monty sandbox workers"
 )]
 pub struct Cli {

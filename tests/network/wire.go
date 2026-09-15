@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/montypb"
 )
 
@@ -59,7 +59,7 @@ func rawConfigured(t *testing.T, ctx context.Context, s *TestServer) *websocket.
 	c, _, err := s.RawDial(ctx, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.CloseNow() })
-	require.NoError(t, sendRequest(ctx, c, configureRequest(monty.ProtocolVersion)))
+	require.NoError(t, sendRequest(ctx, c, configureRequest(montygo.ProtocolVersion)))
 	ev, err := readEvent(ctx, c)
 	require.NoError(t, err)
 	require.NotNil(t, ev.GetOk(), "expected Ok, got %v", ev)

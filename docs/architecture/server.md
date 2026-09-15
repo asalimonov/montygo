@@ -10,6 +10,7 @@ The crate lives in `server/`. It is built on `monty_pool`: every request after `
 client ── ws:// ──▶ axum router (tokio)
                      ├─ GET /          info page
                      ├─ GET /health    readiness
+                     ├─ GET /info      versions and limits, JSON
                      ├─ GET /metrics   OpenMetrics
                      └─ WS  /          admission ─▶ session task ─┬─ reader task
                                                                    ├─ writer task
@@ -24,6 +25,7 @@ client ── ws:// ──▶ axum router (tokio)
 - Each upgraded connection runs a session task, a reader task and a writer task. The writer owns the socket and drains a queue of 16 outbound messages.
 - stdout carries one line, `ws://<bound address>/`, once the listener is bound. stderr carries logfmt lines `ts_ms=<ms> level=<level> event=<event> key=value …`. No tracing subscriber is installed.
 - Startup order: parse flags, validate them, install OTLP exporters, build the tokio runtime, build the pool, bind, print the URL, watch signals, serve.
+- `SERVER_VERSION` is stamped at compile time from `MONTY_SERVER_VERSION`, else the crate version; see `versioning.md`. `monty-server --version` prints it.
 - A configuration or startup failure exits 2 with one stderr line `monty-server: <reason>`. A serve error after startup exits 1. A completed drain exits 0.
 
 Log events: `listening`, `session_start`, `session_end` (with `outcome`, `detail` and `duration_ms`), `rejected`, `dump_rejected`, `worker_failed`, `shutdown_dump_too_large`, `drain_started`, `drain_forced`, `drain_finished`, `otlp_metrics_export_failed`, `otlp_metrics_client_failed`, `signal_handler_failed`.
@@ -67,7 +69,35 @@ Every flag has an environment variable. A flag wins over its variable. Durations
 | `GET /` with invalid upgrade headers | axum's upgrade rejection, not counted in metrics |
 | `GET /` WebSocket upgrade | admission, then a session |
 | `GET /health` | 200 with an empty body; 503 `monty server is shutting down` while draining |
+| `GET /info` | 200 `application/json`; see Info |
 | `GET /metrics` | 200 `application/openmetrics-text; version=1.0.0; charset=utf-8` |
+
+## Info
+
+`GET /info` reports the build and the effective limits, so a client can size its pool and detect drift before dialing. montygo reads it with `FetchServerInfo`.
+
+```json
+{
+  "version": "0.1.0-3f2a9c1",
+  "monty_rev": "f8acf4fa8fff78dfd11dc5a2042e4fdf0ab36c28",
+  "protocol_version": 3,
+  "limits": {
+    "idle_timeout_s": 60,
+    "keepalive_s": 5,
+    "session_timeout_s": 3600,
+    "turn_timeout_s": 300,
+    "max_duration_s": 60,
+    "max_memory_bytes": 67108864,
+    "max_recursion_depth": 1000,
+    "max_sessions": 64,
+    "max_sessions_per_client": 10
+  }
+}
+```
+
+- `version` is `SERVER_VERSION`, `monty_rev` is `MONTY_REV`, `protocol_version` is `monty_proto::PROTOCOL_VERSION`.
+- A disabled timeout or ceiling is `0`. `max_recursion_depth` cannot be disabled.
+- The body is built from the validated `Config` by `info::ServerInfo::from_config`. Unknown fields MAY be added later; clients MUST ignore them.
 
 ## Admission
 

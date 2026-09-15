@@ -10,7 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 func writeFile(path, content string) error {
@@ -30,14 +30,14 @@ func mustSoup(t *testing.T, markup string) *Tag {
 
 func asTag(t *testing.T, v any) *Tag {
 	t.Helper()
-	ci, ok := v.(*monty.ClassInstance)
+	ci, ok := v.(*montygo.ClassInstance)
 	require.True(t, ok, "expected a wrapped Tag, got %T", v)
 	tag, ok := ci.Instance().(*Tag)
 	require.True(t, ok)
 	return tag
 }
 
-func call(t *testing.T, tag *Tag, name string, args []any, kwargs monty.Kwargs) any {
+func call(t *testing.T, tag *Tag, name string, args []any, kwargs montygo.Kwargs) any {
 	t.Helper()
 	v, err := tag.CallMethod(t.Context(), name, args, kwargs)
 	require.NoError(t, err)
@@ -63,7 +63,7 @@ func TestTagAttributes(t *testing.T) {
 
 	div := asTag(t, call(t, soup, "find", []any{"div"}, nil))
 	require.Equal(t, "div", div.Name)
-	require.True(t, monty.Equal(monty.NewDict(monty.Pair{Key: "id", Value: "main"}, monty.Pair{Key: "class", Value: []any{"a", "b"}}), div.Attrs))
+	require.True(t, montygo.Equal(montygo.NewDict(montygo.Pair{Key: "id", Value: "main"}, montygo.Pair{Key: "class", Value: []any{"a", "b"}}), div.Attrs))
 	require.Equal(t, `<div id="main" class="a b"><p>Hello <b>World</b></p><p>  second  </p><!--note--><script>var x = 1;</script><a href="/x" rel="nofollow noopener">link</a></div>`, div.HTML)
 
 	b := asTag(t, call(t, soup, "find", []any{"b"}, nil))
@@ -78,17 +78,17 @@ func TestTagAttributes(t *testing.T) {
 func TestTagFind(t *testing.T) {
 	soup := mustSoup(t, soupFixture)
 	require.Nil(t, call(t, soup, "find", []any{"table"}, nil))
-	require.Equal(t, "div", asTag(t, call(t, soup, "find", nil, monty.Kwargs{"attrs": monty.NewDict(monty.Pair{Key: "class", Value: "b"})})).Name)
-	require.Equal(t, "b", asTag(t, call(t, soup, "find", nil, monty.Kwargs{"string": "World"})).Name)
-	require.Equal(t, "a", asTag(t, call(t, soup, "find", []any{"a", monty.NewDict(monty.Pair{Key: "rel", Value: "noopener"})}, nil)).Name)
+	require.Equal(t, "div", asTag(t, call(t, soup, "find", nil, montygo.Kwargs{"attrs": montygo.NewDict(montygo.Pair{Key: "class", Value: "b"})})).Name)
+	require.Equal(t, "b", asTag(t, call(t, soup, "find", nil, montygo.Kwargs{"string": "World"})).Name)
+	require.Equal(t, "a", asTag(t, call(t, soup, "find", []any{"a", montygo.NewDict(montygo.Pair{Key: "rel", Value: "noopener"})}, nil)).Name)
 	require.Equal(t, []string{"p", "p", "a", "p"}, tagNames(t, call(t, soup, "find_all", []any{[]any{"p", "a"}}, nil)))
-	require.Equal(t, []string{"p"}, tagNames(t, call(t, soup, "find_all", []any{"p"}, monty.Kwargs{"limit": int64(1)})))
+	require.Equal(t, []string{"p"}, tagNames(t, call(t, soup, "find_all", []any{"p"}, montygo.Kwargs{"limit": int64(1)})))
 	div := asTag(t, call(t, soup, "find", []any{"div"}, nil))
 	require.Equal(t, []string{"p", "b", "p", "script", "a"}, tagNames(t, call(t, div, "find_all", nil, nil)))
 
 	_, err := soup.CallMethod(t.Context(), "find", []any{int64(1)}, nil)
 	require.EqualError(t, err, "TypeError: name must be str, list[str] or None, not 1")
-	_, err = soup.CallMethod(t.Context(), "find", nil, monty.Kwargs{"nam": "p"})
+	_, err = soup.CallMethod(t.Context(), "find", nil, montygo.Kwargs{"nam": "p"})
 	require.EqualError(t, err, "TypeError: find() got an unexpected keyword argument 'nam'")
 }
 
@@ -108,11 +108,11 @@ func TestTagGetAndText(t *testing.T) {
 	require.Equal(t, "/x", call(t, a, "get", []any{"href"}, nil))
 	require.Equal(t, []any{"nofollow", "noopener"}, call(t, a, "get", []any{"rel"}, nil))
 	require.Nil(t, call(t, a, "get", []any{"missing"}, nil))
-	require.Equal(t, "fallback", call(t, a, "get", []any{"missing"}, monty.Kwargs{"default": "fallback"}))
+	require.Equal(t, "fallback", call(t, a, "get", []any{"missing"}, montygo.Kwargs{"default": "fallback"}))
 
 	div := asTag(t, call(t, soup, "find", []any{"div"}, nil))
 	require.Equal(t, "Hello World  second  link", call(t, div, "get_text", nil, nil))
-	require.Equal(t, "Hello|World|second|link", call(t, div, "get_text", []any{"|"}, monty.Kwargs{"strip": true}))
+	require.Equal(t, "Hello|World|second|link", call(t, div, "get_text", []any{"|"}, montygo.Kwargs{"strip": true}))
 	script := asTag(t, call(t, div, "find", []any{"script"}, nil))
 	require.Equal(t, "var x = 1;", call(t, script, "get_text", nil, nil))
 }
@@ -155,8 +155,8 @@ func TestPageMethodsInHeadlessChrome(t *testing.T) {
 		pool: newTestPool(t),
 		out:  io.Discard,
 		externals: map[string]any{
-			"open_page":      monty.FunctionFunc(browser.openPage),
-			"beautiful_soup": monty.FunctionFunc(beautifulSoup),
+			"open_page":      montygo.FunctionFunc(browser.openPage),
+			"beautiful_soup": montygo.FunctionFunc(beautifulSoup),
 		},
 	}
 	code := `page = await open_page(` + strconv.Quote(srv.URL+"/") + `, wait_until='load')

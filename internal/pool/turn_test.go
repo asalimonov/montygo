@@ -106,6 +106,9 @@ func (w *turnWorker) Kill() {
 
 func (w *turnWorker) Close() { w.Kill() }
 
+func (w *turnWorker) Done() <-chan struct{} { return w.exited }
+func (w *turnWorker) Err() error            { return nil }
+
 func (w *turnWorker) Wait(ctx context.Context) (worker.Status, bool) {
 	select {
 	case <-w.exited:
@@ -201,8 +204,7 @@ func TestTurnDeadlines(t *testing.T) {
 		require.Equal(t, "monty worker killed after exceeding request timeout of 100ms", perr.Error())
 		require.False(t, w.Alive())
 		require.True(t, co.Finished())
-		live, _ := p.Size()
-		require.Equal(t, 0, live)
+		require.Eventually(t, func() bool { live, _ := p.Size(); return live == 0 }, 5*time.Second, 10*time.Millisecond)
 	})
 	t.Run("duration backstop fires without a request timeout", func(t *testing.T) {
 		p := turnPool(t, func() *turnWorker { return newTurnWorker(okThen(silent)) }, func(c *Config) { c.DurationLimitGrace = 50 * time.Millisecond })

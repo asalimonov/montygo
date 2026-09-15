@@ -21,16 +21,17 @@ import (
 	"time"
 	"unicode"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/examples/internal/montyenv"
 )
 
 const (
 	statementPrompt    = "❯ "
 	continuationPrompt = "… "
-	banner             = "Monty v" + monty.Version + " REPL. Type `exit` to exit.\n"
 	restartNotice      = "the session was lost; starting a new session\n"
 )
+
+var banner = "Monty v" + montygo.MontyVersion + " REPL (montygo " + montygo.BindingVersion() + "). Type `exit` to exit.\n"
 
 var errInterrupted = errors.New("KeyboardInterrupt")
 
@@ -108,9 +109,9 @@ func run(ctx context.Context, c console, args []string) error {
 type options struct {
 	scriptName string
 	initial    string
-	mounts     []*monty.MountDir
+	mounts     []*montygo.MountDir
 	cwd        string
-	limits     monty.ResourceLimits
+	limits     montygo.ResourceLimits
 	ws         wsOptions
 }
 
@@ -121,19 +122,19 @@ type wsOptions struct {
 }
 
 // openPool dials a remote Monty server when -ws is set, else starts local workers.
-func openPool(ctx context.Context, o *options) (*monty.Pool, error) {
+func openPool(ctx context.Context, o *options) (*montygo.Pool, error) {
 	if o.ws.url == "" {
-		return monty.New(ctx, montyenv.PoolOptions())
+		return montygo.New(ctx, montyenv.PoolOptions())
 	}
 	tlsConfig, err := o.ws.tlsConfig()
 	if err != nil {
 		return nil, err
 	}
-	return monty.NewWebSocket(ctx, monty.WebSocketOptions{
+	return montygo.NewWebSocket(ctx, montygo.WebSocketOptions{
 		URL: o.ws.url,
 		// An interrupt checks out the replacement session before the lost one is released.
 		MaxProcesses:   2,
-		RequestTimeout: monty.NoRequestTimeout,
+		RequestTimeout: montygo.NoRequestTimeout,
 		TLSConfig:      tlsConfig,
 	})
 }
@@ -221,7 +222,7 @@ func parseOptions(args []string, errOut io.Writer) (*options, error) {
 	if math.IsNaN(seconds) || seconds < 0 || seconds > float64(math.MaxInt64)/float64(time.Second) {
 		return nil, fmt.Errorf("invalid max duration '%v': expected a non-negative number of seconds", seconds)
 	}
-	o.limits = monty.ResourceLimits{
+	o.limits = montygo.ResourceLimits{
 		MaxDuration:       time.Duration(seconds * float64(time.Second)),
 		GCInterval:        *gcInterval,
 		MaxRecursionDepth: *recursion,
@@ -269,7 +270,7 @@ func parseMemorySize(s string) (uint64, error) {
 }
 
 // openMount parses host_path::virtual_path[::mode[::write_limit_bytes]].
-func openMount(spec string) (*monty.MountDir, error) {
+func openMount(spec string) (*montygo.MountDir, error) {
 	parts := strings.Split(spec, "::")
 	if len(parts) < 2 || len(parts) > 4 {
 		return nil, fmt.Errorf("invalid mount spec '%s': expected host_path::virtual_path[::mode[::write_limit_bytes]]", spec)
@@ -281,15 +282,15 @@ func openMount(spec string) (*monty.MountDir, error) {
 	if len(parts) >= 3 {
 		modeName = parts[2]
 	}
-	mode, ok := map[string]monty.MountMode{
-		"ro":      monty.MountReadOnly,
-		"rw":      monty.MountReadWrite,
-		"overlay": monty.MountOverlay,
+	mode, ok := map[string]montygo.MountMode{
+		"ro":      montygo.MountReadOnly,
+		"rw":      montygo.MountReadWrite,
+		"overlay": montygo.MountOverlay,
 	}[modeName]
 	if !ok {
 		return nil, fmt.Errorf("invalid mount mode '%s' in '%s': expected 'ro', 'rw', or 'overlay'", modeName, spec)
 	}
-	dirOpts := monty.MountDirOptions{HostPath: parts[0], VirtualPath: parts[1], Mode: mode}
+	dirOpts := montygo.MountDirOptions{HostPath: parts[0], VirtualPath: parts[1], Mode: mode}
 	if len(parts) == 4 {
 		if parts[3] == "" {
 			return nil, fmt.Errorf("invalid write limit in '%s': value must not be empty", spec)
@@ -300,7 +301,7 @@ func openMount(spec string) (*monty.MountDir, error) {
 		}
 		dirOpts.WriteBytesLimit = &limit
 	}
-	dir, err := monty.NewMountDir(dirOpts)
+	dir, err := montygo.NewMountDir(dirOpts)
 	if err != nil {
 		return nil, fmt.Errorf("mount %s: %w", spec, err)
 	}
@@ -309,13 +310,13 @@ func openMount(spec string) (*monty.MountDir, error) {
 
 type repl struct {
 	console
-	pool    *monty.Pool
+	pool    *montygo.Pool
 	opts    *options
-	session *monty.Session
+	session *montygo.Session
 }
 
 func (r *repl) checkout(ctx context.Context) error {
-	session, err := r.pool.Checkout(ctx, monty.CheckoutOptions{ScriptName: r.opts.scriptName, Limits: &r.opts.limits})
+	session, err := r.pool.Checkout(ctx, montygo.CheckoutOptions{ScriptName: r.opts.scriptName, Limits: &r.opts.limits})
 	if err != nil {
 		return err
 	}
@@ -323,13 +324,13 @@ func (r *repl) checkout(ctx context.Context) error {
 	return nil
 }
 
-func (r *repl) feedOptions() *monty.FeedOptions {
-	return &monty.FeedOptions{
+func (r *repl) feedOptions() *montygo.FeedOptions {
+	return &montygo.FeedOptions{
 		Mount: r.opts.mounts,
 		Cwd:   r.opts.cwd,
-		Print: monty.PrintFunc(func(stream monty.Stream, text string) error {
+		Print: montygo.PrintFunc(func(stream montygo.Stream, text string) error {
 			w := r.out
-			if stream == monty.Stderr {
+			if stream == montygo.Stderr {
 				w = r.errOut
 			}
 			_, err := io.WriteString(w, text)
@@ -483,10 +484,10 @@ func (r *repl) report(ctx context.Context, value any, err error) error {
 
 func sessionLost(err error) bool {
 	var (
-		crashed    *monty.CrashedError
-		disconnect *monty.DisconnectError
-		shutdown   *monty.ShutdownError
-		protocol   *monty.ProtocolError
+		crashed    *montygo.CrashedError
+		disconnect *montygo.DisconnectError
+		shutdown   *montygo.ShutdownError
+		protocol   *montygo.ProtocolError
 	)
 	return errors.As(err, &crashed) || errors.As(err, &disconnect) || errors.As(err, &shutdown) || errors.As(err, &protocol)
 }
@@ -497,16 +498,16 @@ func display(value any) string {
 	switch v := value.(type) {
 	case string:
 		return v
-	case monty.Type:
+	case montygo.Type:
 		return "<class '" + v.Name + "'>"
 	}
-	return monty.Repr(value)
+	return montygo.Repr(value)
 }
 
 func describe(err error) string {
-	var montyErr monty.Error
+	var montyErr montygo.Error
 	if errors.As(err, &montyErr) {
-		return montyErr.Display(monty.DisplayTraceback)
+		return montyErr.Display(montygo.DisplayTraceback)
 	}
 	return err.Error()
 }

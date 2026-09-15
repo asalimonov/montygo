@@ -1,11 +1,11 @@
-package monty_test
+package montygo_test
 
 import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 func TestWasmWordSize(t *testing.T) {
@@ -16,10 +16,10 @@ func TestWasmWordSize(t *testing.T) {
 	for _, tc := range cases {
 		t.Run("an over-32-bit "+tc.name+" raises rather than trapping", func(t *testing.T) {
 			ctx := testCtx(t)
-			p := newPool(t, monty.BackendWasm, monty.Options{})
-			s := wsmCheckout(t, p, monty.CheckoutOptions{})
+			p := newPool(t, montygo.BackendWasm, montygo.Options{})
+			s := wsmCheckout(t, p, montygo.CheckoutOptions{})
 			_, err := s.FeedRun(ctx, tc.code, nil)
-			var rt *monty.RuntimeError
+			var rt *montygo.RuntimeError
 			require.ErrorAs(t, err, &rt)
 			require.Equal(t, "OverflowError", rt.TypeName)
 			require.Equal(t, tc.message, rt.Message)

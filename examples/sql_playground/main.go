@@ -16,7 +16,7 @@ import (
 	"strconv"
 	"strings"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/examples/internal/montyenv"
 	"github.com/asalimonov/montygo/osaccess"
 )
@@ -44,9 +44,9 @@ func main() {
 		return
 	}
 	if err != nil {
-		var montyErr monty.Error
+		var montyErr montygo.Error
 		if errors.As(err, &montyErr) {
-			fmt.Fprintln(os.Stderr, montyErr.Display(monty.DisplayTraceback))
+			fmt.Fprintln(os.Stderr, montyErr.Display(montygo.DisplayTraceback))
 		} else {
 			fmt.Fprintln(os.Stderr, err)
 		}
@@ -95,14 +95,14 @@ func run(ctx context.Context, out io.Writer, args []string) error {
 	}
 	external := &ExternalFunctions{fs: fs}
 
-	pool, err := monty.New(ctx, montyenv.PoolOptions())
+	pool, err := montygo.New(ctx, montyenv.PoolOptions())
 	if err != nil {
 		return err
 	}
 	defer pool.Close(ctx)
 
 	results, err := func() (any, error) {
-		session, err := pool.Checkout(ctx, monty.CheckoutOptions{
+		session, err := pool.Checkout(ctx, montygo.CheckoutOptions{
 			ScriptName:     "sql_playground.py",
 			TypeCheck:      true,
 			TypeCheckStubs: typeStubs,
@@ -111,17 +111,17 @@ func run(ctx context.Context, out io.Writer, args []string) error {
 			return nil, err
 		}
 		defer session.Close(ctx)
-		return session.FeedRun(ctx, sandboxCode, &monty.FeedOptions{
+		return session.FeedRun(ctx, sandboxCode, &montygo.FeedOptions{
 			ExternalLookup: map[string]any{
-				"query_csv":         monty.FunctionFunc(external.queryCSV),
-				"read_json":         monty.FunctionFunc(external.readJSON),
-				"analyze_sentiment": monty.FunctionFunc(analyzeSentiment),
+				"query_csv":         montygo.FunctionFunc(external.queryCSV),
+				"read_json":         montygo.FunctionFunc(external.readJSON),
+				"analyze_sentiment": montygo.FunctionFunc(analyzeSentiment),
 			},
 			OS:            fs.Handler(),
 			SkipTypeCheck: !*typeCheck,
-			Print: monty.PrintFunc(func(stream monty.Stream, text string) error {
+			Print: montygo.PrintFunc(func(stream montygo.Stream, text string) error {
 				w := out
-				if stream == monty.Stderr {
+				if stream == montygo.Stderr {
 					w = os.Stderr
 				}
 				_, err := io.WriteString(w, text)
@@ -144,7 +144,7 @@ func printReport(out io.Writer, results any) error {
 		return fmt.Errorf("TypeError: '%s' object is not iterable", pyTypeName(results))
 	}
 	for _, item := range items {
-		r, ok := item.(*monty.Dict)
+		r, ok := item.(*montygo.Dict)
 		if !ok {
 			return fmt.Errorf("TypeError: result rows must be dicts, got %s", pyTypeName(item))
 		}
@@ -185,7 +185,7 @@ func pyStr(v any) string {
 	if s, ok := v.(string); ok {
 		return s
 	}
-	return monty.Repr(v)
+	return montygo.Repr(v)
 }
 
 func pyTypeName(v any) string {
@@ -202,7 +202,7 @@ func pyTypeName(v any) string {
 		return "bool"
 	case []any:
 		return "list"
-	case *monty.Dict:
+	case *montygo.Dict:
 		return "dict"
 	}
 	return fmt.Sprintf("%T", v)
@@ -236,7 +236,7 @@ func thousands(v any) (string, error) {
 		}
 		return "0", nil
 	case float64:
-		s := monty.Repr(x)
+		s := montygo.Repr(x)
 		if strings.ContainsAny(s, "eni") {
 			return s, nil
 		}

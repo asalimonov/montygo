@@ -1,4 +1,4 @@
-package monty
+package montygo
 
 import (
 	"context"
@@ -21,7 +21,13 @@ func NewFuture() (*Future, func(value any, err error)) {
 	return f, f.settle
 }
 
-// Async runs fn in a goroutine and returns its future.
+// AsyncContext runs fn in a goroutine with ctx, which SHOULD be the context the
+// host function received so an interrupt or cancelled feed ends the work.
+func AsyncContext(ctx context.Context, fn func(context.Context) (any, error)) *Future {
+	return Async(func() (any, error) { return fn(ctx) })
+}
+
+// Async runs fn in a goroutine and returns its future; the work cannot be cancelled.
 func Async(fn func() (any, error)) *Future {
 	f, settle := NewFuture()
 	go func() {

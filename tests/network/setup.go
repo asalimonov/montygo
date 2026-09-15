@@ -12,7 +12,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 type setupOptions struct {
@@ -93,12 +93,12 @@ func SetupServer(t *testing.T, opts ...SetupOption) *TestServer {
 func (s *TestServer) URL() string { return s.Unit.URL() }
 
 // WSOptions returns client options for this server with a 30s request timeout.
-func (s *TestServer) WSOptions() monty.WebSocketOptions {
-	return monty.WebSocketOptions{URL: s.URL(), RequestTimeout: 30 * time.Second}
+func (s *TestServer) WSOptions() montygo.WebSocketOptions {
+	return montygo.WebSocketOptions{URL: s.URL(), RequestTimeout: 30 * time.Second}
 }
 
 // NewPool builds a WebSocket pool for this server, closed at test end.
-func (s *TestServer) NewPool(opts monty.WebSocketOptions) *monty.Pool {
+func (s *TestServer) NewPool(opts montygo.WebSocketOptions) *montygo.Pool {
 	s.t.Helper()
 	if opts.URL == "" {
 		opts.URL = s.URL()
@@ -106,14 +106,14 @@ func (s *TestServer) NewPool(opts monty.WebSocketOptions) *monty.Pool {
 	if opts.RequestTimeout == 0 {
 		opts.RequestTimeout = 30 * time.Second
 	}
-	p, err := monty.NewWebSocket(testCtx(s.t), opts)
+	p, err := montygo.NewWebSocket(testCtx(s.t), opts)
 	require.NoError(s.t, err)
 	s.t.Cleanup(func() { _ = p.Close(context.Background()) })
 	return p
 }
 
 // Checkout checks out a session closed at test end.
-func (s *TestServer) Checkout(ctx context.Context, p *monty.Pool, opts monty.CheckoutOptions) *monty.Session {
+func (s *TestServer) Checkout(ctx context.Context, p *montygo.Pool, opts montygo.CheckoutOptions) *montygo.Session {
 	s.t.Helper()
 	session, err := p.Checkout(ctx, opts)
 	require.NoError(s.t, err)

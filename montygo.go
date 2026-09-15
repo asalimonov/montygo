@@ -1,11 +1,16 @@
-// Package monty runs untrusted Python in Monty sandbox workers: crash-isolated
+// Package montygo runs untrusted Python in Monty sandbox workers: crash-isolated
 // `monty subprocess` children, an embedded WebAssembly worker, or a remote
 // worker over WebSocket.
-package monty
+package montygo
 
 const (
-	// Version is the Monty release this binding tracks.
-	Version = "0.0.23"
+	// MontyVersion is the Monty release this binding tracks. BindingVersion
+	// reports this module's own release.
+	MontyVersion = "0.0.23"
+	// Version is MontyVersion.
+	//
+	// Deprecated: use MontyVersion for the upstream release or BindingVersion for this module.
+	Version = MontyVersion
 	// UpstreamRev is the upstream commit the protocol and tests were taken from.
 	UpstreamRev = "f8acf4fa"
 	// ProtocolVersion is the wire protocol version this parent speaks.

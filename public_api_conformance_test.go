@@ -1,4 +1,4 @@
-package monty_test
+package montygo_test
 
 import (
 	"context"
@@ -6,20 +6,20 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 func TestPublicAPI(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b monty.Backend) {
-		coreARunMontyAPITests(t, b.String()+" public API", func(ctx context.Context) (*monty.Pool, error) {
-			return openPool(ctx, b, monty.Options{})
+	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+		coreARunMontyAPITests(t, b.String()+" public API", func(ctx context.Context) (*montygo.Pool, error) {
+			return openPool(ctx, b, montygo.Options{})
 		})
 	})
 }
 
-func coreARunMontyAPITests(t *testing.T, name string, create func(ctx context.Context) (*monty.Pool, error)) {
+func coreARunMontyAPITests(t *testing.T, name string, create func(ctx context.Context) (*montygo.Pool, error)) {
 	t.Run(name+": evaluates code and keeps session state", func(t *testing.T) {
-		coreAUsingPoolSession(t, create, func(ctx context.Context, session *monty.Session) {
+		coreAUsingPoolSession(t, create, func(ctx context.Context, session *montygo.Session) {
 			_, err := session.FeedRun(ctx, "x = 21", nil)
 			require.NoError(t, err)
 
@@ -30,8 +30,8 @@ func coreARunMontyAPITests(t *testing.T, name string, create func(ctx context.Co
 	})
 
 	t.Run(name+": accepts inputs", func(t *testing.T) {
-		coreAUsingPoolSession(t, create, func(ctx context.Context, session *monty.Session) {
-			v, err := session.FeedRun(ctx, "x + 1", &monty.FeedOptions{Inputs: map[string]any{"x": 4}})
+		coreAUsingPoolSession(t, create, func(ctx context.Context, session *montygo.Session) {
+			v, err := session.FeedRun(ctx, "x + 1", &montygo.FeedOptions{Inputs: map[string]any{"x": 4}})
 			require.NoError(t, err)
 			require.Equal(t, int64(5), v)
 		})
@@ -39,9 +39,9 @@ func coreARunMontyAPITests(t *testing.T, name string, create func(ctx context.Co
 
 	t.Run(name+": forwards prints", func(t *testing.T) {
 		var printed []string
-		coreAUsingPoolSession(t, create, func(ctx context.Context, session *monty.Session) {
-			result, err := session.FeedRun(ctx, "print('hello')\n123", &monty.FeedOptions{
-				Print: monty.PrintFunc(func(stream monty.Stream, text string) error {
+		coreAUsingPoolSession(t, create, func(ctx context.Context, session *montygo.Session) {
+			result, err := session.FeedRun(ctx, "print('hello')\n123", &montygo.FeedOptions{
+				Print: montygo.PrintFunc(func(stream montygo.Stream, text string) error {
 					printed = append(printed, string(stream)+":"+text)
 					return nil
 				}),
@@ -54,24 +54,24 @@ func coreARunMontyAPITests(t *testing.T, name string, create func(ctx context.Co
 	})
 }
 
-func coreAUsingPoolSession(t *testing.T, create func(ctx context.Context) (*monty.Pool, error), fn func(ctx context.Context, session *monty.Session)) {
+func coreAUsingPoolSession(t *testing.T, create func(ctx context.Context) (*montygo.Pool, error), fn func(ctx context.Context, session *montygo.Session)) {
 	t.Helper()
 	ctx := testCtx(t)
-	var pool *monty.Pool
-	var session *monty.Session
+	var pool *montygo.Pool
+	var session *montygo.Session
 	func() {
 		p, err := create(ctx)
 		require.NoError(t, err)
 		pool = p
 		defer func() { require.NoError(t, pool.Close(ctx)) }()
-		s, err := pool.Checkout(ctx, monty.CheckoutOptions{})
+		s, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
 		require.NoError(t, err)
 		session = s
 		defer func() { require.NoError(t, session.Close(ctx)) }()
 		fn(ctx, session)
 	}()
 	_, err := session.FeedRun(ctx, "1", nil)
-	require.ErrorIs(t, err, monty.ErrSessionClosed)
-	_, err = pool.Checkout(ctx, monty.CheckoutOptions{})
-	require.ErrorIs(t, err, monty.ErrPoolClosed)
+	require.ErrorIs(t, err, montygo.ErrSessionClosed)
+	_, err = pool.Checkout(ctx, montygo.CheckoutOptions{})
+	require.ErrorIs(t, err, montygo.ErrPoolClosed)
 }

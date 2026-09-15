@@ -7,13 +7,13 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 func dumpSession(t *testing.T, ctx context.Context, s *TestServer, code string) []byte {
 	t.Helper()
-	p := s.NewPool(monty.WebSocketOptions{})
-	session := s.Checkout(ctx, p, monty.CheckoutOptions{})
+	p := s.NewPool(montygo.WebSocketOptions{})
+	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	_, err := session.FeedRun(ctx, code, nil)
 	require.NoError(t, err)
 	state, err := session.Dump(ctx)
@@ -22,10 +22,10 @@ func dumpSession(t *testing.T, ctx context.Context, s *TestServer, code string) 
 	return state
 }
 
-func loadInto(t *testing.T, ctx context.Context, s *TestServer, state []byte) (*monty.Session, error) {
+func loadInto(t *testing.T, ctx context.Context, s *TestServer, state []byte) (*montygo.Session, error) {
 	t.Helper()
-	p := s.NewPool(monty.WebSocketOptions{})
-	session := s.Checkout(ctx, p, monty.CheckoutOptions{})
+	p := s.NewPool(montygo.WebSocketOptions{})
+	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	return session, session.LoadSession(ctx, state)
 }
 
@@ -64,10 +64,10 @@ func TestDumps_LocalWasmDumpRejected(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t)
 	ctx := testCtx(t)
-	local, err := monty.New(ctx, monty.Options{Backend: monty.BackendWasm, MaxProcesses: 1})
+	local, err := montygo.New(ctx, montygo.Options{Backend: montygo.BackendWasm, MaxProcesses: 1})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = local.Close(context.Background()) })
-	session, err := local.Checkout(ctx, monty.CheckoutOptions{})
+	session, err := local.Checkout(ctx, montygo.CheckoutOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = session.Close(context.Background()) })
 	_, err = session.FeedRun(ctx, "x = 1", nil)

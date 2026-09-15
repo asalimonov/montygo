@@ -16,7 +16,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/examples/internal/montyenv"
 )
 
@@ -57,9 +57,9 @@ func examplePrintOutput(models ...string) string {
 	return b.String()
 }
 
-func newTestPool(t *testing.T) *monty.Pool {
+func newTestPool(t *testing.T) *montygo.Pool {
 	t.Helper()
-	pool, err := monty.New(t.Context(), montyenv.PoolOptions())
+	pool, err := montygo.New(t.Context(), montyenv.PoolOptions())
 	require.NoError(t, err)
 	t.Logf("monty backend: %s", pool.Backend())
 	t.Cleanup(func() { _ = pool.Close(context.Background()) })
@@ -172,8 +172,8 @@ func TestAgentLoopWithFakeLLM(t *testing.T) {
 		pool:  newTestPool(t),
 		out:   &out,
 		externals: map[string]any{
-			"beautiful_soup":    monty.FunctionFunc(beautifulSoup),
-			"record_model_info": monty.FunctionFunc(records.recordModelInfo),
+			"beautiful_soup":    montygo.FunctionFunc(beautifulSoup),
+			"record_model_info": montygo.FunctionFunc(records.recordModelInfo),
 		},
 	}
 
@@ -213,16 +213,16 @@ func TestAgentLoopReportsAPIErrors(t *testing.T) {
 
 func TestExampleCodeOnStaticPage(t *testing.T) {
 	page := &Page{URL: "http://fixture.test/", Title: "Pricing", HTML: pricingPage, ID: 1}
-	openPage := func(_ context.Context, args []any, kwargs monty.Kwargs) (any, error) {
-		return monty.Async(func() (any, error) { return page.instance() }), nil
+	openPage := func(_ context.Context, args []any, kwargs montygo.Kwargs) (any, error) {
+		return montygo.Async(func() (any, error) { return page.instance() }), nil
 	}
 	s := &scraper{
 		pool: newTestPool(t),
 		out:  io.Discard,
 		externals: map[string]any{
-			"open_page":         monty.FunctionFunc(openPage),
-			"beautiful_soup":    monty.FunctionFunc(beautifulSoup),
-			"record_model_info": monty.FunctionFunc(newRecordModels(nil).recordModelInfo),
+			"open_page":         montygo.FunctionFunc(openPage),
+			"beautiful_soup":    montygo.FunctionFunc(beautifulSoup),
+			"record_model_info": montygo.FunctionFunc(newRecordModels(nil).recordModelInfo),
 		},
 	}
 	msg, err := s.runCode(t.Context(), exampleCode, map[string]any{"url": page.URL}, false)

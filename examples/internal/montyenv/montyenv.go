@@ -5,19 +5,19 @@ import (
 	"os"
 	"strings"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 // BackendEnv names the variable that forces a backend: auto (default), native or wasm.
 const BackendEnv = "MONTY_EXAMPLES_BACKEND"
 
 // PoolOptions returns pool options honouring BackendEnv.
-func PoolOptions() monty.Options {
+func PoolOptions() montygo.Options {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(BackendEnv))) {
 	case "native":
-		return monty.Options{Backend: monty.BackendNative}
+		return montygo.Options{Backend: montygo.BackendNative}
 	case "wasm":
-		return monty.Options{Backend: monty.BackendWasm}
+		return montygo.Options{Backend: montygo.BackendWasm}
 	}
-	return monty.Options{}
+	return montygo.Options{}
 }

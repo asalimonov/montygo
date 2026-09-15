@@ -1,4 +1,4 @@
-package monty
+package montygo
 
 import (
 	"context"
@@ -31,6 +31,8 @@ type WebSocketOptions struct {
 	TLSConfig *tls.Config
 	// DialContext opens TCP connections; nil uses a net.Dialer.
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+	// Telemetry selects this pool's telemetry; nil uses the process-wide installation.
+	Telemetry *TelemetryComponents
 }
 
 // NewWebSocket creates a pool whose sessions each dial a fresh, single-use
@@ -47,7 +49,7 @@ func NewWebSocket(ctx context.Context, opts WebSocketOptions) (*Pool, error) {
 		MaxProcesses:    opts.MaxProcesses,
 		CheckoutTimeout: opts.CheckoutTimeout,
 		RequestTimeout:  timeout,
-	}, opts.dialer(timeout), BackendWebSocket, "", true)
+	}, opts.dialer(timeout), BackendWebSocket, "", true, resolveRecorder(opts.Telemetry))
 	if err != nil {
 		return nil, err
 	}
@@ -78,6 +80,7 @@ func (o WebSocketOptions) dialer(timeout time.Duration) *worker.WebSocketDialer 
 	return &worker.WebSocketDialer{
 		URL:         o.URL,
 		DialTimeout: timeout,
+		UserAgent:   userAgent(),
 		TLSConfig:   o.TLSConfig,
 		DialContext: o.DialContext,
 	}

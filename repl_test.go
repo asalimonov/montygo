@@ -1,4 +1,4 @@
-package monty_test
+package montygo_test
 
 import (
 	"strings"
@@ -6,14 +6,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 func TestRepl(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b monty.Backend) {
+	eachBackend(t, func(t *testing.T, b montygo.Backend) {
 		t.Run("feed preserves state without replay", func(t *testing.T) {
 			ctx := testCtx(t)
-			session := newSession(t, b, monty.CheckoutOptions{})
+			session := newSession(t, b, montygo.CheckoutOptions{})
 			_, err := session.FeedRun(ctx, "counter = 0", nil)
 			require.NoError(t, err)
 			v, err := session.FeedRun(ctx, "counter = counter + 1", nil)
@@ -32,11 +32,11 @@ func TestRepl(t *testing.T) {
 
 		t.Run("runtime error does not kill the session", func(t *testing.T) {
 			ctx := testCtx(t)
-			session := newSession(t, b, monty.CheckoutOptions{})
+			session := newSession(t, b, montygo.CheckoutOptions{})
 			_, err := session.FeedRun(ctx, "x = 1", nil)
 			require.NoError(t, err)
 			_, err = session.FeedRun(ctx, "1 / 0", nil)
-			var runtimeErr *monty.RuntimeError
+			var runtimeErr *montygo.RuntimeError
 			require.ErrorAs(t, err, &runtimeErr)
 			require.EqualError(t, err, "ZeroDivisionError: division by zero")
 			require.Equal(t, strings.Join([]string{
@@ -45,7 +45,7 @@ func TestRepl(t *testing.T) {
 				"    1 / 0",
 				"    ~~~~~",
 				"ZeroDivisionError: division by zero",
-			}, "\n"), runtimeErr.Display(monty.DisplayTraceback))
+			}, "\n"), runtimeErr.Display(montygo.DisplayTraceback))
 			v, err := session.FeedRun(ctx, "x", nil)
 			require.NoError(t, err)
 			require.Equal(t, int64(1), v)
@@ -53,7 +53,7 @@ func TestRepl(t *testing.T) {
 
 		t.Run("session dump returns opaque state", func(t *testing.T) {
 			ctx := testCtx(t)
-			session := newSession(t, b, monty.CheckoutOptions{})
+			session := newSession(t, b, montygo.CheckoutOptions{})
 			_, err := session.FeedRun(ctx, "x = 40", nil)
 			require.NoError(t, err)
 			v, err := session.FeedRun(ctx, "x = x + 1", nil)

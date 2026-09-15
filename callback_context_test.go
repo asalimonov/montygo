@@ -1,4 +1,4 @@
-package monty_test
+package montygo_test
 
 import (
 	"context"
@@ -17,20 +17,20 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 type telStorageKey struct{}
 
 func telStorage(ctx context.Context) any { return ctx.Value(telStorageKey{}) }
 
-type telPrintContext func(ctx context.Context, stream monty.Stream, text string) error
+type telPrintContext func(ctx context.Context, stream montygo.Stream, text string) error
 
-func (f telPrintContext) Print(stream monty.Stream, text string) error {
+func (f telPrintContext) Print(stream montygo.Stream, text string) error {
 	return f(context.Background(), stream, text)
 }
 
-func (f telPrintContext) PrintContext(ctx context.Context, stream monty.Stream, text string) error {
+func (f telPrintContext) PrintContext(ctx context.Context, stream montygo.Stream, text string) error {
 	return f(ctx, stream, text)
 }
 
@@ -44,7 +44,7 @@ func (f telTracerFunc) Start(ctx context.Context, name string, opts ...trace.Spa
 }
 
 type telAutoResumer interface {
-	ResumeAuto(ctx context.Context) (monty.Snapshot, error)
+	ResumeAuto(ctx context.Context) (montygo.Snapshot, error)
 }
 
 func TestCallbackContext(t *testing.T) {
@@ -52,7 +52,7 @@ func TestCallbackContext(t *testing.T) {
 		{"concurrent host callbacks inherit their Monty span and caller async storage", telConcurrentCallbacks},
 	}
 	for _, mode := range []string{"disabled", "broken-tracer", "broken-context", "sampled-out"} {
-		cases = append(cases, telCase{"callback context fallback: " + mode, func(t *testing.T, b monty.Backend) {
+		cases = append(cases, telCase{"callback context fallback: " + mode, func(t *testing.T, b montygo.Backend) {
 			telCallbackFallback(t, b, mode)
 		}})
 	}
@@ -63,12 +63,12 @@ func TestCallbackContext(t *testing.T) {
 	telRun(t, "TestCallbackContext", cases)
 }
 
-func telConcurrentCallbacks(t *testing.T, b monty.Backend) {
+func telConcurrentCallbacks(t *testing.T, b montygo.Backend) {
 	ctx := testCtx(t)
 	tp, recorder := telTracing()
 	tracer := tp.Tracer("callbacks")
-	require.NoError(t, monty.Instrument(monty.TelemetryComponents{Tracer: tracer}))
-	p := telPool(t, b, monty.Options{MinProcesses: 2, MaxProcesses: 2})
+	require.NoError(t, montygo.Instrument(montygo.TelemetryComponents{Tracer: tracer}))
+	p := telPool(t, b, montygo.Options{MinProcesses: 2, MaxProcesses: 2})
 	var wg sync.WaitGroup
 	for _, index := range []int{1, 2} {
 		wg.Add(1)
@@ -79,7 +79,7 @@ func telConcurrentCallbacks(t *testing.T, b monty.Backend) {
 	}
 	wg.Wait()
 	require.NoError(t, p.Close(ctx))
-	require.NoError(t, monty.Flush(ctx))
+	require.NoError(t, montygo.Flush(ctx))
 
 	spans := recorder.Ended()
 	byID := map[trace.SpanID]sdktrace.ReadOnlySpan{}
@@ -117,7 +117,7 @@ func telConcurrentCallbacks(t *testing.T, b monty.Backend) {
 	require.NoError(t, tp.Shutdown(ctx))
 }
 
-func telCallbacksFor(t *testing.T, base context.Context, p *monty.Pool, tracer trace.Tracer, index int) {
+func telCallbacksFor(t *testing.T, base context.Context, p *montygo.Pool, tracer trace.Tracer, index int) {
 	member, err := baggage.NewMember("request", strconv.Itoa(index))
 	if !assert.NoError(t, err) {
 		return
@@ -138,12 +138,12 @@ func telCallbacksFor(t *testing.T, base context.Context, p *monty.Pool, tracer t
 		span.End()
 	}
 
-	s, err := p.Checkout(ctx, monty.CheckoutOptions{ScriptName: strconv.Itoa(index)})
+	s, err := p.Checkout(ctx, montygo.CheckoutOptions{ScriptName: strconv.Itoa(index)})
 	if !assert.NoError(t, err) {
 		return
 	}
-	v, err := s.FeedRun(ctx, "print('hello'); sync_callback() + await async_callback()", &monty.FeedOptions{
-		Print: telPrintContext(func(ctx context.Context, _ monty.Stream, _ string) error {
+	v, err := s.FeedRun(ctx, "print('hello'); sync_callback() + await async_callback()", &montygo.FeedOptions{
+		Print: telPrintContext(func(ctx context.Context, _ montygo.Stream, _ string) error {
 			child(ctx, "print")
 			return nil
 		}),
@@ -152,9 +152,9 @@ func telCallbacksFor(t *testing.T, base context.Context, p *monty.Pool, tracer t
 				child(ctx, "sync")
 				return 10
 			},
-			"async_callback": func(ctx context.Context) *monty.Future {
+			"async_callback": func(ctx context.Context) *montygo.Future {
 				check(ctx)
-				return monty.Async(func() (any, error) {
+				return montygo.Async(func() (any, error) {
 					spanCtx, span := tracer.Start(ctx, fmt.Sprintf("async %d", index))
 					defer span.End()
 					time.Sleep(10 * time.Millisecond)
@@ -168,8 +168,8 @@ func telCallbacksFor(t *testing.T, base context.Context, p *monty.Pool, tracer t
 	assert.NoError(t, err)
 	assert.Equal(t, int64(30), v)
 
-	v, err = s.FeedRun(ctx, "from pathlib import Path; Path('/x').exists()", &monty.FeedOptions{
-		OS: func(ctx context.Context, _ string, _ []any, _ monty.Kwargs) (any, error) {
+	v, err = s.FeedRun(ctx, "from pathlib import Path; Path('/x').exists()", &montygo.FeedOptions{
+		OS: func(ctx context.Context, _ string, _ []any, _ montygo.Kwargs) (any, error) {
 			child(ctx, "os")
 			return true, nil
 		},
@@ -177,7 +177,7 @@ func telCallbacksFor(t *testing.T, base context.Context, p *monty.Pool, tracer t
 	assert.NoError(t, err)
 	assert.Equal(t, true, v)
 
-	v, err = s.FeedRun(ctx, "lazy_value", &monty.FeedOptions{ExternalLookup: map[string]any{"lazy_value": 7}})
+	v, err = s.FeedRun(ctx, "lazy_value", &montygo.FeedOptions{ExternalLookup: map[string]any{"lazy_value": 7}})
 	assert.NoError(t, err)
 	assert.Equal(t, int64(7), v)
 
@@ -186,7 +186,7 @@ func telCallbacksFor(t *testing.T, base context.Context, p *monty.Pool, tracer t
 	assert.NoError(t, s.Close(ctx))
 }
 
-func telCallbackFallback(t *testing.T, b monty.Backend, mode string) {
+func telCallbackFallback(t *testing.T, b montygo.Backend, mode string) {
 	ctx := testCtx(t)
 	tp, _ := telTracing()
 	tracer := tp.Tracer("callbacks")
@@ -195,7 +195,7 @@ func telCallbackFallback(t *testing.T, b monty.Backend, mode string) {
 	var mu sync.Mutex
 	var runSpan trace.Span
 	if mode != "disabled" {
-		require.NoError(t, monty.Instrument(monty.TelemetryComponents{Tracer: telTracerFunc{
+		require.NoError(t, montygo.Instrument(montygo.TelemetryComponents{Tracer: telTracerFunc{
 			start: func(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
 				switch mode {
 				case "broken-tracer":
@@ -219,12 +219,12 @@ func telCallbackFallback(t *testing.T, b monty.Backend, mode string) {
 	}
 
 	hostCtx, host := tracer.Start(context.WithValue(ctx, telStorageKey{}, "caller"), "host")
-	p := telPool(t, b, monty.Options{})
-	s, err := p.Checkout(hostCtx, monty.CheckoutOptions{})
+	p := telPool(t, b, montygo.Options{})
+	s, err := p.Checkout(hostCtx, montygo.CheckoutOptions{})
 	require.NoError(t, err)
 	var count atomic.Int32
-	v, err := s.FeedRun(hostCtx, "print('hello'); 42", &monty.FeedOptions{
-		Print: telPrintContext(func(cbCtx context.Context, _ monty.Stream, _ string) error {
+	v, err := s.FeedRun(hostCtx, "print('hello'); 42", &montygo.FeedOptions{
+		Print: telPrintContext(func(cbCtx context.Context, _ montygo.Stream, _ string) error {
 			count.Add(1)
 			assert.Equal(t, "caller", telStorage(cbCtx))
 			want := host
@@ -248,23 +248,23 @@ func telCallbackFallback(t *testing.T, b monty.Backend, mode string) {
 	require.NoError(t, p.Close(ctx))
 	host.End()
 	require.NoError(t, offProvider.Shutdown(ctx))
-	require.NoError(t, monty.Flush(ctx))
+	require.NoError(t, montygo.Flush(ctx))
 	require.NoError(t, tp.Shutdown(ctx))
 }
 
-func telCallbackFailures(t *testing.T, b monty.Backend) {
+func telCallbackFailures(t *testing.T, b montygo.Backend) {
 	ctx := testCtx(t)
 	tp, _ := telTracing()
 	tracer := tp.Tracer("callbacks")
-	require.NoError(t, monty.Instrument(monty.TelemetryComponents{Tracer: tracer}))
+	require.NoError(t, montygo.Instrument(montygo.TelemetryComponents{Tracer: tracer}))
 	hostCtx, host := tracer.Start(context.WithValue(ctx, telStorageKey{}, "caller"), "host")
-	p := telPool(t, b, monty.Options{})
+	p := telPool(t, b, montygo.Options{})
 	var count atomic.Int32
 
-	s, err := p.Checkout(hostCtx, monty.CheckoutOptions{})
+	s, err := p.Checkout(hostCtx, montygo.CheckoutOptions{})
 	require.NoError(t, err)
-	_, err = s.FeedRun(hostCtx, "print('hello')", &monty.FeedOptions{
-		Print: telPrintContext(func(cbCtx context.Context, _ monty.Stream, _ string) error {
+	_, err = s.FeedRun(hostCtx, "print('hello')", &montygo.FeedOptions{
+		Print: telPrintContext(func(cbCtx context.Context, _ montygo.Stream, _ string) error {
 			count.Add(1)
 			assert.Equal(t, "caller", telStorage(cbCtx))
 			return errors.New("print failed")
@@ -274,9 +274,9 @@ func telCallbackFailures(t *testing.T, b monty.Backend) {
 	require.True(t, telSameSpan(host, trace.SpanFromContext(hostCtx)))
 	require.NoError(t, s.Close(ctx))
 
-	second, err := p.Checkout(hostCtx, monty.CheckoutOptions{})
+	second, err := p.Checkout(hostCtx, montygo.CheckoutOptions{})
 	require.NoError(t, err)
-	_, err = second.FeedRun(hostCtx, "fail()", &monty.FeedOptions{ExternalLookup: map[string]any{
+	_, err = second.FeedRun(hostCtx, "fail()", &montygo.FeedOptions{ExternalLookup: map[string]any{
 		"fail": func(context.Context) error {
 			count.Add(1)
 			return errors.New("function failed")
@@ -284,10 +284,10 @@ func telCallbackFailures(t *testing.T, b monty.Backend) {
 	}})
 	require.ErrorContains(t, err, "function failed")
 	require.True(t, telSameSpan(host, trace.SpanFromContext(hostCtx)))
-	_, err = second.FeedRun(hostCtx, "await fail()", &monty.FeedOptions{ExternalLookup: map[string]any{
-		"fail": func(context.Context) *monty.Future {
+	_, err = second.FeedRun(hostCtx, "await fail()", &montygo.FeedOptions{ExternalLookup: map[string]any{
+		"fail": func(context.Context) *montygo.Future {
 			count.Add(1)
-			return monty.Async(func() (any, error) { return nil, errors.New("async failed") })
+			return montygo.Async(func() (any, error) { return nil, errors.New("async failed") })
 		},
 	}})
 	require.ErrorContains(t, err, "async failed")
@@ -296,24 +296,24 @@ func telCallbackFailures(t *testing.T, b monty.Backend) {
 	require.NoError(t, second.Close(ctx))
 	require.NoError(t, p.Close(ctx))
 	host.End()
-	require.NoError(t, monty.Flush(ctx))
+	require.NoError(t, montygo.Flush(ctx))
 	require.NoError(t, tp.Shutdown(ctx))
 }
 
-func telSnapshotResumes(t *testing.T, b monty.Backend) {
+func telSnapshotResumes(t *testing.T, b montygo.Backend) {
 	ctx := testCtx(t)
 	tp, recorder := telTracing()
 	tracer := tp.Tracer("callbacks")
-	require.NoError(t, monty.Instrument(monty.TelemetryComponents{Tracer: tracer}))
-	p := telPool(t, b, monty.Options{})
-	s, err := p.Checkout(ctx, monty.CheckoutOptions{})
+	require.NoError(t, montygo.Instrument(montygo.TelemetryComponents{Tracer: tracer}))
+	p := telPool(t, b, montygo.Options{})
+	s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
 	require.NoError(t, err)
 
-	snap, err := s.FeedStart(context.WithValue(ctx, telStorageKey{}, "feed"), "value = await callback(); print(value); value", &monty.FeedOptions{
+	snap, err := s.FeedStart(context.WithValue(ctx, telStorageKey{}, "feed"), "value = await callback(); print(value); value", &montygo.FeedOptions{
 		ExternalLookup: map[string]any{
-			"callback": func(ctx context.Context) *monty.Future {
+			"callback": func(ctx context.Context) *montygo.Future {
 				assert.Equal(t, "resume", telStorage(ctx))
-				return monty.Async(func() (any, error) {
+				return montygo.Async(func() (any, error) {
 					spanCtx, span := tracer.Start(ctx, "snapshot callback")
 					defer span.End()
 					assert.Equal(t, "resume", telStorage(spanCtx))
@@ -321,7 +321,7 @@ func telSnapshotResumes(t *testing.T, b monty.Backend) {
 				})
 			},
 		},
-		Print: telPrintContext(func(ctx context.Context, _ monty.Stream, _ string) error {
+		Print: telPrintContext(func(ctx context.Context, _ montygo.Stream, _ string) error {
 			assert.Equal(t, "resume", telStorage(ctx))
 			_, span := tracer.Start(ctx, "snapshot print")
 			span.End()
@@ -331,7 +331,7 @@ func telSnapshotResumes(t *testing.T, b monty.Backend) {
 	require.NoError(t, err)
 	resumeCtx := context.WithValue(ctx, telStorageKey{}, "resume")
 	for {
-		if _, done := snap.(*monty.Complete); done {
+		if _, done := snap.(*montygo.Complete); done {
 			break
 		}
 		resumer, ok := snap.(telAutoResumer)
@@ -339,10 +339,10 @@ func telSnapshotResumes(t *testing.T, b monty.Backend) {
 		snap, err = resumer.ResumeAuto(resumeCtx)
 		require.NoError(t, err)
 	}
-	require.Equal(t, int64(42), snap.(*monty.Complete).Output)
+	require.Equal(t, int64(42), snap.(*montygo.Complete).Output)
 	require.NoError(t, s.Close(ctx))
 	require.NoError(t, p.Close(ctx))
-	require.NoError(t, monty.Flush(ctx))
+	require.NoError(t, montygo.Flush(ctx))
 
 	spans := recorder.Ended()
 	for _, pair := range [][2]string{{"snapshot callback", "call {function_name}"}, {"snapshot print", "run code"}} {

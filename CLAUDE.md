@@ -5,13 +5,14 @@ montygo is a Go binding for [Monty](https://github.com/pydantic/monty), a sandbo
 - Module: `github.com/asalimonov/montygo`, Go 1.25, no cgo. MIT licence.
 - Baseline: Monty `0.0.23` plus upstream `main@f8acf4fa`, wire protocol 3.
 - Upstream checkout: the sibling directory `../monty`. Parity is judged against it.
+- Versions: `MontyVersion` is the upstream release; `BindingVersion()` is this module's release from git tags via `scripts/version.sh`. See `docs/architecture/versioning.md`.
 - Architecture: start with `docs/architecture/overview.md`. Parity status is in `docs/parity/`. The original design record is in `docs/brainstorms/`.
 
 ## Layout
 
 | Path | Contents |
 |---|---|
-| `*.go` (package `monty`) | public API: pools, sessions, snapshots, host objects, value conversion, print, mounts, errors, telemetry |
+| `*.go` (package `montygo`) | public API: pools, sessions, snapshots, host objects, value conversion, print, mounts, errors, telemetry |
 | `osaccess/` | in-memory OS helpers, a port of `pydantic_monty/os_access.py` |
 | `internal/wire` | framing and the hand-written `monty.v1` protobuf codec |
 | `internal/value` | Go model of Python values |
@@ -21,7 +22,8 @@ montygo is a Go binding for [Monty](https://github.com/pydantic/monty), a sandbo
 | `internal/mountfs` | host directory mounts, a port of `monty-fs` |
 | `internal/telemetry` | OpenTelemetry protocol mirror, a port of `monty-pool` telemetry |
 | `montypb/` | generated protobuf types, used only as a test oracle |
-| `proto/` | vendored `monty.proto` and `PROTO_REV` |
+| `proto/` | vendored `monty.proto` and `PROTO_REV`, the full upstream SHA |
+| `scripts/` | `version.sh` (version from git tags), `check-pins.sh`, and their tests |
 | `worker-wasm/` | Rust crate building the worker for `wasm32-wasip1` |
 | `server/` | Rust crate `monty-server`: WebSocket server on `monty-pool` `Checkout::turn_raw` |
 | `docker/` | `Dockerfile` for the `monty-server` image, `pyclient.Dockerfile` for the Python client test image |
@@ -44,6 +46,9 @@ montygo is a Go binding for [Monty](https://github.com/pydantic/monty), a sandbo
 make build-worker            # native worker: cargo build -p monty-runtime in ../monty
 make build-wasm              # embedded worker blob + checksum (uses ../monty via MONTY_SRC when present)
 make generate                # regenerate montypb from proto/
+make version                 # print the version scripts/version.sh derives from git tags
+make check-pins              # verify every copy of the upstream pin and MontyVersion
+make test-scripts            # shell tests of scripts/
 GOTOOLCHAIN=local go vet ./...
 GOTOOLCHAIN=local go test -count=1 ./...          # native and wasm backends
 make test-native | make test-wasm                 # one backend
@@ -71,7 +76,8 @@ make test-network-clean      # remove leaked test containers
 | `MONTY_SRC` | upstream checkout used by `make build-worker`, `make build-wasm` and the image builds, default `../monty` |
 | `MONTY_DOCKER_SRC` | `auto` (default) stages `MONTY_SRC` into the image build when present; any other value builds from the pinned git fetch |
 | `PLATFORMS` | buildx platforms for `make docker-build` and `make docker-push`, default `linux/amd64,linux/arm64` |
-| `IMAGE`, `PYCLIENT_IMAGE`, `IMAGE_TAG`, `REGISTRY` | image names, the tag (default `<Version>-<UpstreamRev>`) and the push registry |
+| `VERSION` | overrides `scripts/version.sh`; stamped into Go binaries, the server and the image |
+| `IMAGE`, `PYCLIENT_IMAGE`, `IMAGE_TAG`, `REGISTRY` | image names, the tag (default `$(VERSION)`) and the push registry |
 | `MONTYGO_NETWORK_TESTS` | MUST be `1` for `tests/network` to run |
 | `MONTYGO_TEST_PARALLEL` | `tests/network` units and `-parallel` budget, default `4` |
 | `MONTYGO_TEST_IMAGE` | server image for `tests/network`, default `monty-server:latest` |
@@ -97,18 +103,20 @@ make test-network-clean      # remove leaked test containers
 - Commit subjects are imperative. A body holds only facts the diff cannot show.
 - Every change MUST pass vet, tests on both backends, the race detector and golangci-lint before it is called done.
 - Every change to code MUST also pass `make server-check`, `make docker-build`, `make test-docker`, `make test-network`, and `go vet ./...` and `go mod tidy -diff` in `tests/network/`.
+- Versions come from git tags through `scripts/version.sh`; nothing else hard-codes the binding version. Upstream pins come from `proto/PROTO_REV` and `MontyVersion`; `make check-pins` MUST pass.
+- The server version is stamped at build time through `MONTY_SERVER_VERSION`. The crate version in `server/Cargo.toml` is only the fallback.
 
 ## Upstream sources of each port
 
 | montygo | Upstream (`../monty`) |
 |---|---|
 | `proto/monty/v1/monty.proto` | `crates/monty-proto/proto/monty/v1/monty.proto` |
-| `monty.ProtocolVersion` | `PROTOCOL_VERSION` in `crates/monty-proto/src/lib.rs` |
+| `montygo.ProtocolVersion` | `PROTOCOL_VERSION` in `crates/monty-proto/src/lib.rs` |
 | `worker-wasm/src/subprocess.rs` | `crates/monty-runtime/src/subprocess.rs`, byte-identical |
 | `internal/pool` | `crates/monty-pool/src/{pool,checkout,worker}.rs` |
 | `internal/telemetry` | `crates/monty-pool/src/telemetry/` |
 | `internal/mountfs` and its tests | `crates/monty-fs/src`, `crates/monty-fs/tests` |
-| package `monty` API | `crates/monty-js/ts/` |
+| package `montygo` API | `crates/monty-js/ts/` |
 | root `*_test.go` | `crates/monty-js/__test__/*.spec.ts` |
 | `websocket.go`, `internal/pool/websocket_test.go` | `crates/monty-python` WebSocket client and tests, `crates/monty-pool/tests/websocket.rs` |
 | `server/` | `docs/server.md` (Full Monty behaviour, flags, defaults), `Checkout::turn_raw` in `crates/monty-pool/src/checkout.rs` |
@@ -134,13 +142,11 @@ Let `OLD` be the current pin (`proto/PROTO_REV`) and `NEW` the target tag or com
    - Read `git -C ../monty log --oneline OLD..NEW` and the release notes.
    - Diff every source in the table above, for example `git -C ../monty diff OLD NEW --stat -- crates/monty-proto crates/monty-pool crates/monty-fs crates/monty-js crates/monty-python examples docs/server.md`.
    - List the changes per area before editing. Protocol changes come first, because everything else depends on them.
-2. **Move the pins.** Update every place that names the old revision or version:
-   - `proto/PROTO_REV`
-   - `monty.go`: `Version` and `UpstreamRev`
+2. **Move the pins.** `scripts/check-pins.sh` is the authority: it reads `proto/PROTO_REV` and `MontyVersion` and names every file that disagrees. Update `proto/PROTO_REV` (full 40-character SHA) and `montygo.go` (`MontyVersion`, `UpstreamRev`) first, then run `make check-pins` and fix each reported file:
    - `worker-wasm/Cargo.toml`: package version and the three git `rev` values, then `cargo update` in `worker-wasm/`
-   - `server/Cargo.toml`: package version and the three git `rev` values, then `cargo update` in `server/`
+   - `server/Cargo.toml`: the three git `rev` values, then `cargo update` in `server/`; the package version is the server's own fallback and does not track Monty
    - `server/src/version.rs`: `MONTY_REV`, as a full SHA; `monty_rev_matches_lockfile` checks it against `server/Cargo.lock`
-   - `docker/Dockerfile`: `ARG MONTY_REV` and the `org.opencontainers.image.version` label
+   - `docker/Dockerfile`: `ARG MONTY_REV`; the image version comes from the build, not from a label constant
    - `docker/pyclient.Dockerfile`: `ARG MONTY_REV`
    - `.github/workflows/ci.yml`: `MONTY_REV`, as a full 40-character SHA, because `actions/checkout` looks up a short SHA as a branch or tag. The Makefile reads the image build revision from this line.
    - `internal/worker/websocket.go`: `DefaultUserAgent`
@@ -153,7 +159,7 @@ Let `OLD` be the current pin (`proto/PROTO_REV`) and `NEW` the target tag or com
    - Copy the upstream `monty.proto` into `proto/monty/v1/` and run `make generate`.
    - Port new or changed fields into the hand-written codec in `internal/wire`. `montypb` alone is not used at runtime.
    - Extend the differential tests in `internal/wire/codec_test.go` for each new message, field and value kind.
-   - If `PROTOCOL_VERSION` changed, update `monty.ProtocolVersion`. Workers from older releases will then be rejected, so record that in the changelog.
+   - If `PROTOCOL_VERSION` changed, update `montygo.ProtocolVersion`. Workers from older releases will then be rejected, so record that in the changelog.
    - Re-check the frame size limit, the decode budget and the value depth costs against `crates/monty-proto`.
 4. **Rebuild the workers.**
    - Copy `crates/monty-runtime/src/subprocess.rs` to `worker-wasm/src/subprocess.rs`. It MUST stay byte-identical.
@@ -180,6 +186,7 @@ Let `OLD` be the current pin (`proto/PROTO_REV`) and `NEW` the target tag or com
 9. **Write the release note.** Add `changelogs/vX.Y.Z.md` with the structure of `changelogs/v0.0.23.md`: upstream baseline, what's added, parity table, test parity, known limitations, build notes, full changelog link.
 10. **Verify.** All of the following MUST pass:
     - `go vet ./...` and `golangci-lint run ./...`
+    - `make check-pins` and `make test-scripts`
     - `go test -count=1 ./...` on both backends, and again with `-race`
     - `make examples` with `MONTY_EXAMPLES_BACKEND=native` and with `MONTY_EXAMPLES_BACKEND=wasm`
     - `go mod tidy -diff` in the root, `examples/` and `tests/network/`, and `go vet ./...` in `tests/network/`

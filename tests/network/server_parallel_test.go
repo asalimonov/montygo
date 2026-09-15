@@ -9,14 +9,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 func TestParallel_ManySessionsOneUnit(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t)
 	ctx := testCtx(t)
-	p := s.NewPool(monty.WebSocketOptions{MaxProcesses: 16})
+	p := s.NewPool(montygo.WebSocketOptions{MaxProcesses: 16})
 	base := s.Baseline()
 
 	const sessions = 32
@@ -26,7 +26,7 @@ func TestParallel_ManySessionsOneUnit(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			session, err := p.Checkout(ctx, monty.CheckoutOptions{})
+			session, err := p.Checkout(ctx, montygo.CheckoutOptions{})
 			if err != nil {
 				errs[i] = err
 				return
@@ -55,14 +55,14 @@ func TestParallel_AbandonedTurnsReleaseSessions(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t)
 	ctx := testCtx(t)
-	p := s.NewPool(monty.WebSocketOptions{MaxProcesses: 4})
+	p := s.NewPool(montygo.WebSocketOptions{MaxProcesses: 4})
 
 	var wg sync.WaitGroup
 	for range 4 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			session, err := p.Checkout(ctx, monty.CheckoutOptions{})
+			session, err := p.Checkout(ctx, montygo.CheckoutOptions{})
 			if err != nil {
 				return
 			}

@@ -11,12 +11,12 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	monty "github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo"
 )
 
 func requireDisconnect(t *testing.T, err error) {
 	t.Helper()
-	var de *monty.DisconnectError
+	var de *montygo.DisconnectError
 	require.ErrorAs(t, err, &de)
 }
 
@@ -24,14 +24,18 @@ func TestTimeouts_IdleClosesSession(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--idle-timeout", "1"))
 	ctx := testCtx(t)
-	p := s.NewPool(monty.WebSocketOptions{})
-	session := s.Checkout(ctx, p, monty.CheckoutOptions{})
+	p := s.NewPool(montygo.WebSocketOptions{})
+	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	_, err := session.FeedRun(ctx, "x = 1", nil)
 	require.NoError(t, err)
 
 	time.Sleep(2500 * time.Millisecond)
 	_, err = session.FeedRun(ctx, "x", nil)
-	requireDisconnect(t, err)
+	var de *montygo.DisconnectError
+	require.ErrorAs(t, err, &de)
+	require.Equal(t, 1008, de.Code)
+	require.Equal(t, "idle timeout of 1s exceeded", de.Reason)
+	require.ErrorIs(t, err, montygo.ErrSessionLost)
 	s.WaitMetric("monty_server_timeouts_total", map[string]string{"kind": "idle"}, 1, 5*time.Second)
 }
 
@@ -39,14 +43,14 @@ func TestTimeouts_TurnTimeoutIncludesHostCallback(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--turn-timeout", "1"))
 	ctx := testCtx(t)
-	p := s.NewPool(monty.WebSocketOptions{})
-	session := s.Checkout(ctx, p, monty.CheckoutOptions{})
+	p := s.NewPool(montygo.WebSocketOptions{})
+	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 
 	slow := func() int {
 		time.Sleep(2500 * time.Millisecond)
 		return 1
 	}
-	_, err := session.FeedRun(ctx, "slow() + 1", &monty.FeedOptions{ExternalLookup: map[string]any{"slow": slow}})
+	_, err := session.FeedRun(ctx, "slow() + 1", &montygo.FeedOptions{ExternalLookup: map[string]any{"slow": slow}})
 	requireDisconnect(t, err)
 	s.WaitMetric("monty_server_timeouts_total", map[string]string{"kind": "turn"}, 1, 5*time.Second)
 }
@@ -56,8 +60,8 @@ func TestTimeouts_SessionTimeout(t *testing.T) {
 	requireSlowTests(t)
 	s := SetupServer(t, WithArgs("--session-timeout", "2"))
 	ctx := testCtx(t)
-	p := s.NewPool(monty.WebSocketOptions{})
-	session := s.Checkout(ctx, p, monty.CheckoutOptions{})
+	p := s.NewPool(montygo.WebSocketOptions{})
+	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	for range 2 {
 		_, err := session.FeedRun(ctx, "1", nil)
 		require.NoError(t, err)
@@ -123,8 +127,8 @@ func TestTimeouts_KeepaliveDropsFrozenClient(t *testing.T) {
 	s := SetupServer(t, WithArgs("--keepalive", "1", "--idle-timeout", "0"))
 	ctx := testCtx(t)
 	proxy := startFreezeProxy(t, strings.TrimPrefix(s.Unit.HTTPBase(), "http://"))
-	p := s.NewPool(monty.WebSocketOptions{URL: proxy.URL()})
-	session := s.Checkout(ctx, p, monty.CheckoutOptions{})
+	p := s.NewPool(montygo.WebSocketOptions{URL: proxy.URL()})
+	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	_, err := session.FeedRun(ctx, "1", nil)
 	require.NoError(t, err)
 

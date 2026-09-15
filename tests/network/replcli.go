@@ -33,7 +33,11 @@ func replBinary(t *testing.T) string {
 		}
 		replBuild.dir = dir
 		path := filepath.Join(dir, "repl")
-		cmd := exec.Command("go", "build", "-C", "../../examples", "-o", path, "./repl")
+		args := []string{"build", "-C", "../../examples"}
+		if v := os.Getenv("MONTYGO_BUILD_VERSION"); v != "" {
+			args = append(args, "-ldflags", "-X github.com/asalimonov/montygo.buildVersion="+v)
+		}
+		cmd := exec.Command("go", append(args, "-o", path, "./repl")...)
 		cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			replBuild.err = fmt.Errorf("build examples/repl: %w\n%s", err, out)

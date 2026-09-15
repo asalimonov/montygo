@@ -8,10 +8,15 @@ use monty_server::{
     envelope::DumpKeys,
     limits::Ceilings,
     texts,
+    version::{MONTY_REV, SERVER_VERSION},
 };
 use monty_types::MontyObject;
 use pb::{child_event::Kind as Event, parent_request::Kind as Request};
-use tokio::{net::TcpStream, time::timeout};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    time::timeout,
+};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -260,4 +265,44 @@ async fn full_server_rejects_upgrades_with_503() {
         .await
         .expect_err("second dial");
     assert!(err.to_string().contains("503"), "{err}");
+}
+
+#[tokio::test]
+async fn info_reports_versions_and_limits() {
+    let Some(server) = start(4).await else { return };
+    let mut stream = TcpStream::connect(server.bound).await.expect("connect");
+    stream
+        .write_all(b"GET /info HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("write");
+    let mut raw = Vec::new();
+    timeout(IO_BUDGET, stream.read_to_end(&mut raw))
+        .await
+        .expect("read timed out")
+        .expect("read");
+    let text = String::from_utf8(raw).expect("utf-8");
+    let (head, body) = text.split_once("\r\n\r\n").expect("header separator");
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert!(
+        head.to_ascii_lowercase().contains("content-type: application/json"),
+        "{head}"
+    );
+    let info: serde_json::Value = serde_json::from_str(body).expect("json body");
+    assert_eq!(info["version"], SERVER_VERSION);
+    assert_eq!(info["monty_rev"], MONTY_REV);
+    assert_eq!(info["protocol_version"], 3);
+    assert_eq!(
+        info["limits"],
+        serde_json::json!({
+            "idle_timeout_s": 30,
+            "keepalive_s": 5,
+            "session_timeout_s": 0,
+            "turn_timeout_s": 60,
+            "max_duration_s": 60,
+            "max_memory_bytes": 64 * 1024 * 1024,
+            "max_recursion_depth": 1000,
+            "max_sessions": 4,
+            "max_sessions_per_client": 0,
+        })
+    );
 }
