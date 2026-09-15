@@ -298,7 +298,10 @@ func (c *ClassInstance) callMethod(ctx context.Context, name string, args []any,
 		return nil, err
 	}
 	if fut, ok := result.(*Future); ok {
-		return fut.then(func(v any) (any, error) { return c.convert(name, v) }), nil
+		if fut == nil {
+			return nil, &ValueError{Message: "host returned a nil Future"}
+		}
+		return fut.thenContext(ctx, func(v any) (any, error) { return c.convert(name, v) }), nil
 	}
 	return c.convert(name, result)
 }
@@ -476,7 +479,10 @@ func (c *ClassType) callMethod(ctx context.Context, name string, args []any, kwa
 		return nil, err
 	}
 	if fut, ok := result.(*Future); ok {
-		return fut.then(func(v any) (any, error) { return c.convert(name, v) }), nil
+		if fut == nil {
+			return nil, &ValueError{Message: "host returned a nil Future"}
+		}
+		return fut.thenContext(ctx, func(v any) (any, error) { return c.convert(name, v) }), nil
 	}
 	return c.convert(name, result)
 }

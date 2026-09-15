@@ -76,7 +76,7 @@ type CheckoutOptions struct {
 	MaxHostObjects uint64
 	// MaxPendingFutures bounds unresolved futures per feed: 0 means 1000, Unlimited disables.
 	MaxPendingFutures uint64
-	// InterruptGrace is how long Interrupt waits for a suspension before killing the worker: 0 means 100ms.
+	// InterruptGrace bounds an accepted interruption, including host callbacks: 0 means 100ms.
 	InterruptGrace time.Duration
 }
 
@@ -106,7 +106,7 @@ func (o CheckoutOptions) sessionLimits() (sessionLimits, error) {
 // Uint32 returns a pointer to v, for AssertMessageAnnotations.
 func Uint32(v uint32) *uint32 { return &v }
 
-// DurationPtr returns a pointer to d, for PrintFlushInterval.
+// DurationPtr returns a pointer to d, for duration options such as InterruptOptions.Grace.
 func DurationPtr(d time.Duration) *time.Duration { return &d }
 
 func (o CheckoutOptions) configure() (wire.Configure, error) {

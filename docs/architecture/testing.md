@@ -18,6 +18,22 @@
 - `make test-docker` runs the suite against the image. It starts one container on a random loopback port with the test dump key, the per-client quota disabled and the label `montygo.test=docker`. It waits for `/health`, runs `go test -count=1 -timeout 30m .` with `MONTY_TEST_BACKENDS=websocket`, and stops the container.
 - Adaptations for this backend are listed in `docs/parity/tests.md`.
 
+## Lifecycle regressions
+
+Lifecycle regressions run through eachBackend, including 1000 immediate
+Go/Interrupt iterations per backend under -race. `lifecycle_state_test.go` owns
+driver transitions directly to test before-send, completion/force ordering,
+stale timers, stale step cancellation, duplicate call IDs, and ID exhaustion.
+`execution_test.go` covers busy rejection, stale handles/snapshots and a callback
+that outlives worker termination. `execution_future_test.go` covers shared Futures,
+failure cleanup, snapshot context lifetime and manual settlement. The pool lease
+tests cover blocked Print, release/force races and delayed observed exits.
+
+Release verification MUST run the race suite against an explicitly configured
+WebSocket server as well as native and wasm. A skipped WebSocket backend is not
+evidence of a pass. The public API golden requires review; exported names alone
+do not validate changed call signatures.
+
 ## Server tests
 
 - `make server-check` runs `cargo clippy --all-targets -- -D warnings` and `cargo test` in `server/`.

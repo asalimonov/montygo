@@ -51,11 +51,14 @@ func typeMsg(typeName, message string) string {
 
 // RuntimeError is a Python exception raised by the sandboxed code.
 type RuntimeError struct {
+	lost      bool
 	TypeName  string
 	Message   string
 	Frames    []Frame
 	Traceback string
 }
+
+func (e *RuntimeError) Is(target error) bool { return e.lost && target == ErrSessionLost }
 
 func (e *RuntimeError) Error() string            { return typeMsg(e.TypeName, e.Message) }
 func (e *RuntimeError) Exception() ExceptionInfo { return ExceptionInfo{e.TypeName, e.Message} }
@@ -195,11 +198,22 @@ func (e *ResourceError) Exception() ExceptionInfo {
 }
 func (e *ResourceError) Display(DisplayFormat) string { return typeMsg("RuntimeError", e.Error()) }
 
-// sessionClosedError is ErrSessionClosed's value: a fixed text that also matches ErrSessionLost.
+// sessionClosedError distinguishes deliberate closure from unexpected loss.
 type sessionClosedError struct{}
 
-func (sessionClosedError) Error() string        { return "the session is closed — check out a new one" }
-func (sessionClosedError) Is(target error) bool { return target == ErrSessionLost }
+func (sessionClosedError) Error() string { return "the session is closed — check out a new one" }
+
+var (
+	ErrSessionBusy   = errors.New("session already has an active operation")
+	ErrSnapshotStale = errors.New("snapshot does not own the current suspension")
+)
+
+// SessionKilledError reports forced termination after an interrupt's grace.
+type SessionKilledError struct{ Reason error }
+
+func (e *SessionKilledError) Error() string        { return "session killed to interrupt execution" }
+func (e *SessionKilledError) Unwrap() error        { return e.Reason }
+func (e *SessionKilledError) Is(target error) bool { return target == ErrSessionLost }
 
 // ConversionError reports a host value that cannot cross into the sandbox.
 type ConversionError struct {
@@ -237,8 +251,9 @@ var (
 	ErrPoolClosed = errors.New("the pool is closed — create a new Monty pool")
 	// ErrSessionClosed is returned by every call on a closed session.
 	ErrSessionClosed error = sessionClosedError{}
-	// ErrSessionLost matches every error that leaves a session unusable: a crash,
-	// a timeout, a lost connection, a server shutdown, a protocol violation or a close.
+	// ErrSessionLost matches unexpected terminal failures: a crash, timeout,
+	// lost connection, server shutdown, protocol violation or forced interrupt.
+	// Deliberate ErrSessionClosed does not match it.
 	ErrSessionLost     = errors.New("montygo: session lost")
 	ErrNotFresh        = errors.New("loadSession / loadSnapshot is only valid on a fresh session, before any feedRun / feedStart / loadSession / loadSnapshot")
 	ErrDumpIsSuspended = errors.New("this dump is a suspended snapshot — use loadSnapshot() to resume it")

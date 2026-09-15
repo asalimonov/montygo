@@ -1,7 +1,6 @@
 package montygo
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -20,8 +19,17 @@ type Host struct {
 }
 
 type hostFunc struct {
-	fn  Function
-	sig reflect.Type
+	fn             Function
+	sig            reflect.Type
+	parameterNames []string
+}
+
+// HostFuncOptions supplies names for reflected parameters in generated stubs.
+// Names do not enable keyword binding for positional Go parameters.
+type HostFuncOptions struct {
+	// ParameterNames excludes context.Context and Kwargs, but includes a variadic
+	// parameter. Nil keeps generated names; a non-nil slice must match exactly.
+	ParameterNames []string
 }
 
 // NewHost returns an empty host registry.
@@ -32,6 +40,14 @@ func NewHost() *Host {
 func validHostName(name string) error {
 	if name == "" {
 		return &ValueError{Message: "host name must not be empty"}
+	}
+	switch name {
+	case "False", "None", "True", "and", "as", "assert", "async", "await",
+		"break", "class", "continue", "def", "del", "elif", "else", "except",
+		"finally", "for", "from", "global", "if", "import", "in", "is",
+		"lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try",
+		"while", "with", "yield":
+		return &ValueError{Message: fmt.Sprintf("host name %q is a Python keyword", name)}
 	}
 	for i, r := range name {
 		switch {
@@ -45,7 +61,10 @@ func validHostName(name string) error {
 }
 
 // Func registers fn under name; the signature is validated now.
-func (h *Host) Func(name string, fn any) error {
+func (h *Host) Func(name string, fn any, opts ...HostFuncOptions) error {
+	if len(opts) > 1 {
+		return &ValueError{Message: "Host.Func accepts at most one options value"}
+	}
 	if err := validHostName(name); err != nil {
 		return err
 	}
@@ -59,12 +78,19 @@ func (h *Host) Func(name string, fn any) error {
 			sig = t
 		}
 	}
+	var names []string
+	if len(opts) == 1 {
+		names = opts[0].ParameterNames
+	}
+	if err := validateParameterNames(sig, names); err != nil {
+		return err
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.taken(name) {
 		return &ValueError{Message: fmt.Sprintf("host name %q is already registered", name)}
 	}
-	h.funcs[name] = hostFunc{fn: f, sig: sig}
+	h.funcs[name] = hostFunc{fn: f, sig: sig, parameterNames: append([]string(nil), names...)}
 	return nil
 }
 
@@ -77,6 +103,14 @@ func (h *Host) Object(name string, v any, opts ClassInstanceOptions) error {
 	ci, err := NewClassInstance(v, opts)
 	if err != nil {
 		return err
+	}
+	if err := validHostName(ci.Name()); err != nil {
+		return fmt.Errorf("host class: %w", err)
+	}
+	for _, m := range ci.classType.stubMethods(ci.opts.AllowedMethods) {
+		if err := validHostName(m.name); err != nil {
+			return fmt.Errorf("host method: %w", err)
+		}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -141,18 +175,14 @@ func (h *Host) sortedFuncs() []string {
 	return names
 }
 
-// lookup returns the merged view the answerer resolves names against.
-func (h *Host) lookup() map[string]any {
+func (h *Host) lookupEntry(name string) (any, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	out := make(map[string]any, len(h.funcs)+len(h.objects))
-	for name, f := range h.funcs {
-		out[name] = f.fn
+	if f, ok := h.funcs[name]; ok {
+		return f.fn, true
 	}
-	for name, o := range h.objects {
-		out[name] = o
-	}
-	return out
+	o, ok := h.objects[name]
+	return o, ok
 }
 
 // register puts every object into the session's store under its ID.
@@ -175,14 +205,15 @@ func (h *Host) Stubs() string {
 	b.WriteString("from typing import Any, Awaitable\n")
 	for _, name := range h.sortedFuncs() {
 		b.WriteString("\n")
-		writeFuncStub(&b, name, h.funcs[name].sig, "")
+		f := h.funcs[name]
+		writeFuncStub(&b, name, f.sig, "", f.parameterNames)
 	}
 	for _, name := range h.sortedObjects() {
 		ci := h.objects[name]
 		fmt.Fprintf(&b, "\nclass %s:\n", ci.Name())
 		wrote := false
 		for _, m := range ci.classType.stubMethods(ci.opts.AllowedMethods) {
-			writeFuncStub(&b, m.name, m.sig, "    ")
+			writeFuncStub(&b, m.name, m.sig, "    ", nil)
 			wrote = true
 		}
 		if !wrote {
@@ -223,7 +254,7 @@ func (c *ClassType) stubMethods(policy AttrPolicy) []stubMethod {
 
 // writeFuncStub renders `def name(params) -> result: ...`; a method signature
 // includes its receiver, which becomes `self`.
-func writeFuncStub(b *strings.Builder, name string, sig reflect.Type, indent string) {
+func writeFuncStub(b *strings.Builder, name string, sig reflect.Type, indent string, names []string) {
 	if sig == nil {
 		fmt.Fprintf(b, "%sdef %s(*args: Any, **kwargs: Any) -> Any: ...\n", indent, name)
 		return
@@ -241,18 +272,67 @@ func writeFuncStub(b *strings.Builder, name string, sig reflect.Type, indent str
 	if kwargs {
 		last--
 	}
-	for i := first; i < last; i++ {
-		t := sig.In(i)
-		if sig.IsVariadic() && i == last-1 {
-			params = append(params, fmt.Sprintf("*args: %s", pyType(t.Elem())))
-			continue
+	paramName := func(i int, variadic bool) string {
+		if names != nil {
+			return names[i-first]
 		}
-		params = append(params, fmt.Sprintf("arg%d: %s", i-first, pyType(t)))
+		if variadic {
+			return "args"
+		}
+		return fmt.Sprintf("arg%d", i-first)
+	}
+	fixed := last
+	if sig.IsVariadic() {
+		fixed--
+	}
+	for i := first; i < fixed; i++ {
+		t := sig.In(i)
+		params = append(params, fmt.Sprintf("%s: %s", paramName(i, false), pyType(t)))
+	}
+	if len(params) > 0 {
+		params = append(params, "/")
+	}
+	if sig.IsVariadic() {
+		params = append(params, fmt.Sprintf("*%s: %s", paramName(last-1, true), pyType(sig.In(last-1).Elem())))
 	}
 	if kwargs {
 		params = append(params, "**kwargs: Any")
 	}
 	fmt.Fprintf(b, "%sdef %s(%s) -> %s: ...\n", indent, name, strings.Join(params, ", "), pyResult(sig))
+}
+
+func validateParameterNames(sig reflect.Type, names []string) error {
+	if names == nil {
+		return nil
+	}
+	if sig == nil {
+		if len(names) == 0 {
+			return nil
+		}
+		return &ValueError{Message: "parameter names require a reflected Go function"}
+	}
+	first, last := 0, sig.NumIn()
+	if first < last && sig.In(first) == contextType {
+		first++
+	}
+	kwargs := last > first && sig.In(last-1) == kwargsType && !sig.IsVariadic()
+	if kwargs {
+		last--
+	}
+	if len(names) != last-first {
+		return &ValueError{Message: fmt.Sprintf("expected %d parameter names, got %d", last-first, len(names))}
+	}
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if err := validHostName(name); err != nil {
+			return fmt.Errorf("parameter name: %w", err)
+		}
+		if seen[name] || (kwargs && name == "kwargs") {
+			return &ValueError{Message: fmt.Sprintf("duplicate parameter name %q", name)}
+		}
+		seen[name] = true
+	}
+	return nil
 }
 
 var (
@@ -301,6 +381,3 @@ func pyResult(sig reflect.Type) string {
 	}
 	return pyType(sig.Out(0))
 }
-
-// ensure the answerer can call host functions with a context-carrying signature
-var _ = context.Background

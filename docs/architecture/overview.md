@@ -134,7 +134,7 @@ See `protocol.md` for the codec and `pool.md` for deadlines and failure classifi
 ### Concurrency
 
 - A pool is safe for concurrent use. Checkouts beyond `MaxProcesses` wait up to `CheckoutTimeout`.
-- A session holds its mutex for a whole call, host callbacks included. A callback MUST NOT call back into the same session.
+- A session admits one execution, including paused snapshots; conflicting calls return ErrSessionBusy. Its lifecycle mutex covers only state transitions, not callbacks or I/O. Interrupt and CloseNow target the execution identity; bounded waits MUST be used if a callback invokes lifecycle APIs on its own session.
 - Async host functions return a `*montygo.Future` that settles on its own goroutine. The session collects settled futures at a `ResolveFutures` suspension, or awaits one directly when the worker allows an eager await.
 - Every blocking call takes a `context.Context`. Cancelling it while Python executes ends the worker (a kill, or a close frame for WebSocket) and poisons the session. Cancelling it while the worker waits on a host call aborts the feed with `KeyboardInterrupt` and keeps the session. `Session.Interrupt` and `Session.CloseNow` work from any goroutine; `Session.Done` and `Err` report a lost session. See `session.md`.
 - `Pool.Shutdown` waits for open sessions and retiring workers; `Pool.Close` retires idle workers only. See `pool.md`.

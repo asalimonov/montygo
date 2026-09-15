@@ -44,6 +44,18 @@ git tag v0.1.0 ── scripts/version.sh ──┬─ Makefile: VERSION, IMAGE_T
 
 ## `BindingVersion()` at run time
 
+Consumers with a directory replacement SHOULD stamp the dependency checkout:
+
+```sh
+montygo_version=$(cd ../montygo && ./scripts/version.sh)
+GOTOOLCHAIN=local go build -ldflags "-X github.com/asalimonov/montygo.buildVersion=${montygo_version}" ./...
+```
+
+Run the script with montygo as its working directory; preserve the dirty suffix
+and quote the stamp. The consumer's `vcs.revision` identifies the main module,
+not montygo. Runtime version discovery MUST NOT invoke git, read a checkout, or
+guess a replaced dependency's revision from the main module.
+
 `BindingVersion()` in `version.go` resolves in this order:
 
 1. `buildVersion`, the variable stamped by `-ldflags -X`;

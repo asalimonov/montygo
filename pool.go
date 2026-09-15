@@ -231,7 +231,10 @@ func (p *Pool) BinaryPath() string { return p.binary }
 
 // Close shuts down idle workers; it is idempotent.
 func (p *Pool) Close(ctx context.Context) error {
-	if !p.closed.CompareAndSwap(false, true) {
+	p.sessionsMu.Lock()
+	alreadyClosed := p.closed.Swap(true)
+	p.sessionsMu.Unlock()
+	if alreadyClosed {
 		return nil
 	}
 	return p.inner.Close(ctx)
@@ -241,7 +244,9 @@ func (p *Pool) Close(ctx context.Context) error {
 // first, open sessions are closed with CloseNow and the wait continues for the
 // workers to exit.
 func (p *Pool) Shutdown(ctx context.Context) error {
+	p.sessionsMu.Lock()
 	p.closed.Store(true)
+	p.sessionsMu.Unlock()
 	return p.inner.Shutdown(ctx)
 }
 
@@ -251,10 +256,17 @@ func (p *Pool) Stats() PoolStats {
 	return PoolStats{Starting: s.Starting, Active: s.Active, Idle: s.Idle, Retiring: s.Retiring}
 }
 
-func (p *Pool) track(s *Session) {
+func (p *Pool) track(s *Session) error {
 	p.sessionsMu.Lock()
+	defer p.sessionsMu.Unlock()
+	if p.closed.Load() {
+		return ErrPoolClosed
+	}
+	if err := s.Err(); err != nil {
+		return err
+	}
 	p.sessions[s] = struct{}{}
-	p.sessionsMu.Unlock()
+	return nil
 }
 
 func (p *Pool) untrack(s *Session) {
@@ -307,12 +319,15 @@ func (p *Pool) Checkout(ctx context.Context, opts CheckoutOptions) (*Session, er
 	s.attach(co)
 	if opts.Host != nil {
 		if err := opts.Host.register(s.store); err != nil {
-			_ = s.Close(context.Background())
+			_ = s.CloseNow()
 			return nil, err
 		}
 		s.host = opts.Host
 	}
-	p.track(s)
+	if err := p.track(s); err != nil {
+		_ = s.CloseNow()
+		return nil, err
+	}
 	return s, nil
 }
 

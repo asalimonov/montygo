@@ -58,12 +58,12 @@
 | Memory-limit classification on wasm | exit code 65 → `MemoryError` | the TS browser worker reports a crash |
 | Server info | `montygo.FetchServerInfo` (`GET <path>/info`), `ServerInfo`, `ServerLimits`, `ErrNoServerInfo` | montygo; `monty-server` addition, see `server.md` |
 | Binding version | `montygo.BindingVersion()`, `montygo.MontyVersion` | montygo; see `docs/architecture/versioning.md` |
-| Session lifecycle | `Session.Interrupt`, `Session.CloseNow`, `Session.Done`, `Session.Err`, `Session.Stats`, `SessionStats`, `Session.Go`, `*Run` (`Wait`, `Done`, `Interrupt`) | montygo; TS has only `close()` |
-| Lost-session classification | `ErrSessionLost`; `Is` on `*CrashedError`, `*DisconnectError`, `*ShutdownError`, `*ProtocolError` and `ErrSessionClosed`; `DisconnectError.Code`, `Reason` | montygo |
-| Interrupt grace | `CheckoutOptions.InterruptGrace` | montygo |
+| Session lifecycle | `Session.Interrupt`, `Session.CloseNow`, `Session.Done`, `Session.Err`, `Session.Stats`, `SessionStats`, `Session.Go`, `*Run` (`Wait`, `WaitContext`, `Done`, `Interrupt`) | montygo; synchronous execution admission, `ErrSessionBusy`, generation-bound snapshots |
+| Lost-session classification | `ErrSessionLost`; `Is` on `*CrashedError`, `*DisconnectError`, `*ShutdownError`, `*ProtocolError`, `*SessionKilledError` and fatal memory `*RuntimeError`; `DisconnectError.Code`, `Reason` | `ErrSessionClosed` deliberately does not match loss |
+| Interrupt grace and outcomes | `CheckoutOptions.InterruptGrace`, `InterruptOptions`, `InterruptResult`, `InterruptOutcome` | one accepted deadline covers Python and Go callbacks; caller context is wait-only |
 | Host-side bounds | `CheckoutOptions.MaxHostObjects`, `MaxPendingFutures`, `*ResourceError`; `Options.MaxPendingBytes`, `UnlimitedPendingBytes` | montygo; TS keeps every wrapper and buffers every frame |
 | Explicit unlimited | `montygo.Unlimited`, `montygo.UnlimitedDuration` | montygo; TS has no unlimited suspensions |
-| Host registry | `montygo.NewHost`, `*Host` (`Func`, `Object`, `Names`, `Stubs`, `Restorable`), `CheckoutOptions.Host`, `ErrHostObjectNotRestorable` | montygo |
+| Host registry | `montygo.NewHost`, `*Host` (`Func`, `Object`, `Names`, `Stubs`, `Restorable`), `HostFuncOptions`, `CheckoutOptions.Host`, `ErrHostObjectNotRestorable` | fixed reflected parameters are positional-only; optional labels do not enable keyword binding |
 | Interface-driven exposure | `montygo.Expose[T]()` | montygo |
 | Pool shutdown and accounting | `Pool.Shutdown`, `Pool.Stats`, `PoolStats` | montygo; TS `close()` does not wait for sessions |
 | Per-pool telemetry | `Options.Telemetry`, `WebSocketOptions.Telemetry` | montygo; TS installs process-wide only |
@@ -79,6 +79,13 @@
 | Cancelling the feed context while the worker waits on a host call | the worker is killed and the session is poisoned | `AbortFeed(KeyboardInterrupt)` ends the feed; `FeedRun` returns a `*RuntimeError` with `TypeName` `KeyboardInterrupt` and the session stays usable. `Session.Interrupt` uses the same path with a chosen reason. The sandbox cannot catch it with `except KeyboardInterrupt`. Cancelling while Python executes still kills the worker. |
 | `MaxSuspensions` | counted per checkout, no unlimited | counted per checkout (session), reset by `LoadSession` and `LoadSnapshot`; `Unlimited` disables it |
 | `All` | a value | a function, `montygo.All()` |
+
+The v0.2.0 lifecycle is a deliberate Go-only cleanup. `Interrupt(ctx, reason)`
+becomes `Interrupt(ctx, InterruptOptions{Reason: reason}) (InterruptResult, error)`.
+Future subscriptions are per execution/call ID, not per shared Future object.
+Terminal cleanup cancels callback work and drops subscriptions without settling
+caller-owned Futures. Grace expiry can retire a worker while RunDone remains
+false. No wire or server protocol change is required.
 
 ## Not provided
 

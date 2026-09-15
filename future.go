@@ -70,10 +70,24 @@ func (f *Future) settled() bool {
 	}
 }
 
-func (f *Future) then(convert func(any) (any, error)) *Future {
+func (f *Future) thenContext(ctx context.Context, convert func(any) (any, error)) *Future {
 	out, settle := NewFuture()
 	go func() {
-		<-f.done
+		defer func() {
+			if r := recover(); r != nil {
+				settle(nil, panicError(r))
+			}
+		}()
+		select {
+		case <-ctx.Done():
+			settle(nil, ctx.Err())
+			return
+		case <-f.done:
+		}
+		if err := ctx.Err(); err != nil {
+			settle(nil, err)
+			return
+		}
 		if f.err != nil {
 			settle(nil, f.err)
 			return

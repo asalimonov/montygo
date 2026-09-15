@@ -29,7 +29,9 @@ func TestInterrupt(t *testing.T) {
 			started := make(chan struct{})
 			run := s.Go(ctx, "x = 'before'\ntry:\n    wait()\nexcept KeyboardInterrupt:\n    x = 'caught'", &montygo.FeedOptions{ExternalLookup: blockingLookup(started)})
 			<-started
-			require.NoError(t, s.Interrupt(ctx, nil))
+			interruptResult, interruptErr := s.Interrupt(ctx, montygo.InterruptOptions{})
+			require.NoError(t, interruptErr)
+			require.NotEqual(t, montygo.InterruptUnknown, interruptResult.Outcome)
 			_, err := run.Wait()
 			var re *montygo.RuntimeError
 			require.ErrorAs(t, err, &re, "%v", err)
@@ -46,7 +48,9 @@ func TestInterrupt(t *testing.T) {
 			started := make(chan struct{})
 			run := s.Go(ctx, "wait()", &montygo.FeedOptions{ExternalLookup: blockingLookup(started)})
 			<-started
-			require.NoError(t, run.Interrupt(ctx, montygo.Raise("TimeoutError", "budget spent")))
+			interruptResult, interruptErr := run.Interrupt(ctx, montygo.InterruptOptions{Reason: montygo.Raise("TimeoutError", "budget spent")})
+			require.NoError(t, interruptErr)
+			require.Equal(t, montygo.InterruptAborted, interruptResult.Outcome)
 			_, err := run.Wait()
 			var re *montygo.RuntimeError
 			require.ErrorAs(t, err, &re)
@@ -68,7 +72,9 @@ func TestInterrupt(t *testing.T) {
 			}}
 			run := s.Go(ctx, "await wait()", &montygo.FeedOptions{ExternalLookup: lookup})
 			<-started
-			require.NoError(t, s.Interrupt(ctx, nil))
+			interruptResult, interruptErr := s.Interrupt(ctx, montygo.InterruptOptions{})
+			require.NoError(t, interruptErr)
+			require.NotEqual(t, montygo.InterruptUnknown, interruptResult.Outcome)
 			_, err := run.Wait()
 			var re *montygo.RuntimeError
 			require.ErrorAs(t, err, &re)
@@ -83,16 +89,14 @@ func TestInterrupt(t *testing.T) {
 			require.NoError(t, err)
 			run := s.Go(ctx, "while True:\n    pass", nil)
 			time.Sleep(100 * time.Millisecond)
-			require.NoError(t, s.Interrupt(ctx, nil))
+			interruptResult, interruptErr := s.Interrupt(ctx, montygo.InterruptOptions{})
+			require.NoError(t, interruptErr)
+			require.NotEqual(t, montygo.InterruptUnknown, interruptResult.Outcome)
 			_, err = run.Wait()
 			require.ErrorIs(t, err, montygo.ErrSessionLost)
-			if b == montygo.BackendWebSocket {
-				var de *montygo.DisconnectError
-				require.ErrorAs(t, err, &de)
-			} else {
-				var ce *montygo.CrashedError
-				require.ErrorAs(t, err, &ce)
-			}
+			var killed *montygo.SessionKilledError
+			require.ErrorAs(t, err, &killed)
+			require.Equal(t, montygo.InterruptKilled, interruptResult.Outcome)
 			<-s.Done()
 			require.ErrorIs(t, s.Err(), montygo.ErrSessionLost)
 		})
@@ -105,7 +109,9 @@ func TestInterrupt(t *testing.T) {
 			fn, ok := snap.(*montygo.FunctionSnapshot)
 			require.True(t, ok, "%T", snap)
 			require.Equal(t, "pending", fn.FunctionName)
-			require.NoError(t, s.Interrupt(ctx, nil))
+			interruptResult, interruptErr := s.Interrupt(ctx, montygo.InterruptOptions{})
+			require.NoError(t, interruptErr)
+			require.NotEqual(t, montygo.InterruptUnknown, interruptResult.Outcome)
 			_, err = fn.Resume(ctx, 1)
 			var re *montygo.RuntimeError
 			require.ErrorAs(t, err, &re)
@@ -119,7 +125,9 @@ func TestInterrupt(t *testing.T) {
 		t.Run("Interrupt with nothing running is a no-op", func(t *testing.T) {
 			ctx := testCtx(t)
 			s := newSession(t, b, montygo.CheckoutOptions{})
-			require.NoError(t, s.Interrupt(ctx, nil))
+			interruptResult, interruptErr := s.Interrupt(ctx, montygo.InterruptOptions{})
+			require.NoError(t, interruptErr)
+			require.NotEqual(t, montygo.InterruptUnknown, interruptResult.Outcome)
 			v, err := s.FeedRun(ctx, "1", nil)
 			require.NoError(t, err)
 			require.Equal(t, int64(1), v)
@@ -150,7 +158,7 @@ func TestSessionLifecycle(t *testing.T) {
 			require.NoError(t, s.CloseNow())
 			_, err = run.Wait()
 			require.ErrorIs(t, err, montygo.ErrSessionClosed)
-			require.ErrorIs(t, err, montygo.ErrSessionLost)
+			require.NotErrorIs(t, err, montygo.ErrSessionLost)
 			<-s.Done()
 			require.ErrorIs(t, s.Err(), montygo.ErrSessionClosed)
 			require.NoError(t, s.Close(ctx))
@@ -175,7 +183,7 @@ func TestSessionLifecycle(t *testing.T) {
 			<-s.Done()
 			require.ErrorIs(t, s.Err(), montygo.ErrSessionClosed)
 			_, err := s.FeedRun(ctx, "1", nil)
-			require.ErrorIs(t, err, montygo.ErrSessionLost)
+			require.ErrorIs(t, err, montygo.ErrSessionClosed)
 		})
 
 		t.Run("a crashed worker is reported through Done and Err", func(t *testing.T) {

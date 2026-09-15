@@ -41,6 +41,16 @@ else the module version from the binary's build info (`0.1.0` after
 `Version` is a deprecated alias of `MontyVersion`. See
 [docs/architecture/versioning.md](docs/architecture/versioning.md).
 
+For a local directory replacement, stamp the binding's tree, not the consumer's:
+
+```sh
+montygo_version=$(cd ../montygo && ./scripts/version.sh)
+GOTOOLCHAIN=local go build -ldflags "-X github.com/asalimonov/montygo.buildVersion=${montygo_version}" ./...
+```
+
+The script preserves `-dirty`. Runtime build metadata cannot identify a replaced
+dependency's commit from the consumer's `vcs.revision`.
+
 ## Basic usage
 
 ```go
@@ -69,42 +79,85 @@ session.FeedRun(ctx, "x * 2", nil) // int64(42)
 
 `CheckoutOptions.ScriptName` names the script in tracebacks and type-checking diagnostics.
 
-`Session.Close` waits for a running call and returns the worker to the pool.
-`Session.CloseNow` ends a running feed with `ErrSessionClosed` and kills the
-worker. `Session.Done` and `Session.Err` report a session that was closed or
-lost, including a worker that died while idle.
+`Session.Close(ctx)` waits within the caller's budget and returns the worker to
+the pool. A timeout while waiting leaves the session open. `CloseNow` kills and
+retires the worker without joining Go callbacks. Later results report
+`ErrSessionClosed`, which does **not** match `ErrSessionLost`. `Session.Done`
+and `Session.Err` report closure or loss, including worker death while idle.
+
+One execution owns a session, including while a snapshot is paused. Overlapping
+feeds and incompatible control calls return `ErrSessionBusy`; they never queue.
 
 ## Interrupting a feed
 
-`Session.Go` runs a feed on its own goroutine and returns a `*Run`.
+`Session.Go` registers a feed before returning its `*Run`, then drives it on a
+goroutine. An immediate interrupt cannot miss it. `Run.Interrupt` always targets
+that run, even after the session starts another execution.
 `Session.Interrupt` (or `Run.Interrupt`) stops it from any goroutine:
 
 ```go
-started := make(chan struct{})
 lookup := map[string]any{"wait": func(ctx context.Context) error {
-	close(started)
 	<-ctx.Done() // the host call's context ends on Interrupt
 	return ctx.Err()
 }}
 run := session.Go(ctx, "wait()", &montygo.FeedOptions{ExternalLookup: lookup})
-<-started
-session.Interrupt(ctx, nil)
-_, err := run.Wait()                    // *RuntimeError, TypeName KeyboardInterrupt
-session.FeedRun(ctx, "1 + 1", nil)      // the session is still usable
+result, stopErr := run.Interrupt(ctx, montygo.InterruptOptions{
+	Grace: montygo.DurationPtr(250 * time.Millisecond),
+})
+if stopErr != nil {
+	return stopErr // InterruptPending means the watchdog still owns the request
+}
+if !result.RunDone {
+	_, _ = run.WaitContext(ctx) // use an application shutdown budget here
+}
+_, err := run.Wait()               // *RuntimeError, TypeName KeyboardInterrupt
+session.FeedRun(ctx, "1 + 1", nil) // the session is still usable after BeforeStart/Aborted
 ```
 
-While the worker waits on a host call, the call's context is cancelled and the
-feed ends inside the sandbox with `KeyboardInterrupt`, or the exception a
-non-nil `reason` maps to (`montygo.Raise("TimeoutError", "budget spent")`).
-The sandbox cannot catch it. Cancelling the feed's own context during a host
-call has the same effect. While Python is executing, `Interrupt` waits
-`CheckoutOptions.InterruptGrace` (default 100 ms) and then kills the worker, so
-the session is lost. Interrupting a suspended `FeedStart` snapshot aborts it,
-and the next `Resume*` returns the `KeyboardInterrupt` error.
+`InterruptOptions.Reason` defaults to `KeyboardInterrupt`; `Raise` selects another
+exception. `Grace` is a `*time.Duration`: nil inherits the checkout default
+(100 ms), zero forces immediately, and negative values are invalid. The first
+accepted reason wins; subsequent requests can shorten, never extend, the deadline.
+
+Before the first send, interruption reports `InterruptBeforeStart`. At a
+suspension, `AbortFeed` reports `InterruptAborted` and preserves the session; Python
+cannot catch it. At grace expiry, the worker is killed and retired, including
+when a Go callback ignores cancellation. The result is `InterruptKilled` and
+`SessionErr` is a `*SessionKilledError` wrapping the reason and matching
+`ErrSessionLost`. `RunDone` stays false until remaining synchronous Go work returns.
+
+The Interrupt context limits waiting, not the accepted request. Timeout reports
+`InterruptPending`; the watchdog continues. `Run.WaitContext(ctx)` only waits and
+never requests cancellation. Other outcomes are `InterruptNotRunning`,
+`InterruptAlreadyFinished`, and `InterruptFinished` for a completion race;
+`InterruptUnknown` is the zero value. Check `SessionErr` to decide whether to reuse
+the session. Cancelling the feed context during Python execution still kills the
+worker immediately; at a suspension it requests the cooperative abort path.
 
 `montygo.AsyncContext(ctx, fn)` starts asynchronous host work under the
 callback context, so it observes the same cancellation; `montygo.Async` cannot
 be cancelled.
+
+### Lifecycle choice
+
+| Need | Use | Completion guarantee |
+|---|---|---|
+| Execute and wait | `FeedRun` | returns after the driver finishes |
+| Execute in background | `Go` | execution is registered before return; inspect `Wait` for admission errors |
+| Stop one execution | `Run.Interrupt` | outcome identifies abort, kill, or independent completion |
+| Stop the current execution or snapshot | `Session.Interrupt` | captures one owner; idle returns `InterruptNotRunning` |
+| Wait within a budget | `Run.WaitContext` | waiting only; no cancellation |
+| Gracefully return a session | `Session.Close` | context bounds waiting; paused handles are invalidated |
+| End a session immediately | `Session.CloseNow` | worker retirement starts; callbacks can remain active |
+| End pool admission | `Pool.Close` | checked-out sessions retain their lifecycle |
+| Drain and force at deadline | `Pool.Shutdown` | retains the documented five-second force grace |
+| Stable host API | `Host` | validate registrations and stubs before checkout |
+| Per-feed override | `ExternalLookup` | an explicitly present entry overrides `Host` |
+
+Successful host-side writes are not rolled back when `AbortFeed` ends Python.
+Applications remain responsible for transaction and idempotency policy. To
+reuse a session, check `Session.Err()==nil` and handle a concurrent
+`ErrSessionBusy` admission result.
 
 ## Backends
 
@@ -205,6 +258,19 @@ type-checked feed reads them through a method or `Any`. Set
 reports the first object without one as `ErrHostObjectNotRestorable`, and
 `LoadSession` returns that error before loading.
 
+Configure the host before checkout. Fixed Go parameters are positional-only in
+stubs (`def add(arg0: int, arg1: int, /) -> int`), matching runtime binding.
+Optional labels improve readability without enabling keyword arguments:
+
+```go
+host.Func("add", func(a, b int) int { return a + b },
+	montygo.HostFuncOptions{ParameterNames: []string{"left", "right"}})
+```
+
+Labels exclude `context.Context` and trailing `Kwargs`, but include a variadic
+parameter. Supplied labels must match the signature, be unique, and not be
+Python keywords. Direct `Function` implementations retain generic stubs.
+
 ## Class instances
 
 Wrap a host object in `ClassInstance` to expose it under a policy: attributes
@@ -255,6 +321,38 @@ Instances defined inside the sandbox come back as read-only `*montygo.ClassProxy
 values (`Name`, `ID`, `IsDataclass`, `Attributes`); passing a proxy back hands
 the sandbox its original object.
 
+### Record-shaped method results
+
+`monty` tags do not automatically turn arbitrary structs into sandbox records.
+Use a per-object converter for your explicit transport type:
+
+```go
+func recordResult(_ string, v any) (any, error) {
+	switch r := v.(type) {
+	case Record:
+		return montygo.AsNamedTuple(r)
+	case *Record:
+		if r == nil {
+			return nil, nil
+		}
+		return montygo.AsNamedTuple(*r)
+	default:
+		return v, nil
+	}
+}
+// Set this before checkout:
+host.Object("records", table, montygo.ClassInstanceOptions{
+	Name: "Records", AllowedMethods: montygo.Expose[RecordsAPI](),
+	ConvertValue: recordResult,
+})
+```
+
+Methods can return `(Record, error)` or nullable `(*Record, error)`; Future-resolved
+method results use the same converter. Lists/maps containing records require
+their own explicit conversion. Storage rows and datetime conversion remain
+application responsibilities. The executable example is in
+[`record_conversion_test.go`](record_conversion_test.go).
+
 ### Host classes
 
 `ClassType` exposes a class: `Statics` hold class constants and static methods
@@ -291,6 +389,14 @@ Snapshots are single-use cursors: `*FunctionSnapshot` (`Resume`, `ResumeError`,
 (`ResumeUnresolved`, `ResumeFunction`, `ResumeValue`), `*FutureSnapshot`
 (`Resume` with `FutureResolution`s) and `*Complete`. Pass `ExternalLookup`/`OS`
 to `FeedStart` and call `ResumeAuto` to answer each step the way `FeedRun` would.
+
+Each cursor belongs to one execution and suspension. Replaying a used cursor
+returns `ErrSnapshotResumed`; an invalid generation returns `ErrSnapshotStale`.
+After an abort, an unused old cursor returns that execution's error without
+touching a later feed. Cancelled or busy claims do not consume the cursor.
+Pending `AsyncContext` work survives successful steps and is cancelled when the
+execution ends. Pending subscriptions belong to call IDs, not Future pointers;
+ending one execution never settles a caller-owned Future shared elsewhere.
 
 `snapshot.Dump` serializes a paused worker and `session.LoadSnapshot` restores it
 into a fresh session; `session.Dump` and `session.LoadSession` do the same for an
@@ -415,9 +521,13 @@ var typingErr *montygo.TypingError // errors.As(err, &typingErr); typingErr.Diag
 | `*montygo.ProtocolError` | a protocol violation; the session is lost |
 | `*montygo.ResourceError` | a host-side bound (`MaxHostObjects`, `MaxPendingFutures`) was reached; the session stays usable |
 | `*montygo.ConversionError` | a host value cannot cross into the sandbox |
+| `*montygo.SessionKilledError` | interruption forced worker termination; wraps the first reason |
+| `montygo.ErrSessionBusy` | another execution or incompatible control operation owns the session |
+| `montygo.ErrSessionClosed` | deliberate closure; not session loss |
 
-All sandbox errors implement `montygo.Error`. Every error that leaves a session
-unusable, including `ErrSessionClosed`, matches `montygo.ErrSessionLost`:
+All sandbox errors implement `montygo.Error`. Unexpected session loss matches
+`montygo.ErrSessionLost`; deliberate `ErrSessionClosed` does not. A fatal worker
+memory error preserves its `*RuntimeError` details and also matches session loss:
 
 ```go
 if _, err := session.FeedRun(ctx, code, nil); errors.Is(err, montygo.ErrSessionLost) {

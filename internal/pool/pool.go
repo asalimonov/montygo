@@ -43,7 +43,7 @@ type ContextObserver interface {
 
 type observer struct {
 	o    Observer
-	once sync.Once
+	life observerLifetime
 }
 
 func (o *observer) sent(req wire.Request, frameLen int) {
@@ -55,12 +55,6 @@ func (o *observer) sent(req wire.Request, frameLen int) {
 func (o *observer) received(ev *wire.Event, frameLen int) {
 	if o != nil {
 		o.o.Received(ev, frameLen)
-	}
-}
-
-func (o *observer) close() {
-	if o != nil {
-		o.once.Do(o.o.Closed)
 	}
 }
 
@@ -86,7 +80,13 @@ type slot struct {
 	w      worker.Worker
 	served int
 	obs    *observer
+}
+
+type retiredWorker struct {
+	w      worker.Worker
+	obs    *observer
 	killed bool
+	done   chan struct{}
 }
 
 // Stats counts the workers a pool holds by state.
@@ -105,7 +105,7 @@ type Pool struct {
 	retiring int
 	notify   chan struct{}
 	closed   bool
-	reaper   chan *slot
+	reaper   chan retiredWorker
 	reapers  sync.WaitGroup
 	reaped   bool
 }
@@ -133,7 +133,7 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 	if cfg.Metrics == nil {
 		cfg.Metrics = noopMetrics{}
 	}
-	p := &Pool{cfg: cfg, notify: make(chan struct{}), reaper: make(chan *slot, cfg.MaxProcesses)}
+	p := &Pool{cfg: cfg, notify: make(chan struct{}), reaper: make(chan retiredWorker, cfg.MaxProcesses)}
 	for i := 0; i < min(cfg.MaxProcesses, maxReapers); i++ {
 		p.reapers.Add(1)
 		go p.reap(p.reaper)
@@ -187,9 +187,9 @@ func (p *Pool) acquire(ctx context.Context) (*slot, error) {
 				outcome = acquireOutcome(waited, "idle")
 				return s, nil
 			}
-			p.cfg.Metrics.WorkersLive(-1)
 			p.cfg.Metrics.WorkerTerminated("died_idle")
 			s.w.Kill()
+			p.retireLocked(retiredWorker{w: s.w, killed: true})
 		}
 		if p.live() < p.cfg.MaxProcesses {
 			p.starting++
@@ -208,6 +208,14 @@ func (p *Pool) acquire(ctx context.Context) (*slot, error) {
 					return nil, perr
 				}
 				return nil, &Error{Kind: KindSpawn, Message: err.Error(), Cause: err}
+			}
+			if p.closed {
+				p.cfg.Metrics.WorkersLive(1)
+				p.cfg.Metrics.WorkerTerminated("closed")
+				p.retireLocked(retiredWorker{w: w})
+				p.wakeLocked()
+				p.mu.Unlock()
+				return nil, &Error{Kind: KindClosed}
 			}
 			p.active++
 			p.mu.Unlock()
@@ -257,7 +265,7 @@ func (p *Pool) release(s *slot) {
 			obs = nil
 		}
 		s.obs = obs
-		p.retireLocked(s)
+		p.retireLocked(retiredWorker{w: s.w, obs: obs})
 	} else {
 		p.idle = append(p.idle, s)
 		p.cfg.Metrics.WorkersIdle(1)
@@ -270,21 +278,26 @@ func (p *Pool) release(s *slot) {
 }
 
 // retireLocked hands a worker to the reaper; it counts toward capacity until it has exited.
-func (p *Pool) retireLocked(s *slot) {
+func (p *Pool) retireLocked(s retiredWorker) {
 	p.retiring++
 	p.cfg.Metrics.WorkersRetiring(1)
 	p.reaper <- s
 }
 
-func (p *Pool) reap(queue <-chan *slot) {
+func (p *Pool) reap(queue <-chan retiredWorker) {
 	defer p.reapers.Done()
 	for s := range queue {
-		if s.killed {
-			wctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			s.w.Wait(wctx)
-			cancel()
-		} else {
+		if !s.killed {
 			shutdownWorker(s.w, s.obs)
+		}
+		for {
+			wctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			_, exited := s.w.Wait(wctx)
+			cancel()
+			if exited {
+				break
+			}
+			s.w.Kill()
 		}
 		s.obs.close()
 		p.mu.Lock()
@@ -293,25 +306,21 @@ func (p *Pool) reap(queue <-chan *slot) {
 		p.cfg.Metrics.WorkersLive(-1)
 		p.wakeLocked()
 		p.mu.Unlock()
+		if s.done != nil {
+			close(s.done)
+		}
 	}
 }
 
-// discard retires a worker whose session is lost: a local worker is killed at
-// once, a remote one gets its close frame from the reaper.
-func (p *Pool) discard(s *slot, reason string) {
-	obs := s.obs
-	s.obs = nil
-	if s.w.Kind() != worker.KindWebSocket {
-		s.w.Kill()
-		s.killed = true
-	}
+// retireLease consumes an active accounting claim already transferred by a
+// checkout lease. Its job contains no mutable checkout-owned slot state.
+func (p *Pool) retireLease(w worker.Worker, reason string, killed bool) {
 	p.mu.Lock()
 	p.active--
 	p.cfg.Metrics.WorkerTerminated(reason)
-	p.retireLocked(s)
+	p.retireLocked(retiredWorker{w: w, killed: killed})
 	p.wakeLocked()
 	p.mu.Unlock()
-	obs.close()
 }
 
 func shutdownWorker(w worker.Worker, obs *observer) {
@@ -351,20 +360,23 @@ func (p *Pool) Close(ctx context.Context) error {
 	p.closed = true
 	idle := p.idle
 	p.idle = nil
-	p.wakeLocked()
-	p.mu.Unlock()
-	var wg sync.WaitGroup
+	waits := make([]chan struct{}, 0, len(idle))
 	for _, s := range idle {
 		p.cfg.Metrics.WorkersIdle(-1)
-		p.cfg.Metrics.WorkersLive(-1)
 		p.cfg.Metrics.WorkerTerminated("closed")
-		wg.Add(1)
-		go func(w worker.Worker) {
-			defer wg.Done()
-			shutdownWorker(w, nil)
-		}(s.w)
+		done := make(chan struct{})
+		waits = append(waits, done)
+		p.retireLocked(retiredWorker{w: s.w, done: done})
 	}
-	wg.Wait()
+	p.wakeLocked()
+	p.mu.Unlock()
+	for _, done := range waits {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return nil
 }
 

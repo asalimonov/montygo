@@ -11,8 +11,11 @@
 ### Accounting
 
 - Every worker is in one of four states, reported by `Stats()`: `Starting` (spawn in flight), `Active` (checked out), `Idle`, `Retiring` (handed to a reaper, not yet exited). All four count toward `MaxProcesses`, so a waiter proceeds only once a retiring worker has exited.
-- Retirement is asynchronous. A worker leaving `release` or `discard` goes onto a channel with `MaxProcesses` capacity, served by at most 8 reaper goroutines. A reaper sends `Shutdown` and waits 500 ms before killing, or, for a killed worker, waits up to 1 s for exit; then it decrements `Retiring` and wakes waiters. A recycled local worker's telemetry observer closes after the reaper has shut it down; a discarded worker's, and a WebSocket worker's, closes at once.
-- `discard` retires a worker whose session is lost. A local worker is killed at once; a WebSocket worker gets its close frame from the reaper.
+- Retirement is asynchronous. Jobs contain immutable worker references, not mutable checkout slots. The queue has MaxProcesses capacity and at most 8 reapers. A graceful job sends Shutdown and waits 500 ms before killing. Reapers MUST keep Retiring capacity charged until Wait observes exit; repeated 1 s timeouts do not free capacity.
+- A checkout lease arbitrates normal release versus termination exactly once under its own short mutex. `Terminate` works while the protocol mutex is held by Print or mount servicing. Force and CloseNow kill both local and remote workers immediately; ordinary remote abandonment retains its graceful close-frame path. A stale checkout MUST NOT kill a normally released worker reused by another session.
+- Observer lifetime is reference-counted across the full root operation and each turn. Requested closure runs once, outside locks, after active callbacks return. Accounting retirement MUST NOT wait for those callbacks.
+- Close moves idle workers to Retiring and waits within ctx for their observed exits. It MUST NOT remove them from live accounting at dispatch time.
+- Root shutdown publication and final checkout tracking share sessionsMu. A checkout that loses this race is terminated, not returned as an untracked live session.
 - `Shutdown(ctx)` is `Close` followed by a wait for the live count to reach zero. When `ctx` ends first, the owner's `OnShutdown` hook runs (the root pool calls `CloseNow` on every open session), the wait continues for a fixed 5 s force grace, and `ctx.Err()` is returned when workers still remain. `Checkout` after `Shutdown` returns `ErrPoolClosed`.
 
 ### Frame byte bound
@@ -55,9 +58,9 @@ The parent counts suspensions per checkout, that is per session, not per feed. T
 | stream end, exit code 65 | `MemoryError: the worker exceeded its memory limit and was terminated` | gone |
 | stream end, other status | crash with the exit status | gone |
 | deadline | timeout | killed |
-| caller context cancelled mid-turn (Python executing) | context error now, protocol error on the next call | killed |
+| caller context cancelled mid-turn (Python executing) | canonical protocol error wrapping the context error and `ErrTurnCancelled` | killed |
 | caller context cancelled while a host call is pending | `AbortFeed`; runtime error `KeyboardInterrupt` | kept |
-| `Session.Interrupt` with Python executing | crash after `InterruptGrace` | killed |
+| interrupt grace expires in Python or a Go callback | `SessionKilledError`, `InterruptKilled`; Go driver may still be running | killed and retired |
 | `Session.CloseNow` | `ErrSessionClosed` | killed |
 | malformed frame | protocol error | discarded |
 | WebSocket stream end | disconnect, with the close frame's code and reason when one was received | gone |

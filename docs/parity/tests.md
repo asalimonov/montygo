@@ -83,6 +83,11 @@ Tests of behaviour beyond `@pydantic/monty`. Root tests run on every backend thr
 |---|---|---|
 | cancel_test.go | 4 | context cancellation mid-turn, during a host call and a gathered wait, checkout wait |
 | lifecycle_test.go | 11 | `Interrupt` during a host call, with a reason, through `AsyncContext`, while Python runs, on a suspended snapshot; `Go`, `CloseNow`, `Done`, `Err`, `Stats` |
+| execution_test.go | backend regressions | 1000 immediate interrupts per backend; busy admission; stale Run/snapshot; wait-only cancellation; uncooperative callback and capacity recovery |
+| execution_future_test.go | backend regressions | call-ID accounting for shared Futures, failed-gather cleanup, cross-session ownership, snapshot context lifetime, manual settlement |
+| lifecycle_state_test.go | deterministic transitions | reservation/preparation stops, completion versus force, stale watchdog/step, ID exhaustion, duplicate call IDs, derived conversion cancellation/panic |
+| host_parameters_test.go, record_conversion_test.go | backend regressions | positional-only labelled stubs, signature/name validation, nullable Record and Future-resolved Record conversion |
+| internal/pool/lease_test.go | lease regressions | idle termination, stale lease, blocked Print, 1000 release/termination races, accounting until observed exit |
 | host_test.go | 10 | `Host` validation, `Stubs`, `Restorable`, host names in feeds, `ExternalLookup` override, stubs under type checking, restore of pinned objects, `LoadSession` refusing unpinned objects; `Expose` (no backend) |
 | resource_test.go | 10 | `Unlimited`, `MaxRecursionDepth`, `MaxHostObjects`, `MaxPendingFutures`, `ResourceError`; `MaxPendingBytes` throttling; `Pool.Stats`, `Pool.Shutdown`; `Lines` |
 | namedtuple_test.go | 3 | `AsNamedTuple`, `NewNamedTuple`, sandbox round trip |

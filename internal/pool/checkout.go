@@ -49,7 +49,7 @@ type pending struct {
 type Checkout struct {
 	pool        *Pool
 	mu          sync.Mutex
-	slot        *slot
+	lease       checkoutLease
 	pending     pending
 	feedMounts  MountTable
 	budget      sessionBudget
@@ -62,6 +62,7 @@ type Checkout struct {
 	obs         *observer
 	worker      worker.Worker
 	done        <-chan struct{}
+	metricsOnce sync.Once
 }
 
 // Checkout acquires a worker and configures its session.
@@ -72,7 +73,7 @@ func (p *Pool) Checkout(ctx context.Context, cfg wire.Configure, opts CheckoutOp
 	}
 	cfg.MontyVersion = p.cfg.MontyVersion
 	cfg.ProtocolVersion = p.cfg.ProtocolVersion
-	c := &Checkout{pool: p, slot: s, started: time.Now(), worker: s.w, done: s.w.Done()}
+	c := &Checkout{pool: p, lease: checkoutLease{slot: s, worker: s.w}, started: time.Now(), worker: s.w, done: s.w.Done()}
 	if opts.Observe != nil {
 		pid, hasPID := s.w.PID()
 		if o := opts.Observe(pid, hasPID); o != nil {
@@ -108,17 +109,15 @@ func (c *Checkout) PID() (int, bool) {
 		return 0, false
 	}
 	defer c.mu.Unlock()
-	if c.slot == nil || c.inFlight {
+	if !c.lease.active() || c.inFlight {
 		return 0, false
 	}
-	return c.slot.w.PID()
+	return c.worker.PID()
 }
 
 // Finished reports whether the worker is gone.
 func (c *Checkout) Finished() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.slot == nil
+	return !c.lease.active()
 }
 
 // Kind returns the transport kind.
@@ -129,7 +128,7 @@ func (c *Checkout) ensureReady() error {
 		c.cancelled = false
 		return &Error{Kind: KindCancelled}
 	}
-	if c.slot == nil {
+	if !c.lease.active() {
 		return &Error{Kind: KindFinished}
 	}
 	if c.inFlight {
@@ -140,26 +139,24 @@ func (c *Checkout) ensureReady() error {
 }
 
 func (c *Checkout) drop(reason string) {
-	if c.slot != nil {
-		c.discard(reason)
-	}
+	c.discard(reason)
 }
 
 func (c *Checkout) discard(reason string) {
-	s := c.slot
-	c.slot = nil
 	c.pending = pending{}
 	c.feedMounts = nil
 	c.inFlight = false
-	if s != nil {
-		c.pool.discard(s, reason)
-	}
+	c.terminate(nil, reason, false)
 }
 
 func (c *Checkout) turn(ctx context.Context, req wire.Request, control bool, onPrint OnPrint) (*wire.Event, error) {
 	if err := c.ensureReady(); err != nil {
 		return nil, err
 	}
+	if !c.obs.acquire() {
+		return nil, &Error{Kind: KindFinished}
+	}
+	defer c.obs.release()
 	for _, v := range wire.RequestValues(req) {
 		if value.ExceedsMaxDepth(v) {
 			return nil, runtimeError("RuntimeError", "Max input depth exceeded")
@@ -185,7 +182,7 @@ func (c *Checkout) turn(ctx context.Context, req wire.Request, control bool, onP
 	}
 	c.inFlight = true
 	c.sent = false
-	w := c.slot.w
+	w := c.worker
 	if err := c.send(tctx, w, req, payload); err != nil {
 		return nil, c.ioFailure(ctx, tctx, err, "sending a request", deadline)
 	}
@@ -251,47 +248,26 @@ func (c *Checkout) ioFailure(ctx, tctx context.Context, err error, doing string,
 }
 
 func (c *Checkout) poisonTimeout(deadline time.Duration) error {
-	s := c.slot
-	c.slot = nil
-	c.pending = pending{}
-	c.feedMounts = nil
-	c.inFlight = false
-	if s != nil {
-		if s.w.Kind() != worker.KindWebSocket {
-			s.w.Kill()
-			wctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			s.w.Wait(wctx)
-			cancel()
-		}
-		c.pool.discard(s, "turn_timeout")
-	}
+	c.discard("turn_timeout")
 	return &Error{Kind: KindTimeout, Timeout: deadline, WorkerLost: true}
 }
 
 func (c *Checkout) poison(doing string) error {
-	s := c.slot
-	c.slot = nil
-	c.pending = pending{}
-	c.feedMounts = nil
-	c.inFlight = false
-	if s == nil {
-		return &Error{Kind: KindFinished}
-	}
-	if s.w.Kind() == worker.KindWebSocket {
-		c.pool.discard(s, "disconnected")
+	if c.worker.Kind() == worker.KindWebSocket {
+		c.discard("disconnected")
 		perr := &Error{Kind: KindDisconnected, Message: doing, WorkerLost: true}
 		var closed *worker.ClosedError
-		if errors.As(s.w.Err(), &closed) {
+		if errors.As(c.worker.Err(), &closed) {
 			perr.CloseCode, perr.CloseReason = closed.Code, closed.Reason
 		}
 		return perr
 	}
-	status := reap(s.w, fatalExitGrace)
+	status := reap(c.worker, fatalExitGrace)
 	if status.Exited && status.Code == 65 {
-		c.pool.discard(s, "oom")
+		c.discard("oom")
 		return &Error{Kind: KindRuntime, Exception: wire.NewException("MemoryError", "the worker exceeded its memory limit and was terminated"), WorkerLost: true}
 	}
-	c.pool.discard(s, "crash")
+	c.discard("crash")
 	return &Error{Kind: KindCrashed, Message: doing, Status: status, WorkerLost: true}
 }
 
@@ -360,15 +336,11 @@ func (c *Checkout) dispatch(ctx context.Context, ev *wire.Event, req wire.Reques
 	case wire.EventOk, wire.EventDumpResult:
 		return ev, nil
 	case wire.EventFatalError:
-		s := c.slot
-		c.slot = nil
-		c.pending = pending{}
-		c.feedMounts = nil
-		status := reap(s.w, fatalExitGrace)
-		c.pool.discard(s, "fatal")
+		status := reap(c.worker, fatalExitGrace)
+		c.discard("fatal")
 		return nil, &Error{Kind: KindCrashed, Announced: true, Message: ev.FatalMessage, Status: status, WorkerLost: true}
 	case wire.EventShutdown:
-		if c.slot.w.Kind() != worker.KindWebSocket {
+		if c.worker.Kind() != worker.KindWebSocket {
 			c.discard("discarded")
 			return nil, protocolError("subprocess worker sent a ShutdownDump")
 		}
@@ -477,36 +449,45 @@ func (c *Checkout) ResumeFutures(ctx context.Context, results []wire.FutureResul
 
 // ResumeFromMounts offers the pending OS call to the feed's mounts.
 func (c *Checkout) ResumeFromMounts(ctx context.Context, onPrint OnPrint) (*wire.Event, bool, error) {
+	handled, res, err := c.HandlePendingMount(ctx)
+	if !handled || err != nil {
+		return nil, handled, err
+	}
+	ev, err := c.Resume(ctx, res, onPrint)
+	var perr *Error
+	if errors.As(err, &perr) && perr.Kind == KindRuntime && perr.PreSend {
+		ev, err = c.Resume(ctx, wire.ExtResult{Kind: wire.ExtError, Error: perr.Exception}, onPrint)
+	}
+	return ev, true, err
+}
+
+// HandlePendingMount services a pending mount call without resuming the worker.
+func (c *Checkout) HandlePendingMount(ctx context.Context) (bool, wire.ExtResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.ensureReady(); err != nil {
-		return nil, false, err
+		return false, wire.ExtResult{}, err
 	}
 	if c.pending.kind != pendingCall {
-		return nil, false, protocolError("no suspended call to resume")
+		return false, wire.ExtResult{}, protocolError("no suspended call to resume")
 	}
 	if c.pending.os == nil {
-		return nil, false, protocolError("resume_from_mounts is only valid answering an OS call")
+		return false, wire.ExtResult{}, protocolError("resume_from_mounts is only valid answering an OS call")
 	}
 	if c.feedMounts == nil {
-		return nil, false, nil
+		return false, wire.ExtResult{}, nil
 	}
 	c.inFlight = true
 	handled, result, exc := c.feedMounts.HandleOsCall(ctx, c.pending.os)
 	c.inFlight = false
 	if !handled {
-		return nil, false, nil
+		return false, wire.ExtResult{}, nil
 	}
 	res := wire.ExtResult{Kind: wire.ExtReturn, Value: result}
 	if exc != nil {
 		res = wire.ExtResult{Kind: wire.ExtError, Error: exc}
 	}
-	ev, err := c.resumeLocked(ctx, res, onPrint)
-	var perr *Error
-	if errors.As(err, &perr) && perr.Kind == KindRuntime && perr.PreSend && c.pending.kind == pendingCall {
-		ev, err = c.resumeLocked(ctx, wire.ExtResult{Kind: wire.ExtError, Error: perr.Exception}, onPrint)
-	}
-	return ev, true, err
+	return true, res, nil
 }
 
 // Dump serializes the session.
@@ -597,39 +578,40 @@ func (c *Checkout) InstallDependencies(ctx context.Context, requirements []strin
 func (c *Checkout) Finish(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.slot == nil {
+	if !c.lease.active() {
 		c.cancelled = false
-		c.pool.cfg.Metrics.SessionDuration(time.Since(c.started), "error")
+		c.finishMetrics("error")
 		return nil
 	}
 	if c.inFlight {
 		c.discard("abandoned")
 		return nil
 	}
-	s := c.slot
-	if s.w.Kind() == worker.KindWebSocket {
-		c.slot = nil
-		c.pool.release(s)
-		c.pool.cfg.Metrics.SessionDuration(time.Since(c.started), "ok")
+	if c.worker.Kind() == worker.KindWebSocket {
+		if s, won := c.lease.finish(); won {
+			c.pool.release(s)
+			c.finishMetrics("ok")
+		}
 		return nil
 	}
 	ev, err := c.turn(ctx, wire.Reset{}, true, nil)
 	if err != nil {
 		c.drop("discarded")
-		c.pool.cfg.Metrics.SessionDuration(time.Since(c.started), "error")
+		c.finishMetrics("error")
 		return err
 	}
 	if ev.Kind != wire.EventOk {
 		c.discard("discarded")
-		c.pool.cfg.Metrics.SessionDuration(time.Since(c.started), "error")
+		c.finishMetrics("error")
 		return protocolError("unexpected reply to Reset: %s", ev.Kind)
 	}
-	c.slot = nil
 	c.pending = pending{}
 	c.feedMounts = nil
-	s.served++
-	c.pool.release(s)
-	c.pool.cfg.Metrics.SessionDuration(time.Since(c.started), "ok")
+	if s, won := c.lease.finish(); won {
+		s.served++
+		c.pool.release(s)
+		c.finishMetrics("ok")
+	}
 	return nil
 }
 
@@ -654,12 +636,40 @@ func (c *Checkout) Abort(ctx context.Context, exc *wire.Exception, onPrint OnPri
 	return protocolError("unexpected reply to AbortFeed: %s", ev.Kind)
 }
 
-// KillWorker kills the worker without taking the checkout lock, so a turn in
-// flight fails; the caller MUST follow with Abandon or a failing turn.
-func (c *Checkout) KillWorker() {
-	if c.worker != nil {
-		c.worker.Kill()
+// Terminate kills and retires this checkout's worker without waiting for a
+// protocol turn or host callback. It cannot kill an already-released worker.
+func (c *Checkout) Terminate(cause error, reason string) bool {
+	return c.terminate(cause, reason, true)
+}
+
+func (c *Checkout) terminate(cause error, reason string, force bool) bool {
+	w, won := c.lease.terminate(cause)
+	if !won {
+		return false
 	}
+	killed := force || w.Kind() != worker.KindWebSocket
+	if killed {
+		w.Kill()
+	}
+	c.pool.retireLease(w, reason, killed)
+	c.finishMetrics(reason)
+	c.obs.close()
+	return true
+}
+
+func (c *Checkout) finishMetrics(outcome string) {
+	c.metricsOnce.Do(func() {
+		c.pool.cfg.Metrics.SessionDuration(time.Since(c.started), outcome)
+	})
+}
+
+// HoldObserver keeps observer finalization behind a complete session operation,
+// including host callbacks between protocol turns. The release is called once.
+func (c *Checkout) HoldObserver() func() {
+	if c.obs.acquire() {
+		return c.obs.release
+	}
+	return func() {}
 }
 
 // Pending reports whether a suspension awaits an answer.
@@ -674,9 +684,7 @@ func (c *Checkout) Done() <-chan struct{} { return c.done }
 
 // WorkerErr reports why the worker ended, when it did.
 func (c *Checkout) WorkerErr() error {
-	c.mu.Lock()
 	w := c.worker
-	c.mu.Unlock()
 	if w == nil {
 		return nil
 	}
@@ -685,12 +693,7 @@ func (c *Checkout) WorkerErr() error {
 
 // Abandon kills the worker without resetting it.
 func (c *Checkout) Abandon() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.slot != nil {
-		c.discard("abandoned")
-		c.pool.cfg.Metrics.SessionDuration(time.Since(c.started), "abandoned")
-	}
+	c.terminate(nil, "abandoned", false)
 }
 
 // PendingOsCall returns the OS call awaiting an answer, if any.

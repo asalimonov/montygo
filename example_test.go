@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/asalimonov/montygo"
 )
@@ -157,15 +158,13 @@ func Example_interrupt() {
 	session, _ := pool.Checkout(ctx, montygo.CheckoutOptions{})
 	defer session.Close(ctx)
 
-	started := make(chan struct{})
 	lookup := map[string]any{"wait": func(ctx context.Context) error {
-		close(started)
 		<-ctx.Done() // the host call's context ends on Interrupt
 		return ctx.Err()
 	}}
 	run := session.Go(ctx, "wait()", &montygo.FeedOptions{ExternalLookup: lookup})
-	<-started
-	_ = session.Interrupt(ctx, nil)
+	stop, stopErr := run.Interrupt(ctx, montygo.InterruptOptions{Grace: montygo.DurationPtr(250 * time.Millisecond)})
+	fmt.Println(stopErr == nil, stop.Outcome == montygo.InterruptBeforeStart || stop.Outcome == montygo.InterruptAborted, stop.RunDone)
 	_, err := run.Wait()
 	var runtimeErr *montygo.RuntimeError
 	fmt.Println(errors.As(err, &runtimeErr), runtimeErr.TypeName, errors.Is(err, montygo.ErrSessionLost))
@@ -173,6 +172,7 @@ func Example_interrupt() {
 	result, _ := session.FeedRun(ctx, "1 + 1", nil) // the session is still usable
 	fmt.Println(result)
 	// Output:
+	// true true true
 	// true KeyboardInterrupt false
 	// 2
 }
@@ -206,10 +206,10 @@ func Example_host() {
 	// Output:
 	// from typing import Any, Awaitable
 	//
-	// def add(arg0: int, arg1: int) -> int: ...
+	// def add(arg0: int, arg1: int, /) -> int: ...
 	//
 	// class exampleWallet:
-	//     def pay(self, arg0: int) -> Any: ...
+	//     def pay(self, arg0: int, /) -> Any: ...
 	//
 	// wallet: exampleWallet
 	// 71

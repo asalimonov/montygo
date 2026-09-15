@@ -98,7 +98,8 @@ func TestDrain_InFlightTurnFinishesFirst(t *testing.T) {
 
 	waitListenerClosed(t, s)
 	_, err := session.FeedRun(ctx, "total", nil)
-	requireShutdown(t, err)
+	shutdown := requireShutdown(t, err)
+	require.Equal(t, "MTYD", string(shutdown.Dump[:4]))
 }
 
 func TestDrain_SilentSessionDroppedAfterGrace(t *testing.T) {
