@@ -1,0 +1,4 @@
+/worker-wasm/target/
+/examples/**/bin/
+*.test
+/coverage.out

@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'fix/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOTOOLCHAIN: local
+  # actions/checkout needs full commit SHAs; a short SHA is looked up as a branch or tag.
+  MONTY_REV: f8acf4fa8fff78dfd11dc5a2042e4fdf0ab36c28
+  DATASETS_REV: b67d9eb3d80a9385a41373e84d4b7b06d37c4ff1
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      MONTY_BIN: ${{ github.workspace }}/monty-src/target/debug/monty
+      MAFUDGE_DATASETS: ${{ github.workspace }}/mafudge_datasets
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check out upstream Monty
+        uses: actions/checkout@v7
+        with:
+          repository: pydantic/monty
+          ref: ${{ env.MONTY_REV }}
+          path: monty-src
+      - name: Check out example datasets
+        uses: actions/checkout@v7
+        with:
+          repository: mafudge/datasets
+          ref: ${{ env.DATASETS_REV }}
+          path: mafudge_datasets
+          sparse-checkout: |
+            customers
+            tweets
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            monty-src
+            worker-wasm
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: |
+            go.sum
+            examples/go.sum
+      - name: Build native worker
+        run: cargo build --locked -p monty-runtime --manifest-path monty-src/Cargo.toml
+      - name: Build wasm worker
+        working-directory: worker-wasm
+        run: cargo build --locked --release --target wasm32-wasip1
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -count=1 -timeout 30m ./...
+      - name: Vet examples
+        working-directory: examples
+        run: go vet ./...
+      - name: Test examples
+        working-directory: examples
+        run: go test -count=1 -timeout 30m ./...
