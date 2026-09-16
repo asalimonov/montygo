@@ -152,12 +152,6 @@ impl Telemetry {
     /// Builds exporters and the pool adapter. MUST run outside a tokio runtime: the blocking
     /// HTTP clients refuse to be created inside one.
     pub fn install(config: &OtlpConfig) -> Result<Arc<Self>, String> {
-        // The exporters report failures through tracing; without a subscriber they vanish.
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
-            .with_writer(std::io::stderr)
-            .with_ansi(false)
-            .try_init();
         let headers = headers_from_env();
         let service = std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "monty-server".to_owned());
         let resource = Resource::builder().with_service_name(service).build();
