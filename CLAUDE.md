@@ -78,8 +78,8 @@ make test-network-clean      # remove leaked test containers
 |---|---|
 | `MONTY_BIN` | native worker binary; tests default it to `../monty/target/debug/monty`; `server/tests/session.rs` skips without it |
 | `MONTY_TEST_BACKENDS` | backends for root tests: `native`, `wasm`, `websocket`, `docker`; default `native,wasm`, plus `websocket` when `MONTY_TEST_WS_URL` is set |
-| `MONTYGO_DOCKER_IMAGE` | repository, or pinned reference, of the `monty-server` image `NewDocker` runs; default `ghcr.io/asalimonov/monty-server` |
-| `MONTYGO_DOCKER_VERSION` | image tag for `NewDocker`; unset derives it from `BindingVersion()` |
+| `MONTYGO_DOCKER_IMAGE` | repository, or pinned reference, of the `monty-server` image `supervisor/docker` runs; default `ghcr.io/asalimonov/monty-server` |
+| `MONTYGO_DOCKER_VERSION` | image tag for `supervisor/docker`; unset derives it from `BindingVersion()` |
 | `MONTY_TEST_WS_URL` | URL of a running `monty-server`; enables the `websocket` backend for root tests |
 | `MONTY_EXAMPLES_BACKEND` | forces `native` or `wasm` in the examples |
 | `MONTY_SRC` | upstream checkout used by `make build-worker`, `make build-wasm` and the image builds, default `../monty` |
@@ -152,7 +152,7 @@ Let `OLD` be the current pin (`proto/PROTO_REV`) and `NEW` the target tag or com
    - Read `git -C ../monty log --oneline OLD..NEW` and the release notes.
    - Diff every source in the table above, for example `git -C ../monty diff OLD NEW --stat -- crates/monty-proto crates/monty-pool crates/monty-fs crates/monty-js crates/monty-python examples docs/server.md`.
    - List the changes per area before editing. Protocol changes come first, because everything else depends on them.
-2. **Move the pins.** `scripts/check-pins.sh` is the authority: it reads `proto/PROTO_REV` and `MontyVersion` and names every file that disagrees. Update `proto/PROTO_REV` (full 40-character SHA) and `internal/buildinfo/buildinfo.go` (`MontyVersion`, `UpstreamRev`) first, then run `make check-pins` and fix each reported file:
+2. **Move the pins.** `scripts/check-pins.sh` is the authority: it reads `proto/PROTO_REV` and `MontyVersion` and names every file that disagrees. Update `proto/PROTO_REV` (full 40-character SHA) and `montygo.go` (`MontyVersion`, `UpstreamRev`) first, then run `make check-pins` and fix each reported file:
    - `worker-wasm/Cargo.toml`: package version and the three git `rev` values, then `cargo update` in `worker-wasm/`
    - `server/Cargo.toml`: the three git `rev` values, then `cargo update` in `server/`; the package version is the server's own fallback and does not track Monty
    - `server/src/version.rs`: `MONTY_REV`, as a full SHA; `monty_rev_matches_lockfile` checks it against `server/Cargo.lock`
