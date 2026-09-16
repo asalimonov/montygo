@@ -16,7 +16,8 @@ import (
 func exportedSurface(t *testing.T) []string {
 	t.Helper()
 	fset := token.NewFileSet()
-	paths, err := filepath.Glob("*.go")
+	// The facade lives one level up; this package only exercises it.
+	paths, err := filepath.Glob("../*.go")
 	require.NoError(t, err)
 	var names []string
 	for _, path := range paths {
@@ -66,7 +67,7 @@ func exportedSurface(t *testing.T) []string {
 
 func TestPublicAPISurface(t *testing.T) {
 	got := strings.Join(exportedSurface(t), "\n") + "\n"
-	const golden = "testdata/public_api.golden"
+	const golden = "../testdata/public_api.golden"
 	if os.Getenv("UPDATE_GOLDEN") != "" {
 		require.NoError(t, os.WriteFile(golden, []byte(got), 0o644))
 	}

@@ -1,8 +1,8 @@
 # Testing
 
-## Root suite
+## Conformance suite
 
-- Root tests run every scenario on each backend in `MONTY_TEST_BACKENDS` via `eachBackend`. Backend names are `native`, `wasm`, `websocket` and `docker`. The default is `native,wasm`, plus `websocket` when `MONTY_TEST_WS_URL` is set.
+- The conformance suite in `conformance/` runs every scenario on each backend in `MONTY_TEST_BACKENDS` via `eachBackend`. Backend names are `native`, `wasm`, `websocket` and `docker`. The default is `native,wasm`, plus `websocket` when `MONTY_TEST_WS_URL` is set.
 - `websocket` and `docker` are remote backends: `remoteBackend` selects the adaptations they share, such as signed dumps and disconnects instead of crashes.
 - Each top-level test gets its own pools, like one pool per upstream spec file. Wasm pools recycle workers after every checkout. Tests that inspect worker reuse create their own pools.
 - `TestMain` points `MONTY_BIN` at a sibling `../monty/target/debug/monty` when it is unset. It exits 2 when `websocket` is listed without `MONTY_TEST_WS_URL`.
@@ -27,7 +27,7 @@ These need no Docker daemon:
 - `recovery_test.go` covers the attempt loop, non-retryable errors, restart only when enabled, and single-flight restarts.
 - `rotation_test.go` drives real sessions over `wsRelay`, which serves `GET /info` with short timeouts and can refuse upgrades: state survives a rotation, an idle session rotates on its timer, a refused reconnect yields `RotationError` whose dump restores, and unusable limits leave rotation off.
 
-Tests live with the code they cover: the image resolver and the fake-CLI supervisor tests in `supervisor/docker`, the recovery loop in `supervisor`, the host internals in `runtime/host`, the driver transitions in `internal/engine`, and the ported upstream suites in the root package against the facade. `supervisor/native` tests spawn a real `monty-server`; they skip when the server binary or the worker is missing.
+Tests live with the code they cover: the image resolver and the fake-CLI supervisor tests in `supervisor/docker`, the recovery loop in `supervisor`, the host internals in `runtime/host`, the driver transitions and the user agent in `internal/engine`, the version resolution in `internal/buildinfo`, and the ported upstream suites in `conformance/` against the facade. The root package holds no tests. `supervisor/native` tests spawn a real `monty-server`; they skip when the server binary or the worker is missing.
 - Adaptations for this backend are listed in `docs/parity/tests.md`.
 
 ## Lifecycle regressions

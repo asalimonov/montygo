@@ -12,7 +12,8 @@ montygo is a Go binding for [Monty](https://github.com/pydantic/monty), a sandbo
 
 | Path | Contents |
 |---|---|
-| `*.go` (package `montygo`) | public facade: aliases over the packages below, the upstream pins, and `BindingVersion` |
+| `*.go` (package `montygo`) | public facade: aliases over the packages below, the upstream pins, and `BindingVersion`. It holds no tests |
+| `conformance/` | the ported upstream suites and the API tests, run against the facade |
 | `runtime/` | Python value model, conversion, print targets, mounts, exception types |
 | `runtime/host/` | host objects, class wrappers, host functions, futures |
 | `runtime/osaccess/` | in-memory OS helpers, a port of `pydantic_monty/os_access.py` |

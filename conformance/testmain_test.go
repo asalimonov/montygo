@@ -34,7 +34,7 @@ var (
 func TestMain(m *testing.M) {
 	if os.Getenv("MONTY_BIN") == "" {
 		_, file, _, _ := runtime.Caller(0)
-		candidate := filepath.Join(filepath.Dir(file), "..", "monty", "target", "debug", "monty")
+		candidate := filepath.Join(filepath.Dir(file), "..", "..", "monty", "target", "debug", "monty")
 		if _, err := os.Stat(candidate); err == nil {
 			_ = os.Setenv("MONTY_BIN", candidate)
 		}

@@ -1,6 +1,6 @@
 # Test parity
 
-Upstream tests are ported file by file. Subtest names keep the upstream titles, so `go test -run 'TestMount/native/overlay_write_does_not_modify_host'` finds a TS test by its title. Root tests run on the native and wasm backends, on the websocket backend against a configured server, and on the docker backend against the server image.
+Upstream tests are ported file by file. Subtest names keep the upstream titles, so `go test -run 'TestMount/native/overlay_write_does_not_modify_host'` finds a TS test by its title. The Go suites live in `conformance/` and run on the native and wasm backends, on the websocket backend against a configured server, and on the docker backend against the server image.
 
 - **ported**: same scenario and assertions.
 - **adapted**: same intent, expressed with Go types or APIs.
