@@ -7,31 +7,8 @@ import (
 
 	"github.com/asalimonov/montygo/internal/pool"
 	"github.com/asalimonov/montygo/internal/wire"
+	monterr "github.com/asalimonov/montygo/monterr"
 )
-
-// StopPolicy says how an execution is ended. Zero fields inherit from the
-// level above: call, then CheckoutOptions.Stop, Options.Stop and DefaultStopPolicy.
-type StopPolicy struct {
-	// Drain waits this long for the run to end on its own before the request.
-	Drain time.Duration
-	// Timeout runs from the request until the worker is killed when the run
-	// has not ended. A negative value kills at once (see KillNow).
-	Timeout time.Duration
-	// Join bounds, after a kill, the wait for a host callback that ignores
-	// its context.
-	Join time.Duration
-	// Reason is raised in the sandbox; nil means KeyboardInterrupt.
-	Reason error
-	// Catchable delivers Reason as an ordinary exception at the next host
-	// call or await instead of AbortFeed, so Python can catch it.
-	Catchable bool
-}
-
-// DefaultStopPolicy is the process-wide default. Set it before creating pools.
-var DefaultStopPolicy = StopPolicy{Timeout: 3 * time.Second, Join: 3 * time.Second}
-
-// KillNow ends an execution without a request phase.
-var KillNow = StopPolicy{Timeout: -1}
 
 // StopKind classifies how a stop ended.
 type StopKind uint8
@@ -70,55 +47,10 @@ type Stopped struct {
 // SessionKept reports whether the session is still usable.
 func (s Stopped) SessionKept() bool { return s.SessionErr == nil }
 
-// ErrCallbackDetached: the worker was killed, but a host callback did not return within Join.
-var ErrCallbackDetached = errors.New("montygo: host callback still running after kill")
-
 var (
-	keyboardInterrupt       = Raise("KeyboardInterrupt", "")
 	errExecutionInterrupted = errors.New("execution interruption requested")
 	errDeliverStop          = errors.New("stop reason to deliver")
 )
-
-func (p StopPolicy) over(base StopPolicy) StopPolicy {
-	out := base
-	if p.Drain != 0 {
-		out.Drain = p.Drain
-	}
-	if p.Timeout != 0 {
-		out.Timeout = p.Timeout
-	}
-	if p.Join != 0 {
-		out.Join = p.Join
-	}
-	if p.Reason != nil {
-		out.Reason = p.Reason
-	}
-	if p.Catchable {
-		out.Catchable = true
-	}
-	return out
-}
-
-func (p StopPolicy) validate() error {
-	if p.Drain < 0 || p.Join < 0 {
-		return &OptionError{Message: "stop policy: Drain and Join must be non-negative"}
-	}
-	return nil
-}
-
-func effectivePolicy(base StopPolicy, policy []StopPolicy) (StopPolicy, error) {
-	if len(policy) > 1 {
-		return StopPolicy{}, &OptionError{Message: "at most one stop policy"}
-	}
-	out := base
-	if len(policy) == 1 {
-		out = policy[0].over(base)
-	}
-	if out.Reason == nil {
-		out.Reason = keyboardInterrupt
-	}
-	return out, out.validate()
-}
 
 // stopRequest is the one stop of an execution; later callers can only shorten it.
 type stopRequest struct {
@@ -163,8 +95,8 @@ func (req *stopRequest) shorten(p StopPolicy, now time.Time) {
 }
 
 func interruptException(reason error) error {
-	typ, msg := exceptionParts(reason)
-	return errorFromException(wire.NewException(typ, msg))
+	typ, msg := monterr.ExceptionParts(reason)
+	return monterr.ErrorFromException(wire.NewException(typ, msg))
 }
 
 // Stop ends the run: Reason is delivered at the next host call or
@@ -202,7 +134,7 @@ func (r *Run) Stop(ctx context.Context, policy ...StopPolicy) (Stopped, error) {
 		case <-ctx.Done():
 			return st, ctx.Err()
 		case <-timer.C:
-			return st, ErrCallbackDetached
+			return st, monterr.ErrCallbackDetached
 		}
 	}
 	select {
@@ -366,7 +298,7 @@ func (s *Session) forceExecution(e *execution, req *stopRequest) bool {
 		s.life.mu.Unlock()
 		return false
 	}
-	cause := &SessionKilledError{Reason: req.policy.Reason}
+	cause := &monterr.SessionKilledError{Reason: req.policy.Reason}
 	req.forceClaimed, req.kind = true, StopKilled
 	s.life.terminal, e.terminalCause = cause, cause
 	clear(e.pending)
@@ -402,7 +334,7 @@ func (s *Session) abortExecution(ctx context.Context, e *execution, pt *printTar
 	req := e.stop
 	if req == nil {
 		s.life.mu.Unlock()
-		return &ProtocolError{Message: "abort without a stop request"}
+		return &monterr.ProtocolError{Message: "abort without a stop request"}
 	}
 	deadline := req.killAt
 	e.phase, e.wireInFlight = executionAborting, true
@@ -411,7 +343,7 @@ func (s *Session) abortExecution(ctx context.Context, e *execution, pt *printTar
 	s.life.mu.Unlock()
 	actx, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline)
 	defer cancel()
-	typ, msg := exceptionParts(req.policy.Reason)
+	typ, msg := monterr.ExceptionParts(req.policy.Reason)
 	var onPrint pool.OnPrint
 	if pt != nil {
 		onPrint = pt.onPrint
@@ -432,11 +364,11 @@ func (s *Session) abortExecution(ctx context.Context, e *execution, pt *printTar
 		return s.mapError(err)
 	}
 	if err == nil {
-		err = &ProtocolError{Message: "abort ended without an Error event"}
+		err = &monterr.ProtocolError{Message: "abort ended without an Error event"}
 	}
 	err = s.mapError(err)
 	if s.Err() == nil {
-		err = &ProtocolError{Message: "failed to abort suspended feed: " + err.Error(), cause: err}
+		err = monterr.NewProtocolError("failed to abort suspended feed: "+err.Error(), err)
 	}
 	err = s.terminateSession(err)
 	s.life.mu.Lock()
@@ -462,7 +394,7 @@ func (s *Session) deliverStop(e *execution) *wire.Exception {
 	defer s.life.mu.Unlock()
 	e.delivered = true
 	e.callbackCtx, e.cancelCallbacks = context.WithCancel(context.WithoutCancel(e.stepCtx))
-	typ, msg := exceptionParts(e.stop.policy.Reason)
+	typ, msg := monterr.ExceptionParts(e.stop.policy.Reason)
 	return wire.NewException(typ, msg)
 }
 

@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	monterr "github.com/asalimonov/montygo/monterr"
+	host "github.com/asalimonov/montygo/sandbox/host"
 	"github.com/stretchr/testify/require"
 )
 
@@ -17,11 +19,11 @@ var hourPolicy = StopPolicy{Timeout: time.Hour}
 func TestLifecycleStateTransitions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	p, err := New(ctx, Options{Backend: BackendWasm, MaxProcesses: 1})
+	p, err := NewPool(ctx, PoolOptions{Workers: Wasm(WasmOptions{}), MaxWorkers: 1})
 	require.NoError(t, err)
 	defer p.Shutdown(ctx)
 	newSession := func(t *testing.T) *Session {
-		s, err := p.Checkout(ctx, CheckoutOptions{})
+		s, err := p.Checkout(ctx, mustRT(RuntimeOptions{}), CheckoutOptions{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = s.Close(ctx, KillNow) })
 		return s
@@ -45,7 +47,7 @@ func TestLifecycleStateTransitions(t *testing.T) {
 			} else {
 				err = s.beginExecution(e)
 			}
-			var raised *RuntimeError
+			var raised *monterr.RuntimeError
 			require.ErrorAs(t, err, &raised)
 			require.False(t, e.sent)
 			s.finishExecution(e, nil, err)
@@ -116,9 +118,9 @@ func TestLifecycleStateTransitions(t *testing.T) {
 		s := newSession(t)
 		e, err := s.reserveExecution(ctx)
 		require.NoError(t, err)
-		f, _ := NewFuture()
+		f, _ := host.NewFuture()
 		require.NoError(t, s.addFuture(e, 1, f))
-		var protocol *ProtocolError
+		var protocol *monterr.ProtocolError
 		require.ErrorAs(t, s.addFuture(e, 1, f), &protocol)
 		require.NoError(t, s.addFuture(e, 2, f))
 		require.Equal(t, 2, s.pendingCount())
@@ -158,7 +160,7 @@ func TestLifecycleStateTransitions(t *testing.T) {
 		release, err := s.reserveControl(ctx, true)
 		require.NoError(t, err)
 		_, err = call.Resume(ctx, 1)
-		require.ErrorIs(t, err, ErrSessionBusy)
+		require.ErrorIs(t, err, monterr.ErrSessionBusy)
 		require.False(t, call.token.used)
 		_, _, done := s.requestStop(call.token.exec, hourPolicy)
 		require.False(t, done)
@@ -167,7 +169,7 @@ func TestLifecycleStateTransitions(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, StopAborted, result.How)
 		_, err = call.Resume(ctx, 1)
-		var raised *RuntimeError
+		var raised *monterr.RuntimeError
 		require.ErrorAs(t, err, &raised)
 		require.NoError(t, s.Err())
 	})
@@ -229,13 +231,13 @@ func TestLifecycleStateTransitions(t *testing.T) {
 				s := newSession(t)
 				e, err := s.reserveExecution(ctx)
 				require.NoError(t, err)
-				f, _ := NewFuture()
+				f, _ := host.NewFuture()
 				require.NoError(t, s.addFuture(e, 1, f))
 				switch terminal {
 				case "runtime":
-					s.finishExecution(e, nil, &RuntimeError{TypeName: "RuntimeError", Message: "failed"})
+					s.finishExecution(e, nil, &monterr.RuntimeError{TypeName: "RuntimeError", Message: "failed"})
 				case "typing":
-					s.finishExecution(e, nil, &TypingError{Diagnostics: "type mismatch"})
+					s.finishExecution(e, nil, &monterr.TypingError{Diagnostics: "type mismatch"})
 				case "close now":
 					require.NoError(t, s.Close(ctx, KillNow))
 					s.finishExecution(e, nil, s.Err())
@@ -255,39 +257,23 @@ func TestLifecycleStateTransitions(t *testing.T) {
 	})
 }
 
-func TestDerivedFutureCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	source, settle := NewFuture()
-	derived := source.thenContext(ctx, func(v any) (any, error) { t.Error("conversion ran after cancellation"); return v, nil })
-	cancel()
-	wait, stop := context.WithTimeout(context.Background(), time.Second)
-	defer stop()
-	_, err := derived.Wait(wait)
-	require.ErrorIs(t, err, context.Canceled)
-	require.False(t, channelClosed(source.Done()))
-	settle(1, nil)
-	panicking := source.thenContext(wait, func(any) (any, error) { panic("conversion failed") })
-	_, err = panicking.Wait(wait)
-	require.ErrorContains(t, err, "conversion failed")
-}
-
 func TestCheckoutPublicationRacesShutdown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	p, err := New(ctx, Options{Backend: BackendWasm, MaxProcesses: 1})
+	p, err := NewPool(ctx, PoolOptions{Workers: Wasm(WasmOptions{}), MaxWorkers: 1})
 	require.NoError(t, err)
 	defer p.Shutdown(ctx)
-	h := NewHost()
-	h.mu.Lock()
+	h := host.NewHost()
+	unblockHost := host.BlockRegistration(h)
 	locked := true
 	defer func() {
 		if locked {
-			h.mu.Unlock()
+			unblockHost()
 		}
 	}()
 	checked := make(chan error, 1)
 	go func() {
-		s, err := p.Checkout(ctx, CheckoutOptions{Host: h})
+		s, err := p.Checkout(ctx, mustRT(RuntimeOptions{Host: h}), CheckoutOptions{})
 		if s != nil {
 			_ = s.Close(ctx, KillNow)
 		}
@@ -297,9 +283,9 @@ func TestCheckoutPublicationRacesShutdown(t *testing.T) {
 	shut := make(chan error, 1)
 	go func() { shut <- p.Shutdown(ctx) }()
 	require.Eventually(t, p.closed.Load, time.Second, time.Millisecond)
-	h.mu.Unlock()
+	unblockHost()
 	locked = false
-	require.ErrorIs(t, <-checked, ErrPoolClosed)
+	require.ErrorIs(t, <-checked, monterr.ErrPoolClosed)
 	require.NoError(t, <-shut)
 	require.Equal(t, PoolStats{}, p.Stats())
 	p.sessionsMu.Lock()
@@ -310,10 +296,10 @@ func TestCheckoutPublicationRacesShutdown(t *testing.T) {
 func TestIdleDeathRetiresSession(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	p, err := New(ctx, Options{Backend: BackendWasm, MaxProcesses: 1})
+	p, err := NewPool(ctx, PoolOptions{Workers: Wasm(WasmOptions{}), MaxWorkers: 1})
 	require.NoError(t, err)
 	defer p.Shutdown(ctx)
-	s, err := p.Checkout(ctx, CheckoutOptions{})
+	s, err := p.Checkout(ctx, mustRT(RuntimeOptions{}), CheckoutOptions{})
 	require.NoError(t, err)
 	s.co.Terminate(nil, "test_idle_death")
 	select {
@@ -321,9 +307,9 @@ func TestIdleDeathRetiresSession(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
-	var crashed *CrashedError
+	var crashed *monterr.CrashedError
 	require.ErrorAs(t, s.Err(), &crashed)
-	fresh, err := p.Checkout(ctx, CheckoutOptions{})
+	fresh, err := p.Checkout(ctx, mustRT(RuntimeOptions{}), CheckoutOptions{})
 	require.NoError(t, err)
 	defer fresh.Close(ctx)
 	v, err := fresh.FeedRun(ctx, "42", nil)
@@ -334,11 +320,11 @@ func TestIdleDeathRetiresSession(t *testing.T) {
 func TestLoadSnapshotInterruptionBoundaries(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	p, err := New(ctx, Options{Backend: BackendWasm, MaxProcesses: 1})
+	p, err := NewPool(ctx, PoolOptions{Workers: Wasm(WasmOptions{}), MaxWorkers: 1})
 	require.NoError(t, err)
 	defer p.Shutdown(ctx)
-	h := NewHost()
-	s, err := p.Checkout(ctx, CheckoutOptions{Host: h})
+	h := host.NewHost()
+	s, err := p.Checkout(ctx, mustRT(RuntimeOptions{Host: h}), CheckoutOptions{})
 	require.NoError(t, err)
 	defer s.Close(ctx, KillNow)
 
@@ -349,11 +335,11 @@ func TestLoadSnapshotInterruptionBoundaries(t *testing.T) {
 	require.False(t, s.driven)
 	require.Nil(t, s.life.current)
 
-	h.mu.Lock()
+	unblockHost := host.BlockRegistration(h)
 	locked := true
 	defer func() {
 		if locked {
-			h.mu.Unlock()
+			unblockHost()
 		}
 	}()
 	loaded := make(chan error, 1)
@@ -371,12 +357,20 @@ func TestLoadSnapshotInterruptionBoundaries(t *testing.T) {
 	waitCancel()
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Equal(t, StopPending, result.How)
-	h.mu.Unlock()
+	unblockHost()
 	locked = false
 	err = <-loaded
-	var raised *RuntimeError
+	var raised *monterr.RuntimeError
 	require.ErrorAs(t, err, &raised)
 	require.Equal(t, "KeyboardInterrupt", raised.TypeName)
 	require.False(t, s.driven)
 	require.NoError(t, s.Err())
+}
+
+func mustRT(opts RuntimeOptions) *Runtime {
+	rt, err := NewRuntime(opts)
+	if err != nil {
+		panic(err)
+	}
+	return rt
 }

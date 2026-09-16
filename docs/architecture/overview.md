@@ -2,7 +2,7 @@
 
 montygo is a Go parent for [Monty](https://github.com/pydantic/monty) workers. It runs untrusted Python in a child process, inside a WebAssembly sandbox, or on a remote host, never as host code. It has no native in-process interpreter and no cgo.
 
-The public surface is two packages: `montygo` (pools, sessions, snapshots, host objects, mounts, telemetry) and `osaccess` (in-memory OS helpers). Everything else is internal.
+The public surface is the root package and four packages beside it. `montygo` holds the engine and its API: a `Runtime` is the sandbox configuration and host extensions a session runs in, a `Pool` manages workers from a `WorkerSource` (`Native`, `Wasm`, `Remote`, `Auto`), and `Pool.Checkout` joins them into a `Session`. The root also declares the `ServerSupervisor` contract a remote pool dials through. `sandbox` holds the Python value model, print targets and mounts; `sandbox/host` the host registry, host functions, class wrappers and the OS handler; `sandbox/osaccess` the in-memory OS helpers; `monterr` every error. `supervisor/docker` and `supervisor/native` implement the supervisor contract, and `telemetry` builds the OpenTelemetry components a pool records into. Nothing is global, and the root aliases nothing. Everything under `internal/` is closed.
 
 The repository also builds `monty-server`, a WebSocket server for Monty workers, and its Docker image.
 
@@ -10,7 +10,7 @@ The repository also builds `monty-server`, a WebSocket server for Monty workers,
 
 | Artifact | Built by | Contents |
 |---|---|---|
-| Go module `github.com/asalimonov/montygo` | `go build` | packages `montygo` and `osaccess`, internal packages, the embedded wasm worker |
+| Go module `github.com/asalimonov/montygo` | `go build` | `montygo`, `sandbox`, `sandbox/host`, `sandbox/osaccess`, `monterr`, `supervisor/docker`, `supervisor/native`, `telemetry`, the internal packages, and the embedded wasm worker |
 | `internal/wasmblob/monty.wasm.zst` | `make build-wasm` | the worker for `wasm32-wasip1`, zstd-compressed and checked in |
 | `examples` module | `make examples` | ports of the upstream examples and the REPL |
 | `monty-server` binary | `cargo build` in `server/` | WebSocket server that runs one `monty subprocess` per session |
@@ -61,9 +61,10 @@ Upstream is pinned in several places, which MUST move together: `proto/PROTO_REV
 
 - **Native** workers are `monty subprocess` children started with an empty environment. The binary resolves from an explicit path, `MONTY_BIN`, `PATH`, or a nearby cargo target directory. This backend is unix-only.
 - **Wasm** workers are module instances inside the host process. The zstd blob is verified against a pinned digest, compiled once per process and cached on disk. Each instance gets the host's monotonic and wall clocks and a crypto random source.
-- **WebSocket** workers are remote and single-use: one dial per checkout, no prewarming, a close frame at the end. `TLSConfig` and `DialContext` shape the dial. See `websocket.md`.
+- **Remote** workers (`Remote(supervisor, RemoteOptions)`) are single-use: one dial per checkout, no prewarming, a close frame at the end. A `ServerSupervisor` names the endpoint before each dial; `StaticServer` is the supervisor of a fixed URL. `RemoteOptions.TLSConfig` and `DialContext` shape the dial, `Recovery` retries it, `RotateSessions` moves a session before the server's session timeout. See `websocket.md` and `supervisor.md`.
 - **monty-server** (`server/`, Rust) accepts one WebSocket session per connection. Each session checks out a fresh `monty subprocess` from `monty_pool` and relays every request through `Checkout::turn_raw`. See `server.md` and `docker.md`.
-- `BackendAuto` picks native when a binary resolves, and wasm otherwise.
+- **supervisor/docker** starts that server in a container through the local `docker` CLI, resolving the image from the binding version; **supervisor/native** runs the binary as a child process. Both are supervisors an application passes to `Remote` and closes itself. See `supervisor.md` and `docker.md`.
+- `Auto()`, the default source, picks native when a binary resolves, and wasm otherwise. It never dials.
 
 All backends implement one `Worker` interface: send a frame, receive a frame, kill, close, wait, and report an exit status. The pool and the session never branch on the transport, except to classify how a worker ended.
 
@@ -120,11 +121,12 @@ See `protocol.md` for the codec and `pool.md` for deadlines and failure classifi
 - **Pool** (`internal/pool`) owns worker lifecycle and the turn engine. The engine enforces the pending suspension, deadlines, the suspension budget and failure classification. It services mount calls and feeds the telemetry observer.
 - **Mounts** (`internal/mountfs`) is a port of `monty-fs`. It serves read-only, read-write and overlay mounts from the host side. See `mounts.md`.
 - **Telemetry** (`internal/telemetry`) observes each checkout's requests and events and records spans, log records and metrics. See `telemetry.md`.
-- **Session** (package `montygo`) is the Go analogue of `MontySession` in `@pydantic/monty`. It converts values in both directions, answers suspensions and exposes snapshots. See `session.md`.
+- **Session** (package `montygo`) is the Go analogue of `MontySession` in `@pydantic/monty`. It converts values in both directions, answers suspensions from its runtime's host objects and OS handler, and exposes snapshots. See `session.md`.
+- **Runtime** (package `montygo`) is the validated, immutable sandbox configuration a session is checked out with: host registry, OS handler, mounts, print target, limits, type checking and host-side bounds. `NewRuntime` validates once, so `Checkout` only adds the script name and per-session limits.
 
 ### Request flow of `FeedRun`
 
-1. The session converts inputs into the value model and builds the feed's mount table.
+1. The session converts inputs into the value model and builds the feed's mount table from the runtime's mounts and the feed's.
 2. The checkout sends `Feed` and streams `Print` segments to the print target while it waits.
 3. A suspension goes to the answerer. It calls host code under a context carrying the caller's values and the current Monty span, then sends the matching resume.
 4. `Complete` converts the result back into Go values. `Error` and `TypingError` become typed Go errors.
@@ -133,9 +135,9 @@ See `protocol.md` for the codec and `pool.md` for deadlines and failure classifi
 
 ### Concurrency
 
-- A pool is safe for concurrent use. Checkouts beyond `MaxProcesses` wait up to `CheckoutTimeout`.
+- A pool is safe for concurrent use. Checkouts beyond `MaxWorkers` wait up to `CheckoutTimeout`. A runtime is immutable and shared by any number of sessions and pools.
 - A session admits one execution, including paused snapshots; conflicting calls return ErrSessionBusy. Its lifecycle mutex covers only state transitions, not callbacks or I/O. `Run.Stop` and `Close(ctx, KillNow)` target the execution identity; bounded waits MUST be used if a callback invokes lifecycle APIs on its own session.
-- Async host functions return a `*montygo.Future` that settles on its own goroutine. The session collects settled futures at a `ResolveFutures` suspension, or awaits one directly when the worker allows an eager await.
+- Async host functions return a `*host.Future` that settles on its own goroutine. The session collects settled futures at a `ResolveFutures` suspension, or awaits one directly when the worker allows an eager await.
 - Every blocking call takes a `context.Context`. Cancelling a feed context ends the run through the session's stop policy: the stop reason (`KeyboardInterrupt`) is delivered where Python yields and the session is kept; Python that never yields is killed when the policy's `Timeout` expires and the session is lost. `Run.Stop`, `Session.Stop` and `Session.Close` work from any goroutine; `Session.State`, `Done` and `Err` report the session's state and loss. See `session.md`.
 - `Pool.Shutdown` closes open sessions with the stop policy and waits for every worker; `Pool.Close` retires idle workers only. `Pool.Run` is a one-shot checkout, feed and close; `Pool.Slot` holds one re-acquirable session. See `pool.md` and `session.md`.
 
@@ -163,6 +165,7 @@ See `protocol.md` for the codec and `pool.md` for deadlines and failure classifi
 | `mounts.md` | host filesystem mounts |
 | `wasm.md` | embedded wasm worker |
 | `websocket.md` | remote workers |
+| `supervisor.md` | server supervisors, dial recovery, session rotation |
 | `server.md` | `monty-server`: flags, sessions, timeouts, dumps, drain, metrics |
 | `docker.md` | server image, build, cross-compilation, run recommendations |
 | `osaccess.md` | in-memory OS helpers |

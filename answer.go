@@ -10,6 +10,8 @@ import (
 	"github.com/asalimonov/montygo/internal/pool"
 	"github.com/asalimonov/montygo/internal/value"
 	"github.com/asalimonov/montygo/internal/wire"
+	monterr "github.com/asalimonov/montygo/monterr"
+	host "github.com/asalimonov/montygo/sandbox/host"
 )
 
 // hostFailure is a host-side error that leaves the worker suspended; it poisons the session.
@@ -18,19 +20,12 @@ type hostFailure struct{ err error }
 func (h *hostFailure) Error() string { return h.err.Error() }
 func (h *hostFailure) Unwrap() error { return h.err }
 
-func panicError(r any) error {
-	if err, ok := r.(error); ok {
-		return err
-	}
-	return fmt.Errorf("%v", r)
-}
-
 type answerer struct {
 	s      *Session
 	exec   *execution
 	lookup map[string]any
-	host   *Host
-	os     OSHandler
+	host   *host.Host
+	os     host.OSHandler
 	pt     *printTarget
 }
 
@@ -51,7 +46,7 @@ func (a *answerer) lookupEntry(name string) (any, bool) {
 	if a.host == nil {
 		return nil, false
 	}
-	return a.host.lookupEntry(name)
+	return a.host.LookupEntry(name)
 }
 
 // callHost runs one host call under a cancellable context registered with the
@@ -86,7 +81,7 @@ func (a *answerer) stop(ctx context.Context, err error) error {
 	return &abortedTurn{cause: a.s.abortOrTerminal(ctx, a.exec, a.pt, err)}
 }
 
-func (a *answerer) registerFuture(callID uint32, fut *Future) error {
+func (a *answerer) registerFuture(callID uint32, fut *host.Future) error {
 	return a.s.addFuture(a.exec, callID, fut)
 }
 
@@ -154,22 +149,22 @@ func (a *answerer) answer(ctx context.Context, ev *wire.Event) (*wire.Event, err
 	case wire.EventResolveFutures:
 		return a.answerResolveFutures(ctx, ev.PendingCallIDs)
 	}
-	return nil, &hostFailure{err: &ProtocolError{Message: "unexpected turn kind: " + ev.Kind.String()}}
+	return nil, &hostFailure{err: &monterr.ProtocolError{Message: "unexpected turn kind: " + ev.Kind.String()}}
 }
 
 // asFunction adapts a lookup entry to a Function; a non-function entry is
 // (nil, nil) and an invalid function signature reports its error.
-func asFunction(entry any) (Function, error) {
-	if f, ok := entry.(Function); ok {
+func asFunction(entry any) (host.Function, error) {
+	if f, ok := entry.(host.Function); ok {
 		return f, nil
 	}
 	if entry != nil && reflect.TypeOf(entry).Kind() == reflect.Func {
-		return Func(entry)
+		return host.Func(entry)
 	}
 	return nil, nil
 }
 
-func safeCall(ctx context.Context, fn Function, args []any, kwargs Kwargs) (result any, err error) {
+func safeCall(ctx context.Context, fn host.Function, args []any, kwargs host.Kwargs) (result any, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			result, err = nil, panicError(r)
@@ -181,7 +176,7 @@ func safeCall(ctx context.Context, fn Function, args []any, kwargs Kwargs) (resu
 func (a *answerer) restoreArgs(args []any) []any {
 	out := make([]any, len(args))
 	for i, arg := range args {
-		out[i] = restoreValue(arg, a.s.store)
+		out[i] = host.RestoreValue(arg, a.s.store)
 	}
 	return out
 }
@@ -192,9 +187,9 @@ func (a *answerer) resumeError(ctx context.Context, excType, message string) (*w
 
 // sendable prepares a host value for a resume, mapping failures to in-sandbox exceptions.
 func (a *answerer) sendable(v any) wire.ExtResult {
-	prepared, err := prepareValue(v, a.s.store)
+	prepared, err := host.PrepareValue(v, a.s.store)
 	if err != nil {
-		excType, msg := exceptionParts(err)
+		excType, msg := monterr.ExceptionParts(err)
 		return wire.ExtResult{Kind: wire.ExtError, Error: wire.NewException(excType, msg)}
 	}
 	if value.ExceedsMaxDepth(prepared) {
@@ -209,14 +204,14 @@ func (a *answerer) resumeReturn(ctx context.Context, v any) (*wire.Event, error)
 
 func (a *answerer) settledResult(callID uint32, v any, err error) wire.FutureResult {
 	if err != nil {
-		excType, msg := exceptionParts(err)
+		excType, msg := monterr.ExceptionParts(err)
 		return wire.FutureResult{CallID: callID, Result: wire.ExtResult{Kind: wire.ExtError, Error: wire.NewException(excType, msg)}}
 	}
 	return wire.FutureResult{CallID: callID, Result: a.sendable(v)}
 }
 
 func (a *answerer) resumeOutcome(ctx, cbCtx context.Context, callID uint32, eager bool, result any) (*wire.Event, error) {
-	if fut, ok := result.(*Future); ok {
+	if fut, ok := result.(*host.Future); ok {
 		if fut == nil {
 			return a.resumeError(ctx, "TypeError", "host returned a nil Future")
 		}
@@ -228,11 +223,11 @@ func (a *answerer) resumeOutcome(ctx, cbCtx context.Context, callID uint32, eage
 			return a.resumeFutures(ctx, []uint32{callID}, []wire.FutureResult{a.settledResult(callID, v, err)})
 		}
 		if err := a.registerFuture(callID, fut); err != nil {
-			var protocol *ProtocolError
+			var protocol *monterr.ProtocolError
 			if errors.As(err, &protocol) {
 				return nil, &hostFailure{err: err}
 			}
-			excType, msg := exceptionParts(err)
+			excType, msg := monterr.ExceptionParts(err)
 			return a.resumeError(ctx, excType, msg)
 		}
 		return a.resumeWire(ctx, wire.ExtResult{Kind: wire.ExtFuture})
@@ -250,33 +245,33 @@ func (a *answerer) answerFunctionCall(ctx, cbCtx context.Context, fc *wire.Funct
 		return a.resumeError(ctx, "TypeError", fc.FunctionName+": "+err.Error())
 	}
 	if fn == nil {
-		return a.resumeError(ctx, "TypeError", fmt.Sprintf("'%s' object is not callable", hostTypeName(entry)))
+		return a.resumeError(ctx, "TypeError", fmt.Sprintf("'%s' object is not callable", host.TypeName(entry)))
 	}
-	args, kwargs := a.restoreArgs(fc.Args), kwargsRecord(fc.Kwargs, a.s.store)
+	args, kwargs := a.restoreArgs(fc.Args), host.KwargsRecord(fc.Kwargs, a.s.store)
 	result, aborted, err := a.callHost(ctx, cbCtx, func(cb context.Context) (any, error) { return safeCall(cb, fn, args, kwargs) })
 	if aborted != nil || errors.Is(err, errAborted) {
 		return aborted, err
 	}
 	if err != nil {
-		excType, msg := exceptionParts(err)
+		excType, msg := monterr.ExceptionParts(err)
 		return a.resumeError(ctx, excType, msg)
 	}
 	return a.resumeOutcome(ctx, cbCtx, fc.CallID, fc.AllowEagerAwait, result)
 }
 
 func (a *answerer) answerMethodCall(ctx, cbCtx context.Context, fc *wire.FunctionCall) (*wire.Event, error) {
-	w, found := a.s.store.get(fc.ObjectID)
+	w, found := a.s.store.Get(fc.ObjectID)
 	if strings.HasPrefix(fc.FunctionName, "_") && fc.FunctionName != "__call__" {
 		name := "object"
 		if found {
-			name = w.wrapperName()
+			name = host.WrapperName(w)
 		}
 		return a.resumeError(ctx, "AttributeError", fmt.Sprintf("'%s' object has no attribute '%s'", name, fc.FunctionName))
 	}
 	if !found {
 		return a.resumeError(ctx, "RuntimeError", fmt.Sprintf("no host object registered for method call '%s' (id %s) — the instance store is empty after loading a dump into a fresh session", fc.FunctionName, fc.ObjectID))
 	}
-	args, kwargs := a.restoreArgs(fc.Args), kwargsRecord(fc.Kwargs, a.s.store)
+	args, kwargs := a.restoreArgs(fc.Args), host.KwargsRecord(fc.Kwargs, a.s.store)
 	result, aborted, err := a.callHost(ctx, cbCtx, func(cb context.Context) (any, error) {
 		return safeMethod(cb, w, fc.FunctionName, args, kwargs)
 	})
@@ -284,28 +279,28 @@ func (a *answerer) answerMethodCall(ctx, cbCtx context.Context, fc *wire.Functio
 		return aborted, err
 	}
 	if err != nil {
-		var ae *attrError
+		var ae *host.AttrError
 		if errors.As(err, &ae) {
-			return a.resumeError(ctx, "AttributeError", ae.msg)
+			return a.resumeError(ctx, "AttributeError", ae.Error())
 		}
-		excType, msg := exceptionParts(err)
+		excType, msg := monterr.ExceptionParts(err)
 		return a.resumeError(ctx, excType, msg)
 	}
 	return a.resumeOutcome(ctx, cbCtx, fc.CallID, fc.AllowEagerAwait, result)
 }
 
-func safeMethod(ctx context.Context, w wrapper, name string, args []any, kwargs Kwargs) (result any, err error) {
+func safeMethod(ctx context.Context, w host.Wrapper, name string, args []any, kwargs host.Kwargs) (result any, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			result, err = nil, panicError(r)
 		}
 	}()
-	return w.callMethod(ctx, name, args, kwargs)
+	return host.CallWrapperMethod(ctx, w, name, args, kwargs)
 }
 
 func (a *answerer) answerObjectLookup(ctx context.Context, nl *wire.NameLookup) (*wire.Event, error) {
 	undefined := wire.ResumeNameLookup{Kind: wire.LookupUndefined}
-	w, found := a.s.store.get(nl.ObjectID)
+	w, found := a.s.store.Get(nl.ObjectID)
 	if !found || strings.HasPrefix(nl.Name, "_") {
 		return a.resumeLookup(ctx, undefined)
 	}
@@ -315,28 +310,28 @@ func (a *answerer) answerObjectLookup(ctx context.Context, nl *wire.NameLookup) 
 	}
 	if err == nil {
 		var prepared any
-		prepared, err = prepareValue(v, a.s.store)
+		prepared, err = host.PrepareValue(v, a.s.store)
 		if err == nil && value.ExceedsMaxDepth(prepared) {
-			err = &RaisedError{ExcType: "RuntimeError", Message: "Max input depth exceeded"}
+			err = &monterr.RaisedError{ExcType: "RuntimeError", Message: "Max input depth exceeded"}
 		}
 		if err == nil {
 			return a.resumeLookup(ctx, wire.ResumeNameLookup{Kind: wire.LookupValue, Value: prepared})
 		}
 	}
-	if errors.Is(err, ErrAttrNotExposed) {
+	if errors.Is(err, host.ErrAttrNotExposed) {
 		return a.resumeLookup(ctx, undefined)
 	}
-	excType, msg := exceptionParts(err)
+	excType, msg := monterr.ExceptionParts(err)
 	return a.resumeLookup(ctx, wire.ResumeNameLookup{Kind: wire.LookupError, Error: wire.NewException(excType, msg)})
 }
 
-func safeLazy(w wrapper, name string) (result any, err error) {
+func safeLazy(w host.Wrapper, name string) (result any, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			result, err = nil, panicError(r)
 		}
 	}()
-	return w.lazyAttr(name)
+	return host.WrapperLazyAttr(w, name)
 }
 
 func (a *answerer) answerNameLookup(ctx context.Context, nl *wire.NameLookup) (*wire.Event, error) {
@@ -347,7 +342,7 @@ func (a *answerer) answerNameLookup(ctx context.Context, nl *wire.NameLookup) (*
 	if fn, _ := asFunction(entry); fn != nil {
 		return a.resumeLookup(ctx, wire.ResumeNameLookup{Kind: wire.LookupValue, Value: value.Function{Name: nl.Name}})
 	}
-	prepared, err := prepareValue(entry, a.s.store)
+	prepared, err := host.PrepareValue(entry, a.s.store)
 	if err != nil {
 		return nil, &hostFailure{err: err}
 	}
@@ -381,10 +376,10 @@ func (a *answerer) answerOsCall(ctx, cbCtx context.Context, call *wire.OsCall) (
 		return a.resumeWire(ctx, notHandled)
 	}
 	args, kw := call.Args()
-	restored, kwargs := a.restoreArgs(args), kwargsRecord(kw, a.s.store)
+	restored, kwargs := a.restoreArgs(args), host.KwargsRecord(kw, a.s.store)
 	result, aborted, err := a.callHost(ctx, cbCtx, func(cb context.Context) (any, error) {
 		r, err := safeOS(cb, a.os, call.Name(), restored, kwargs)
-		if fut, ok := r.(*Future); ok && err == nil {
+		if fut, ok := r.(*host.Future); ok && err == nil {
 			return fut.Wait(cb)
 		}
 		return r, err
@@ -393,16 +388,16 @@ func (a *answerer) answerOsCall(ctx, cbCtx context.Context, call *wire.OsCall) (
 		return aborted, err
 	}
 	if err != nil {
-		excType, msg := exceptionParts(err)
+		excType, msg := monterr.ExceptionParts(err)
 		return a.resumeError(ctx, excType, msg)
 	}
-	if result == NotHandled {
+	if result == host.NotHandled {
 		return a.resumeWire(ctx, notHandled)
 	}
 	return a.resumeReturn(ctx, result)
 }
 
-func safeOS(ctx context.Context, handler OSHandler, name string, args []any, kwargs Kwargs) (result any, err error) {
+func safeOS(ctx context.Context, handler host.OSHandler, name string, args []any, kwargs host.Kwargs) (result any, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			result, err = nil, panicError(r)
@@ -413,16 +408,16 @@ func safeOS(ctx context.Context, handler OSHandler, name string, args []any, kwa
 
 func (a *answerer) answerResolveFutures(ctx context.Context, ids []uint32) (*wire.Event, error) {
 	if len(ids) == 0 {
-		return nil, &hostFailure{err: &ProtocolError{Message: "worker reported ResolveFutures with no pending call ids"}}
+		return nil, &hostFailure{err: &monterr.ProtocolError{Message: "worker reported ResolveFutures with no pending call ids"}}
 	}
 	cases := make([]reflect.SelectCase, 0, len(ids)+1)
-	futures := make(map[uint32]*Future, len(ids))
+	futures := make(map[uint32]*host.Future, len(ids))
 	a.s.life.mu.Lock()
 	for _, id := range ids {
 		f, ok := a.exec.pending[id]
 		if !ok || futures[id] != nil {
 			a.s.life.mu.Unlock()
-			return nil, &hostFailure{err: &ProtocolError{Message: fmt.Sprintf("worker reported unknown or duplicate pending call id %d", id)}}
+			return nil, &hostFailure{err: &monterr.ProtocolError{Message: fmt.Sprintf("worker reported unknown or duplicate pending call id %d", id)}}
 		}
 		futures[id] = f
 		cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(f.Done())})
@@ -439,24 +434,21 @@ func (a *answerer) answerResolveFutures(ctx context.Context, ids []uint32) (*wir
 	var results []wire.FutureResult
 	for _, id := range ids {
 		f := futures[id]
-		if f.settled() {
+		if f.IsSettled() {
 			a.s.life.mu.Lock()
 			delete(a.exec.pending, id)
 			a.s.life.mu.Unlock()
-			results = append(results, a.settledResult(id, f.value, f.err))
+			value, ferr := f.Result()
+			results = append(results, a.settledResult(id, value, ferr))
 		}
 	}
 	return a.resumeFutures(ctx, ids, results)
 }
 
-func hostTypeName(v any) string {
-	switch x := v.(type) {
-	case *ClassInstance:
-		return x.Name()
-	case *ClassType:
-		return "type"
-	case *ClassProxy:
-		return x.Name
+// panicError turns a recovered panic value into the error a host call reports.
+func panicError(r any) error {
+	if err, ok := r.(error); ok {
+		return err
 	}
-	return value.PyTypeName(v)
+	return fmt.Errorf("%v", r)
 }

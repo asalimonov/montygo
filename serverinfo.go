@@ -7,10 +7,8 @@ import (
 	"time"
 
 	"github.com/asalimonov/montygo/internal/worker"
+	"github.com/asalimonov/montygo/monterr"
 )
-
-// ErrNoServerInfo reports a server without a GET /info endpoint.
-var ErrNoServerInfo = errors.New("montygo: server does not expose /info")
 
 // ServerInfo is what a monty-server reports at GET /info.
 type ServerInfo struct {
@@ -85,37 +83,50 @@ func seconds(s uint64) time.Duration {
 	return time.Duration(s) * time.Second
 }
 
-// FetchServerInfo reads GET <path>/info of the server behind opts.URL over the
-// same transport a checkout dials. It sends the ConnectHeaders and is bounded by
-// RequestTimeout: 0 means 10s, NoRequestTimeout leaves only ctx. A server without
-// the endpoint yields ErrNoServerInfo.
-func FetchServerInfo(ctx context.Context, opts WebSocketOptions) (*ServerInfo, error) {
-	timeout := opts.RequestTimeout
-	if timeout == 0 {
-		timeout = defaultWebSocketRequestTimeout
-	}
-	headers, err := serverInfoHeaders(ctx, opts)
+// FetchServerInfo reads GET <path>/info of the server behind sup's current
+// endpoint over the same transport a checkout dials. It sends the endpoint's
+// headers and is bounded by opts.DialTimeout: 0 means 10s. A server without
+// the endpoint yields monterr.ErrNoServerInfo.
+func FetchServerInfo(ctx context.Context, sup ServerSupervisor, opts RemoteOptions) (*ServerInfo, error) {
+	dialer, headers, err := endpointDialer(ctx, sup, opts)
 	if err != nil {
 		return nil, err
 	}
 	var raw serverInfoJSON
-	if err := opts.dialer(timeout).GetJSON(ctx, "/info", headers, &raw); err != nil {
+	if err := dialer.GetJSON(ctx, "/info", headers, &raw); err != nil {
 		var he *worker.HTTPStatusError
 		if errors.As(err, &he) && he.Code == http.StatusNotFound {
-			return nil, ErrNoServerInfo
+			return nil, monterr.ErrNoServerInfo
 		}
 		return nil, err
 	}
 	return raw.toServerInfo(), nil
 }
 
-func serverInfoHeaders(ctx context.Context, opts WebSocketOptions) ([][2]string, error) {
-	if opts.ConnectHeaders == nil {
-		return nil, nil
-	}
-	extra, err := opts.ConnectHeaders(ctx)
+// CheckServerHealth reports nil when the server behind sup's current endpoint
+// answers GET <path>/health with 200. It sends the endpoint's headers and is
+// bounded by opts.DialTimeout: 0 means 10s.
+func CheckServerHealth(ctx context.Context, sup ServerSupervisor, opts RemoteOptions) error {
+	dialer, headers, err := endpointDialer(ctx, sup, opts)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return sortedHeaders(extra), nil
+	return dialer.HealthCheck(ctx, headers)
+}
+
+// endpointDialer resolves sup's endpoint into a dialer the HTTP helpers use, so
+// they reach the same server a checkout would dial.
+func endpointDialer(ctx context.Context, sup ServerSupervisor, opts RemoteOptions) (*worker.WebSocketDialer, [][2]string, error) {
+	if sup == nil {
+		return nil, nil, &monterr.OptionError{Message: "supervisor is required"}
+	}
+	ep, err := sup.Endpoint(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	var headers [][2]string
+	if len(ep.Headers) > 0 {
+		headers = sortedHeaders(ep.Headers)
+	}
+	return opts.dialer(ep.URL, ep.TLSConfig), headers, nil
 }

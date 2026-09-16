@@ -5,6 +5,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/asalimonov/montygo/sandbox"
+	"github.com/asalimonov/montygo/sandbox/host"
 	"io"
 	"os"
 
@@ -20,7 +22,7 @@ type Person struct {
 func (p *Person) Greeting() string { return "hi " + p.Name }
 
 func (p *Person) String() string {
-	return fmt.Sprintf("Person(name=%s, age=%d)", montygo.Repr(p.Name), p.Age)
+	return fmt.Sprintf("Person(name=%s, age=%d)", sandbox.Repr(p.Name), p.Age)
 }
 
 func main() {
@@ -33,19 +35,23 @@ func main() {
 func run(ctx context.Context, out io.Writer) error {
 	person := &Person{Name: "Samuel", Age: 4}
 
-	pool, err := montygo.New(ctx, montyenv.PoolOptions())
+	pool, err := montygo.NewPool(ctx, montyenv.PoolOptions())
 	if err != nil {
 		return err
 	}
 	defer pool.Close(ctx)
 
 	result, err := func() (any, error) {
-		session, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
+		rt, err := montygo.NewRuntime(montygo.RuntimeOptions{})
+		if err != nil {
+			return nil, err
+		}
+		session, err := pool.Checkout(ctx, rt, montygo.CheckoutOptions{})
 		if err != nil {
 			return nil, err
 		}
 		defer session.Close(ctx)
-		user, err := montygo.NewClassInstance(person, montygo.ClassInstanceOptions{EagerAttrs: montygo.All(), AllowedMethods: montygo.Names("greeting")})
+		user, err := host.NewClassInstance(person, host.ClassInstanceOptions{EagerAttrs: host.All(), AllowedMethods: host.Names("greeting")})
 		if err != nil {
 			return nil, err
 		}

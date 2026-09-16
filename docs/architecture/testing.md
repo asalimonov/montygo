@@ -2,7 +2,8 @@
 
 ## Root suite
 
-- Root tests run every scenario on each backend in `MONTY_TEST_BACKENDS` via `eachBackend`. Backend names are `native`, `wasm` and `websocket`. The default is `native,wasm`, plus `websocket` when `MONTY_TEST_WS_URL` is set.
+- The ported upstream suites live in the root package as `*_test.go` (package `montygo_test`) and run every scenario on each backend in `MONTY_TEST_BACKENDS` via `eachBackend`. Backend names are `native`, `wasm`, `websocket` and `docker`. The default is `native,wasm`, plus `websocket` when `MONTY_TEST_WS_URL` is set.
+- `websocket` and `docker` are remote backends: `remoteBackend` selects the adaptations they share, such as signed dumps and disconnects instead of crashes.
 - Each top-level test gets its own pools, like one pool per upstream spec file. Wasm pools recycle workers after every checkout. Tests that inspect worker reuse create their own pools.
 - `TestMain` points `MONTY_BIN` at a sibling `../monty/target/debug/monty` when it is unset. It exits 2 when `websocket` is listed without `MONTY_TEST_WS_URL`.
 - The upstream TypeScript suite is ported file by file; titles are kept as subtest names. See `docs/parity/tests.md`.
@@ -10,13 +11,35 @@
 - Internal packages have unit tests: codec differential tests, fake-worker pool tests, transport tests and the ported `monty-fs` suite.
 - `examples/` is a separate module with a test per example program.
 
-## `websocket` backend
+## Runtimes in tests
 
-- `openPool` builds every root test pool. For `websocket` it maps `Options` onto `WebSocketOptions` against `MONTY_TEST_WS_URL`: `MaxProcesses`, `CheckoutTimeout` and `RequestTimeout`, where 0 becomes `NoRequestTimeout`.
+- `defaultRuntime` is the runtime of every session without host extensions; `mustRuntime(opts)` builds another one and panics on an invalid option, so tests of `NewRuntime` errors call it directly.
+- `newSession(t, b, opts)` checks out from the shared pool with `defaultRuntime`; `newSessionRT(t, b, rt, opts)` with a chosen runtime. `runOptions` carries an optional `Runtime` beside `CheckoutOptions` and `FeedOptions`.
+- A test that needs a different OS handler per feed keeps one runtime whose handler forwards to a variable.
+
+## `websocket` and `docker` backends
+
+- `openPool` builds every root test pool from `PoolOptions`. For `websocket` it uses `Remote(StaticServer(MONTY_TEST_WS_URL, nil, nil), RemoteOptions{})`, where `RequestTimeout` 0 becomes `NoRequestTimeout`. For `docker` it starts a `docker.New` supervisor per pool with the test dump key and `RotateSessions`, and closes it with the pool (`closePool`).
 - A local backend that cannot start skips its subtests. A configured server that cannot be reached fails them.
-- Telemetry child processes receive the backend by name.
-- `make test-docker` runs the suite against the image. It starts one container on a random loopback port with the test dump key, the per-client quota disabled and the label `montygo.test=docker`. It waits for `/health`, runs `go test -count=1 -timeout 30m .` with `MONTY_TEST_BACKENDS=websocket`, and stops the container.
-- Adaptations for this backend are listed in `docs/parity/tests.md`.
+- `make test-docker` runs the suite on the `docker` backend with `MONTYGO_DOCKER_IMAGE=$(IMAGE):$(IMAGE_TAG)`. Each pool gets the same test dump key, so a dump taken from one pool loads into another.
+
+## Supervisors, recovery and rotation
+
+These need no Docker daemon:
+
+- `supervisor/docker/docker_image_test.go` covers candidate tags, option and variable precedence, pinned references and pseudo-version bases.
+- `supervisor/docker/docker_supervisor_test.go` drives `docker.Supervisor` against a fake `docker` script and an `httptest` server: the start sequence, hardening flags, labels, the dump key passed by name only, image fallback, protocol refusal, restart with a new port, and close.
+- `recovery_test.go` covers the attempt loop, non-retryable errors, restart only when enabled, and single-flight restarts.
+- `rotation_test.go` drives real sessions over `wsRelay`, which serves `GET /info` with short timeouts and can refuse upgrades: state survives a rotation, an idle session rotates on its timer, a refused reconnect yields `RotationError` whose dump restores, and unusable limits leave rotation off.
+- `websocket_test.go` builds its pools through a test-local `wsOptions` that maps onto `StaticServer` and `RemoteOptions`.
+
+Tests live with the code they cover: the image resolver and the fake-CLI supervisor tests in `supervisor/docker`, the host internals in `sandbox/host`, the driver transitions and the user agent as internal tests of the root package, the version resolution in `internal/buildinfo`. `supervisor/native` tests spawn a real `monty-server`; they skip when the server binary or the worker is missing.
+
+- Adaptations for the remote backends are listed in `docs/parity/tests.md`.
+
+## Telemetry tests
+
+Telemetry is a pool parameter, so `telemetry_test.go` and `callback_context_test.go` run in-process: each case builds its own providers and passes `Components` to its pools. No child process and no global installation are involved.
 
 ## Lifecycle regressions
 
@@ -48,6 +71,7 @@ do not validate changed call signatures.
 - `ContainerPool` lends `MONTYGO_TEST_PARALLEL` units. A unit is one `monty-server` container; tests queue for a free one.
 - A unit that ran with options, was signalled or was recreated is replaced by a fresh default container at release. A unit that is not healthy and idle after a test is replaced too.
 - Metric assertions compare deltas from a baseline, because default units are reused.
+- `setup.go` builds pools through a test-local `wsOptions` over `StaticServer` and `RemoteOptions`; `TestServer.Checkout` uses `defaultRuntime`, `CheckoutRT` a chosen runtime. `TestDockerSupervisor_*` use `docker.New` and `Remote`.
 - REPL tests cover sessions through montygo, and the `examples/repl` binary built once and driven with `-ws` over pipes.
 - Python interop tests run the `monty-pyclient` image as one-shot containers that dial the server's container IP. The client built at the pin exercises feeds, host functions, dumps and drain. The PyPI `0.0.23` client asserts the protocol 2 refusal text.
 - Container logs stream to `tests/network/output/containers/`. See `tests/network/README.md`.

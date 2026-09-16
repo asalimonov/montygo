@@ -2,6 +2,7 @@ package montygo
 
 import (
 	"fmt"
+	monterr "github.com/asalimonov/montygo/monterr"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,7 +24,7 @@ func FindMontyBinary(explicit string) (string, error) {
 		if isExecutable(explicit) {
 			return explicit, nil
 		}
-		return "", &OptionError{Message: "monty binary not found at binaryPath: " + explicit}
+		return "", &monterr.OptionError{Message: "monty binary not found at binaryPath: " + explicit}
 	}
 	var tried []string
 	if env := os.Getenv("MONTY_BIN"); env != "" {
@@ -42,7 +43,7 @@ func FindMontyBinary(explicit string) (string, error) {
 		return p, nil
 	}
 	tried = append(tried, "cargo target directory")
-	return "", &OptionError{Message: fmt.Sprintf("could not locate the monty binary (tried: %s). Install pydantic-monty-runtime, set MONTY_BIN, or pass BinaryPath.", strings.Join(tried, ", "))}
+	return "", &monterr.OptionError{Message: fmt.Sprintf("could not locate the monty binary (tried: %s). Install pydantic-monty-runtime, set MONTY_BIN, or pass BinaryPath.", strings.Join(tried, ", "))}
 }
 
 func isExecutable(path string) bool {

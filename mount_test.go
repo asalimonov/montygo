@@ -14,6 +14,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/monterr"
+	"github.com/asalimonov/montygo/sandbox"
+	"github.com/asalimonov/montygo/sandbox/host"
 )
 
 type mntTestDir struct {
@@ -31,27 +34,27 @@ func mntCreateTestDir(t *testing.T) *mntTestDir {
 	return &mntTestDir{t: t, dir: dir}
 }
 
-func (d *mntTestDir) open(opts montygo.MountDirOptions) (*montygo.MountDir, error) {
+func (d *mntTestDir) open(opts sandbox.MountDirOptions) (*sandbox.MountDir, error) {
 	opts.HostPath = d.dir
-	m, err := montygo.NewMountDir(opts)
+	m, err := sandbox.NewMountDir(opts)
 	if err == nil {
 		d.t.Cleanup(func() { _ = m.Close() })
 	}
 	return m, err
 }
 
-func (d *mntTestDir) mount(opts montygo.MountDirOptions) *montygo.MountDir {
+func (d *mntTestDir) mount(opts sandbox.MountDirOptions) *sandbox.MountDir {
 	d.t.Helper()
 	m, err := d.open(opts)
 	require.NoError(d.t, err)
 	return m
 }
 
-func mntOpts(mounts ...*montygo.MountDir) runOptions {
+func mntOpts(mounts ...*sandbox.MountDir) runOptions {
 	return runOptions{FeedOptions: montygo.FeedOptions{Mount: mounts}}
 }
 
-func mntFeed(mounts ...*montygo.MountDir) *montygo.FeedOptions {
+func mntFeed(mounts ...*sandbox.MountDir) *montygo.FeedOptions {
 	return &montygo.FeedOptions{Mount: mounts}
 }
 
@@ -59,7 +62,7 @@ func mntU64(v uint64) *uint64 { return &v }
 
 func mntPathArg(v any) string {
 	switch x := v.(type) {
-	case montygo.Path:
+	case sandbox.Path:
 		return string(x)
 	case string:
 		return x
@@ -69,14 +72,14 @@ func mntPathArg(v any) string {
 
 func mntRequireRuntimeError(t *testing.T, err error, message string) {
 	t.Helper()
-	var re *montygo.RuntimeError
+	var re *monterr.RuntimeError
 	require.ErrorAs(t, err, &re)
 	require.Equal(t, message, err.Error())
 }
 
 func mntRequireValueError(t *testing.T, err error) string {
 	t.Helper()
-	var ve *montygo.ValueError
+	var ve *monterr.ValueError
 	require.ErrorAs(t, err, &ve)
 	return ve.Error()
 }
@@ -118,7 +121,7 @@ func mntExists(path string) bool {
 }
 
 func TestMount(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		t.Run("browser wasm reports mounts as unsupported", func(t *testing.T) {
 			t.Skip("Go wasm backend services mounts host-side")
 		})
@@ -134,10 +137,10 @@ func TestMount(t *testing.T) {
 				t.Skipf("host forbids symlink creation: %v", err)
 			}
 
-			child, err := montygo.NewMountDir(montygo.MountDirOptions{HostPath: shared, VirtualPath: "/child", Mode: montygo.MountReadOnly})
+			child, err := sandbox.NewMountDir(sandbox.MountDirOptions{HostPath: shared, VirtualPath: "/child", Mode: sandbox.MountReadOnly})
 			require.NoError(t, err)
 			defer child.Close()
-			parent, err := montygo.NewMountDir(montygo.MountDirOptions{HostPath: base, VirtualPath: "/parent", Mode: montygo.MountReadWrite})
+			parent, err := sandbox.NewMountDir(sandbox.MountDirOptions{HostPath: base, VirtualPath: "/parent", Mode: sandbox.MountReadWrite})
 			require.NoError(t, err)
 			defer parent.Close()
 			s := newSession(t, b, montygo.CheckoutOptions{})
@@ -158,7 +161,7 @@ f"{Path('/child/inside.txt').read_text()}:{Path('/child/secret.txt').exists()}"`
 		})
 
 		t.Run("cwd defaults to the root without mounts", func(t *testing.T) {
-			require.Equal(t, montygo.Tuple{"/", "/main.py"}, mustRun(t, b, "import os\n(os.getcwd(), __file__)", runOptions{}))
+			require.Equal(t, sandbox.Tuple{"/", "/main.py"}, mustRun(t, b, "import os\n(os.getcwd(), __file__)", runOptions{}))
 			require.Equal(t, "/work", mustRun(t, b, "import os\nos.getcwd()", runOptions{FeedOptions: montygo.FeedOptions{Cwd: "/work/"}}))
 		})
 
@@ -179,22 +182,19 @@ Path('sub/../file.txt').exists()
 Path('/other//sub/../file.txt').exists()
 os.listdir()
 os.rename('./sub/../src', '../dst')
-open('./sub//../file.txt').read()`, runOptions{FeedOptions: montygo.FeedOptions{
-					Cwd: cwd,
-					OS: func(_ context.Context, name string, args []any, _ montygo.Kwargs) (any, error) {
-						calls = append(calls, mntCall{name, args})
-						switch name {
-						case "Path.iterdir":
-							return []any{}, nil
-						case "open":
-							h, err := montygo.NewFileHandle(mntPathArg(args[0]), "r", 0)
-							return h, err
-						case "Path.read_text":
-							return "hello", nil
-						}
-						return true, nil
-					},
-				}})
+open('./sub//../file.txt').read()`, runOptions{Runtime: mustRuntime(montygo.RuntimeOptions{OS: func(_ context.Context, name string, args []any, _ host.Kwargs) (any, error) {
+					calls = append(calls, mntCall{name, args})
+					switch name {
+					case "Path.iterdir":
+						return []any{}, nil
+					case "open":
+						h, err := sandbox.NewFileHandle(mntPathArg(args[0]), "r", 0)
+						return h, err
+					case "Path.read_text":
+						return "hello", nil
+					}
+					return true, nil
+				}}), FeedOptions: montygo.FeedOptions{Cwd: cwd}})
 				require.NoError(t, err)
 				require.Equal(t, "hello", result)
 				prefix := cwd
@@ -202,19 +202,19 @@ open('./sub//../file.txt').read()`, runOptions{FeedOptions: montygo.FeedOptions{
 					prefix = ""
 				}
 				require.Equal(t, []mntCall{
-					{"Path.exists", []any{montygo.Path(prefix + "/file.txt")}},
-					{"Path.exists", []any{montygo.Path("/other/file.txt")}},
-					{"Path.iterdir", []any{montygo.Path(cwd)}},
-					{"Path.rename", []any{montygo.Path(prefix + "/src"), montygo.Path("/dst")}},
-					{"open", []any{montygo.Path(prefix + "/file.txt"), "r"}},
-					{"Path.read_text", []any{montygo.Path(prefix + "/file.txt")}},
+					{"Path.exists", []any{sandbox.Path(prefix + "/file.txt")}},
+					{"Path.exists", []any{sandbox.Path("/other/file.txt")}},
+					{"Path.iterdir", []any{sandbox.Path(cwd)}},
+					{"Path.rename", []any{sandbox.Path(prefix + "/src"), sandbox.Path("/dst")}},
+					{"open", []any{sandbox.Path(prefix + "/file.txt"), "r"}},
+					{"Path.read_text", []any{sandbox.Path(prefix + "/file.txt")}},
 				}, calls)
 			})
 		}
 
 		t.Run("cwd defaults to the first mount and persists across feeds", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadOnly})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadOnly})
 			s := newSession(t, b, montygo.CheckoutOptions{})
 			ctx := testCtx(t)
 			feed := func(code string, opts *montygo.FeedOptions) any {
@@ -223,13 +223,13 @@ open('./sub//../file.txt').read()`, runOptions{FeedOptions: montygo.FeedOptions{
 				require.NoError(t, err)
 				return v
 			}
-			require.Equal(t, montygo.Tuple{"/data", "/data/main.py", "hello world"},
+			require.Equal(t, sandbox.Tuple{"/data", "/data/main.py", "hello world"},
 				feed("import os\n(os.getcwd(), __file__, open('hello.txt').read())", mntFeed(md)))
 			require.Equal(t, "/data/subdir", feed("os.chdir('subdir')\nos.getcwd()", mntFeed(md)))
 			require.Equal(t, "/data/subdir", feed("os.getcwd()", mntFeed(md)))
 			require.Equal(t, "/data/subdir", feed("os.getcwd()", nil))
-			require.Equal(t, "nested content", feed("open('nested.txt').read()", &montygo.FeedOptions{Mount: []*montygo.MountDir{md}, Cwd: "/data/subdir"}))
-			require.Equal(t, "/data", feed("os.getcwd()", &montygo.FeedOptions{Mount: []*montygo.MountDir{md}, Cwd: "/data"}))
+			require.Equal(t, "nested content", feed("open('nested.txt').read()", &montygo.FeedOptions{Mount: []*sandbox.MountDir{md}, Cwd: "/data/subdir"}))
+			require.Equal(t, "/data", feed("os.getcwd()", &montygo.FeedOptions{Mount: []*sandbox.MountDir{md}, Cwd: "/data"}))
 		})
 
 		t.Run("an explicit cwd persists across feeds", func(t *testing.T) {
@@ -269,25 +269,25 @@ open('./sub//../file.txt').read()`, runOptions{FeedOptions: montygo.FeedOptions{
 
 		t.Run("MountDir repr", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadOnly})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadOnly})
 			require.Equal(t, fmt.Sprintf("MountDir(host_path='%s', virtual_path='/data', mode='read-only')", d.dir), md.String())
 		})
 
 		t.Run("MountDir invalid mode", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			_, err := d.open(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountMode("invalid")})
+			_, err := d.open(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountMode("invalid")})
 			require.Equal(t, "invalid mount mode: 'invalid'. Expected 'read-only', 'read-write' or 'overlay'", mntRequireValueError(t, err))
 		})
 
 		t.Run("MountDir attributes", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadOnly})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadOnly})
 			require.Equal(t, "/data", md.VirtualPath)
 			require.Equal(t, d.dir, md.HostPath)
-			require.Equal(t, montygo.MountReadOnly, md.Mode)
+			require.Equal(t, sandbox.MountReadOnly, md.Mode)
 			require.Equal(t, uint64(100_000_000), md.MemoryUsageLimit)
 
-			limited := d.mount(montygo.MountDirOptions{VirtualPath: "/limited", MemoryUsageLimit: mntU64(1234)})
+			limited := d.mount(sandbox.MountDirOptions{VirtualPath: "/limited", MemoryUsageLimit: mntU64(1234)})
 			require.Equal(t, uint64(1234), limited.MemoryUsageLimit)
 
 			fields := mntExportedFields(md)
@@ -296,33 +296,33 @@ open('./sub//../file.txt').read()`, runOptions{FeedOptions: montygo.FeedOptions{
 		})
 
 		t.Run("MountDir nonexistent host path", func(t *testing.T) {
-			_, err := montygo.NewMountDir(montygo.MountDirOptions{HostPath: "/nonexistent/path/that/does/not/exist", VirtualPath: "/data"})
+			_, err := sandbox.NewMountDir(sandbox.MountDirOptions{HostPath: "/nonexistent/path/that/does/not/exist", VirtualPath: "/data"})
 			message := mntRequireValueError(t, err)
 			require.True(t, strings.HasPrefix(message, "cannot open host path '/nonexistent/path/that/does/not/exist':"), message)
 		})
 
 		t.Run("MountDir non-absolute virtual path", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			_, err := d.open(montygo.MountDirOptions{VirtualPath: "relative"})
+			_, err := d.open(sandbox.MountDirOptions{VirtualPath: "relative"})
 			require.Equal(t, "virtual path must be absolute, got: 'relative'", mntRequireValueError(t, err))
 		})
 
 		t.Run("closing a mount releases it and later feeds are refused", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadOnly})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadOnly})
 			require.Equal(t, "hello world", mustRun(t, b, "open('/data/hello.txt').read()", mntOpts(md)))
 
 			require.NoError(t, md.Close())
 			require.NoError(t, md.Close())
 			_, err := run(t, b, "open('/data/hello.txt').read()", mntOpts(md))
-			var oe *montygo.OptionError
+			var oe *monterr.OptionError
 			require.ErrorAs(t, err, &oe)
 			require.Equal(t, "mount is closed: create a new MountDir", oe.Error())
 			require.Equal(t, "/data", md.VirtualPath)
 
-			var disposed *montygo.MountDir
+			var disposed *sandbox.MountDir
 			func() {
-				scoped := d.mount(montygo.MountDirOptions{VirtualPath: "/scoped", Mode: montygo.MountReadOnly})
+				scoped := d.mount(sandbox.MountDirOptions{VirtualPath: "/scoped", Mode: sandbox.MountReadOnly})
 				defer scoped.Close()
 				require.Equal(t, "hello world", mustRun(t, b, "open('/scoped/hello.txt').read()", mntOpts(scoped)))
 				disposed = scoped
@@ -333,22 +333,22 @@ open('./sub//../file.txt').read()`, runOptions{FeedOptions: montygo.FeedOptions{
 
 		t.Run("MountDir default mode is overlay", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data"})
-			require.Equal(t, montygo.MountOverlay, md.Mode)
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data"})
+			require.Equal(t, sandbox.MountOverlay, md.Mode)
 		})
 
 		t.Run("MountDir write_bytes_limit", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", WriteBytesLimit: mntU64(1024)})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", WriteBytesLimit: mntU64(1024)})
 			require.NotNil(t, md.WriteBytesLimit)
 			require.Equal(t, uint64(1024), *md.WriteBytesLimit)
 
-			md2 := d.mount(montygo.MountDirOptions{VirtualPath: "/data"})
+			md2 := d.mount(sandbox.MountDirOptions{VirtualPath: "/data"})
 			require.Nil(t, md2.WriteBytesLimit)
 		})
 
 		t.Run("MontyFileHandle exposes canonical file properties", func(t *testing.T) {
-			handle, err := montygo.NewFileHandle("/data/message.bin", "br", 12)
+			handle, err := sandbox.NewFileHandle("/data/message.bin", "br", 12)
 			require.NoError(t, err)
 			require.Equal(t, []string{"Path", "Mode", "Position"}, mntExportedFields(handle))
 			require.Equal(t, "/data/message.bin", handle.Path)
@@ -362,12 +362,12 @@ open('./sub//../file.txt').read()`, runOptions{FeedOptions: montygo.FeedOptions{
 
 		t.Run("os callback file handles support text and binary reads", func(t *testing.T) {
 			var calls []mntCall
-			osCallback := func(_ context.Context, name string, args []any, _ montygo.Kwargs) (any, error) {
+			osCallback := func(_ context.Context, name string, args []any, _ host.Kwargs) (any, error) {
 				calls = append(calls, mntCall{name, args})
 				path := mntPathArg(args[0])
 				switch name {
 				case "open":
-					h, err := montygo.NewFileHandle(path, args[1].(string), 0)
+					h, err := sandbox.NewFileHandle(path, args[1].(string), 0)
 					return h, err
 				case "Path.read_text":
 					return "hello", nil
@@ -376,51 +376,54 @@ open('./sub//../file.txt').read()`, runOptions{FeedOptions: montygo.FeedOptions{
 				}
 				return nil, fmt.Errorf("unexpected OS call: %s", name)
 			}
-			opts := runOptions{FeedOptions: montygo.FeedOptions{OS: osCallback}}
+			opts := runOptions{Runtime: mustRuntime(montygo.RuntimeOptions{OS: osCallback})}
 
 			require.Equal(t, "hello", mustRun(t, b, "open('/data/message.txt').read()", opts))
 			require.Equal(t, []byte{0, 1, 2}, mustRun(t, b, "open('/data/data.bin', 'rb').read()", opts))
 			require.Equal(t, []mntCall{
-				{"open", []any{montygo.Path("/data/message.txt"), "r"}},
-				{"Path.read_text", []any{montygo.Path("/data/message.txt")}},
-				{"open", []any{montygo.Path("/data/data.bin"), "rb"}},
-				{"Path.read_bytes", []any{montygo.Path("/data/data.bin")}},
+				{"open", []any{sandbox.Path("/data/message.txt"), "r"}},
+				{"Path.read_text", []any{sandbox.Path("/data/message.txt")}},
+				{"open", []any{sandbox.Path("/data/data.bin"), "rb"}},
+				{"Path.read_bytes", []any{sandbox.Path("/data/data.bin")}},
 			}, calls)
 		})
 
 		t.Run("file handles round-trip with canonical modes and positions", func(t *testing.T) {
-			s := newSession(t, b, montygo.CheckoutOptions{})
-			ctx := testCtx(t)
-			v, err := s.FeedRun(ctx, "open('/data/message.txt')", &montygo.FeedOptions{
-				OS: func(_ context.Context, _ string, args []any, _ montygo.Kwargs) (any, error) {
-					h, err := montygo.NewFileHandle(mntPathArg(args[0]), "tr", 42)
-					return h, err
+			// The runtime's handler is fixed; each feed swaps the function behind it.
+			var osHandler host.OSHandler
+			s := newSessionRT(t, b, mustRuntime(montygo.RuntimeOptions{
+				OS: func(ctx context.Context, name string, args []any, kwargs host.Kwargs) (any, error) {
+					return osHandler(ctx, name, args, kwargs)
 				},
-			})
+			}), montygo.CheckoutOptions{})
+			ctx := testCtx(t)
+			osHandler = func(_ context.Context, _ string, args []any, _ host.Kwargs) (any, error) {
+				h, err := sandbox.NewFileHandle(mntPathArg(args[0]), "tr", 42)
+				return h, err
+			}
+			v, err := s.FeedRun(ctx, "open('/data/message.txt')", nil)
 			require.NoError(t, err)
-			require.IsType(t, &montygo.FileHandle{}, v)
-			returned := v.(*montygo.FileHandle)
-			want, err := montygo.NewFileHandle("/data/message.txt", "r", 42)
+			require.IsType(t, &sandbox.FileHandle{}, v)
+			returned := v.(*sandbox.FileHandle)
+			want, err := sandbox.NewFileHandle("/data/message.txt", "r", 42)
 			require.NoError(t, err)
 			require.Equal(t, want, returned)
 			require.False(t, returned.Binary())
 			require.True(t, returned.Readable())
 			require.False(t, returned.Writable())
 
-			returnedAgain, err := s.FeedRun(ctx, "open('/data/message.txt')", &montygo.FeedOptions{
-				OS: func(context.Context, string, []any, montygo.Kwargs) (any, error) { return returned, nil },
-			})
+			osHandler = func(context.Context, string, []any, host.Kwargs) (any, error) { return returned, nil }
+			returnedAgain, err := s.FeedRun(ctx, "open('/data/message.txt')", nil)
 			require.NoError(t, err)
 			require.Equal(t, returned, returnedAgain)
 
-			defaultPosition, err := s.FeedRun(ctx, "open('/data/default.txt')", &montygo.FeedOptions{
-				OS: func(_ context.Context, _ string, args []any, _ montygo.Kwargs) (any, error) {
-					h, err := montygo.NewFileHandle(mntPathArg(args[0]), "r", 0)
-					return h, err
-				},
-			})
+			osHandler = func(_ context.Context, _ string, args []any, _ host.Kwargs) (any, error) {
+				h, err := sandbox.NewFileHandle(mntPathArg(args[0]), "r", 0)
+				return h, err
+			}
+			defaultPosition, err := s.FeedRun(ctx, "open('/data/default.txt')", nil)
 			require.NoError(t, err)
-			wantDefault, err := montygo.NewFileHandle("/data/default.txt", "r", 0)
+			wantDefault, err := sandbox.NewFileHandle("/data/default.txt", "r", 0)
 			require.NoError(t, err)
 			require.Equal(t, wantDefault, defaultPosition)
 		})
@@ -437,26 +440,26 @@ open('./sub//../file.txt').read()`, runOptions{FeedOptions: montygo.FeedOptions{
 				{"b", 0, "Must have exactly one of create/read/write/append mode and at most one plus"},
 				{"r", 1 << 53, "MontyFileHandle position must be a non-negative safe integer"},
 			} {
-				_, err := montygo.NewFileHandle("/x", c.mode, c.position)
+				_, err := sandbox.NewFileHandle("/x", c.mode, c.position)
 				require.Equal(t, c.expected, mntRequireValueError(t, err))
 			}
 		})
 
 		t.Run("read_text via mount", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadOnly})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadOnly})
 			require.Equal(t, "hello world", mustRun(t, b, "from pathlib import Path; Path('/data/hello.txt').read_text()", mntOpts(md)))
 		})
 
 		t.Run("read_bytes via mount", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadOnly})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadOnly})
 			require.Equal(t, []byte{0x00, 0x01, 0x02}, mustRun(t, b, "from pathlib import Path; Path('/data/data.bin').read_bytes()", mntOpts(md)))
 		})
 
 		t.Run("path exists via mount", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadOnly})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadOnly})
 			code := `
 from pathlib import Path
 exists_file = Path('/data/hello.txt').exists()
@@ -469,7 +472,7 @@ exists_missing = Path('/data/nope.txt').exists()
 
 		t.Run("is_file and is_dir via mount", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadOnly})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadOnly})
 			code := `
 from pathlib import Path
 [Path('/data/hello.txt').is_file(), Path('/data/hello.txt').is_dir(),
@@ -480,7 +483,7 @@ from pathlib import Path
 
 		t.Run("iterdir via mount", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadOnly})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadOnly})
 			code := `
 from pathlib import Path
 sorted([p.name for p in Path('/data').iterdir()])
@@ -490,7 +493,7 @@ sorted([p.name for p in Path('/data').iterdir()])
 
 		t.Run("stat via mount", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadOnly})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadOnly})
 			code := `
 from pathlib import Path
 s = Path('/data/hello.txt').stat()
@@ -501,20 +504,20 @@ s.st_size
 
 		t.Run("read nested file via mount", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadOnly})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadOnly})
 			require.Equal(t, "nested content", mustRun(t, b, "from pathlib import Path; Path('/data/subdir/nested.txt').read_text()", mntOpts(md)))
 		})
 
 		t.Run("write blocked on read-only mount", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadOnly})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadOnly})
 			_, err := run(t, b, "from pathlib import Path; Path('/data/new.txt').write_text('x')", mntOpts(md))
 			mntRequireRuntimeError(t, err, "PermissionError: [Errno 30] Read-only file system: '/data/new.txt'")
 		})
 
 		t.Run("write succeeds on read-write mount", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadWrite})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadWrite})
 			code := `
 from pathlib import Path
 Path('/data/new.txt').write_text('written by monty')
@@ -526,7 +529,7 @@ Path('/data/new.txt').read_text()
 
 		t.Run("overlay write does not modify host", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountOverlay})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountOverlay})
 			code := `
 from pathlib import Path
 Path('/data/overlay_file.txt').write_text('overlay content')
@@ -538,13 +541,13 @@ Path('/data/overlay_file.txt').read_text()
 
 		t.Run("overlay read falls through to host", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountOverlay})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountOverlay})
 			require.Equal(t, "hello world", mustRun(t, b, "from pathlib import Path; Path('/data/hello.txt').read_text()", mntOpts(md)))
 		})
 
 		t.Run("overlay writes do not persist across runs", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountOverlay})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountOverlay})
 			mustRun(t, b, "from pathlib import Path; Path('/data/persistent.txt').write_text('run1')", mntOpts(md))
 			_, err := run(t, b, "from pathlib import Path; Path('/data/persistent.txt').read_text()", mntOpts(md))
 			mntRequireRuntimeError(t, err, "FileNotFoundError: [Errno 2] No such file or directory: '/data/persistent.txt'")
@@ -552,7 +555,7 @@ Path('/data/overlay_file.txt').read_text()
 
 		t.Run("overlay memory usage limit is aggregate", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountOverlay, MemoryUsageLimit: mntU64(1000)})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountOverlay, MemoryUsageLimit: mntU64(1000)})
 			code := `
 from pathlib import Path
 p = Path('/data/retained.bin')
@@ -565,7 +568,7 @@ p.read_bytes()
 
 		t.Run("mkdir and rmdir via mount", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountOverlay})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountOverlay})
 			code := `
 from pathlib import Path
 Path('/data/newdir').mkdir()
@@ -579,7 +582,7 @@ after = Path('/data/newdir').exists()
 
 		t.Run("unlink via mount", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountOverlay})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountOverlay})
 			code := `
 from pathlib import Path
 Path('/data/hello.txt').unlink()
@@ -591,7 +594,7 @@ Path('/data/hello.txt').exists()
 
 		t.Run("rename via mount", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountOverlay})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountOverlay})
 			code := `
 from pathlib import Path
 Path('/data/hello.txt').rename('/data/renamed.txt')
@@ -602,27 +605,27 @@ Path('/data/hello.txt').rename('/data/renamed.txt')
 
 		t.Run("resolve via mount", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadOnly})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadOnly})
 			require.Equal(t, "/data/hello.txt", mustRun(t, b, "from pathlib import Path; str(Path('/data/subdir/../hello.txt').resolve())", mntOpts(md)))
 		})
 
 		t.Run("path traversal blocked", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadOnly})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadOnly})
 			_, err := run(t, b, "from pathlib import Path; Path('/data/../../etc/passwd').read_text()", mntOpts(md))
 			mntRequireRuntimeError(t, err, "PermissionError: Permission denied: '/etc/passwd'")
 		})
 
 		t.Run("unmounted path denied", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadOnly})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadOnly})
 			_, err := run(t, b, "from pathlib import Path; Path('/other/file.txt').exists()", mntOpts(md))
 			mntRequireRuntimeError(t, err, "PermissionError: Permission denied: '/other/file.txt'")
 		})
 
 		t.Run("non-filesystem os call without fallback", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadOnly})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadOnly})
 			_, err := run(t, b, "import os; os.getenv('PATH')", mntOpts(md))
 			mntRequireRuntimeError(t, err, "RuntimeError: 'os.getenv' is not supported in this environment")
 		})
@@ -631,10 +634,10 @@ Path('/data/hello.txt').rename('/data/renamed.txt')
 			d := mntCreateTestDir(t)
 			dir2 := t.TempDir()
 			mntWriteFile(t, filepath.Join(dir2, "file2.txt"), "from mount2")
-			writable, err := montygo.NewMountDir(montygo.MountDirOptions{HostPath: dir2, VirtualPath: "/rw", Mode: montygo.MountReadWrite})
+			writable, err := sandbox.NewMountDir(sandbox.MountDirOptions{HostPath: dir2, VirtualPath: "/rw", Mode: sandbox.MountReadWrite})
 			require.NoError(t, err)
 			defer writable.Close()
-			mounts := []*montygo.MountDir{d.mount(montygo.MountDirOptions{VirtualPath: "/ro", Mode: montygo.MountReadOnly}), writable}
+			mounts := []*sandbox.MountDir{d.mount(sandbox.MountDirOptions{VirtualPath: "/ro", Mode: sandbox.MountReadOnly}), writable}
 			code := `
 from pathlib import Path
 a = Path('/ro/hello.txt').read_text()
@@ -646,7 +649,7 @@ b = Path('/rw/file2.txt').read_text()
 
 		t.Run("mount works with external functions", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadOnly})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadOnly})
 			code := `
 from pathlib import Path
 content = Path('/data/hello.txt').read_text()
@@ -655,7 +658,7 @@ result + content
 `
 			opts := mntOpts(md)
 			opts.ExternalLookup = map[string]any{
-				"get_prefix": montygo.FunctionFunc(func(context.Context, []any, montygo.Kwargs) (any, error) { return "PREFIX: ", nil }),
+				"get_prefix": host.FunctionFunc(func(context.Context, []any, host.Kwargs) (any, error) { return "PREFIX: ", nil }),
 			}
 			require.Equal(t, "PREFIX: hello world", mustRun(t, b, code, opts))
 		})
@@ -664,7 +667,7 @@ result + content
 			d := mntCreateTestDir(t)
 			s := newSession(t, b, montygo.CheckoutOptions{})
 			ctx := testCtx(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadOnly})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadOnly})
 			_, err := s.FeedRun(ctx, "from pathlib import Path", mntFeed(md))
 			require.NoError(t, err)
 			v, err := s.FeedRun(ctx, "Path('/data/hello.txt').read_text()", mntFeed(md))
@@ -676,7 +679,7 @@ result + content
 			d := mntCreateTestDir(t)
 			s := newSession(t, b, montygo.CheckoutOptions{})
 			ctx := testCtx(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountOverlay})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountOverlay})
 			_, err := s.FeedRun(ctx, "from pathlib import Path", mntFeed(md))
 			require.NoError(t, err)
 			_, err = s.FeedRun(ctx, "Path('/data/new.txt').write_text('from repl')", mntFeed(md))
@@ -690,7 +693,7 @@ result + content
 			d := mntCreateTestDir(t)
 			s := newSession(t, b, montygo.CheckoutOptions{})
 			ctx := testCtx(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountOverlay})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountOverlay})
 			_, err := s.FeedRun(ctx, "from pathlib import Path", mntFeed(md))
 			require.NoError(t, err)
 			_, err = s.FeedRun(ctx, "Path('/data/hello.txt').write_text('version1')", mntFeed(md))
@@ -705,7 +708,7 @@ result + content
 			d := mntCreateTestDir(t)
 			s := newSession(t, b, montygo.CheckoutOptions{})
 			ctx := testCtx(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountOverlay})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountOverlay})
 			_, err := s.FeedRun(ctx, "from pathlib import Path", mntFeed(md))
 			require.NoError(t, err)
 			_, err = s.FeedRun(ctx, "Path('/data/hello.txt').unlink()", mntFeed(md))
@@ -718,7 +721,7 @@ result + content
 
 		t.Run("overlay mkdir and nested write within one feed", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountOverlay})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountOverlay})
 			code := `
 from pathlib import Path
 Path('/data/mydir').mkdir()
@@ -731,7 +734,7 @@ Path('/data/mydir/file.txt').read_text()
 
 		t.Run("overlay iterdir sees overlay files", func(t *testing.T) {
 			d := mntCreateTestDir(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountOverlay})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountOverlay})
 			code := `
 from pathlib import Path
 Path('/data/extra.txt').write_text('extra')
@@ -744,7 +747,7 @@ sorted([p.name for p in Path('/data').iterdir()])
 			d := mntCreateTestDir(t)
 			s := newSession(t, b, montygo.CheckoutOptions{})
 			ctx := testCtx(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadWrite})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadWrite})
 			_, err := s.FeedRun(ctx, "from pathlib import Path", mntFeed(md))
 			require.NoError(t, err)
 			_, err = s.FeedRun(ctx, "Path('/data/rw_file.txt').write_text('written')", mntFeed(md))
@@ -759,7 +762,7 @@ sorted([p.name for p in Path('/data').iterdir()])
 			d := mntCreateTestDir(t)
 			s := newSession(t, b, montygo.CheckoutOptions{})
 			ctx := testCtx(t)
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadOnly})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadOnly})
 			_, err := s.FeedRun(ctx, "from pathlib import Path", mntFeed(md))
 			require.NoError(t, err)
 			_, err = s.FeedRun(ctx, "Path('/data/nope.txt').write_text('x')", mntFeed(md))
@@ -771,7 +774,7 @@ sorted([p.name for p in Path('/data').iterdir()])
 			if err := os.Symlink("hello.txt", filepath.Join(d.dir, "rel_link.txt")); err != nil {
 				t.Skipf("host forbids symlink creation: %v", err)
 			}
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadOnly})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadOnly})
 			require.Equal(t, "hello world", mustRun(t, b, "from pathlib import Path; Path('/data/rel_link.txt').read_text()", mntOpts(md)))
 		})
 
@@ -780,13 +783,13 @@ sorted([p.name for p in Path('/data').iterdir()])
 			if err := os.Symlink(filepath.Join(d.dir, "hello.txt"), filepath.Join(d.dir, "abs_link.txt")); err != nil {
 				t.Skipf("host forbids symlink creation: %v", err)
 			}
-			md := d.mount(montygo.MountDirOptions{VirtualPath: "/data", Mode: montygo.MountReadOnly})
+			md := d.mount(sandbox.MountDirOptions{VirtualPath: "/data", Mode: sandbox.MountReadOnly})
 
 			_, err := run(t, b, "from pathlib import Path; Path('/data/abs_link.txt').read_text()", mntOpts(md))
 			mntRequireRuntimeError(t, err, "PermissionError: [Errno 13] Permission denied: '/data/abs_link.txt'")
 
 			seen := mustRun(t, b, "from pathlib import Path; p = Path('/data/abs_link.txt'); (p.exists(), p.is_file())", mntOpts(md))
-			require.Equal(t, montygo.Tuple{false, false}, seen)
+			require.Equal(t, sandbox.Tuple{false, false}, seen)
 		})
 	})
 }

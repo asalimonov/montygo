@@ -8,9 +8,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/sandbox"
+	"github.com/asalimonov/montygo/sandbox/host"
 )
 
-func ospCheckRelativePathResults(t *testing.T, b montygo.Backend) {
+func ospCheckRelativePathResults(t *testing.T, b backend) {
 	t.Helper()
 	var calls []any
 	result, err := run(t, b, `from pathlib import Path
@@ -18,33 +20,30 @@ func ospCheckRelativePathResults(t *testing.T, b montygo.Backend) {
  [str(p) for p in Path('sub/..').iterdir()],
  open('./file.txt').name,
  Path('./file.txt').open().name,
- str(open(b'./file.txt').name))`, runOptions{FeedOptions: montygo.FeedOptions{
-		Cwd: "/data",
-		OS: func(_ context.Context, name string, args []any, _ montygo.Kwargs) (any, error) {
-			calls = append(calls, []any{name, args})
-			switch name {
-			case "Path.iterdir":
-				return []any{"/data/file.txt"}, nil
-			case "open":
-				h, err := montygo.NewFileHandle(fmt.Sprint(args[0]), "r", 0)
-				return h, err
-			}
-			return nil, fmt.Errorf("unexpected OS call: %s", name)
-		},
-	}})
+ str(open(b'./file.txt').name))`, runOptions{Runtime: mustRuntime(montygo.RuntimeOptions{OS: func(_ context.Context, name string, args []any, _ host.Kwargs) (any, error) {
+		calls = append(calls, []any{name, args})
+		switch name {
+		case "Path.iterdir":
+			return []any{"/data/file.txt"}, nil
+		case "open":
+			h, err := sandbox.NewFileHandle(fmt.Sprint(args[0]), "r", 0)
+			return h, err
+		}
+		return nil, fmt.Errorf("unexpected OS call: %s", name)
+	}}), FeedOptions: montygo.FeedOptions{Cwd: "/data"}})
 	require.NoError(t, err)
-	require.Equal(t, montygo.Tuple{[]any{"file.txt"}, []any{"sub/../file.txt"}, "./file.txt", "file.txt", "b'./file.txt'"}, result)
-	openArgs := []any{montygo.Path("/data/file.txt"), "r"}
+	require.Equal(t, sandbox.Tuple{[]any{"file.txt"}, []any{"sub/../file.txt"}, "./file.txt", "file.txt", "b'./file.txt'"}, result)
+	openArgs := []any{sandbox.Path("/data/file.txt"), "r"}
 	require.Equal(t, []any{
-		[]any{"Path.iterdir", []any{montygo.Path("/data")}},
-		[]any{"Path.iterdir", []any{montygo.Path("/data")}},
+		[]any{"Path.iterdir", []any{sandbox.Path("/data")}},
+		[]any{"Path.iterdir", []any{sandbox.Path("/data")}},
 		[]any{"open", openArgs},
 		[]any{"open", openArgs},
 		[]any{"open", openArgs},
 	}, calls)
 }
 
-func ospCheckOsPathValidation(t *testing.T, b montygo.Backend) {
+func ospCheckOsPathValidation(t *testing.T, b backend) {
 	t.Helper()
 	var calls []any
 	result, err := run(t, b, `import os
@@ -62,16 +61,12 @@ for operation in [
     except ValueError as e:
         errors.append(str(e))
 p = Path(path)
-(errors, p.exists(), p.is_file(), p.is_dir(), p.is_symlink(), os.getcwd())`, runOptions{FeedOptions: montygo.FeedOptions{
-		Cwd:    "/data",
-		Inputs: map[string]any{"path": "bad\x00/../x"},
-		OS: func(_ context.Context, name string, args []any, kw montygo.Kwargs) (any, error) {
-			calls = append(calls, []any{name, args, kw})
-			return true, nil
-		},
-	}})
+(errors, p.exists(), p.is_file(), p.is_dir(), p.is_symlink(), os.getcwd())`, runOptions{Runtime: mustRuntime(montygo.RuntimeOptions{OS: func(_ context.Context, name string, args []any, kw host.Kwargs) (any, error) {
+		calls = append(calls, []any{name, args, kw})
+		return true, nil
+	}}), FeedOptions: montygo.FeedOptions{Cwd: "/data", Inputs: map[string]any{"path": "bad\x00/../x"}}})
 	require.NoError(t, err)
-	require.Equal(t, montygo.Tuple{
+	require.Equal(t, sandbox.Tuple{
 		[]any{
 			"embedded null byte",
 			"embedded null byte",

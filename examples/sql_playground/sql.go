@@ -6,12 +6,12 @@ import (
 	"database/sql"
 	"encoding/csv"
 	"fmt"
+	"github.com/asalimonov/montygo/monterr"
+	"github.com/asalimonov/montygo/sandbox"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/asalimonov/montygo"
 
 	_ "modernc.org/sqlite"
 )
@@ -59,7 +59,7 @@ func queryCSV(ctx context.Context, content []byte, query string, parameters map[
 		if err := rows.Scan(ptrs...); err != nil {
 			return nil, err
 		}
-		row := montygo.NewDict()
+		row := sandbox.NewDict()
 		for i, column := range columns {
 			row.Set(column, sqlValue(values[i]))
 		}
@@ -280,7 +280,7 @@ func placeholderFor(name string, value any) (string, []any, error) {
 	switch x := value.(type) {
 	case []any:
 		items = x
-	case montygo.Tuple:
+	case sandbox.Tuple:
 		items = x
 	default:
 		v, err := scalarParameter(name, value)
@@ -306,10 +306,10 @@ func scalarParameter(name string, v any) (any, error) {
 	switch x := v.(type) {
 	case nil, bool, int64, float64, string, []byte:
 		return x, nil
-	case montygo.Path:
+	case sandbox.Path:
 		return string(x), nil
 	}
-	return nil, montygo.Raise("TypeError", fmt.Sprintf("parameter '%s' has unsupported type %s", name, pyTypeName(v)))
+	return nil, monterr.Raise("TypeError", fmt.Sprintf("parameter '%s' has unsupported type %s", name, pyTypeName(v)))
 }
 
 func isIdentStart(c byte) bool {

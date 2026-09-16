@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/asalimonov/montygo"
 )
 
 // wsRelay bridges each WebSocket connection to a fresh `monty subprocess`
@@ -23,15 +26,47 @@ import (
 type wsRelay struct {
 	URL string
 	// TLS trusts the relay certificate; it is nil for a ws:// relay.
-	TLS     *tls.Config
-	mu      sync.Mutex
-	headers []http.Header
-	health  []http.Header
+	TLS      *tls.Config
+	mu       sync.Mutex
+	headers  []http.Header
+	health   []http.Header
+	info     relayInfo
+	upgrades int
+	refuse   bool
+}
+
+// relayInfo are the limits GET /info reports; a zero value answers 404, like a
+// server built before the endpoint existed.
+type relayInfo struct {
+	sessionTimeoutS int
+	turnTimeoutS    int
+}
+
+func (i relayInfo) served() bool { return i.sessionTimeoutS > 0 || i.turnTimeoutS > 0 }
+
+// upgradeCount is how many connections the relay has accepted.
+func (r *wsRelay) upgradeCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.upgrades
+}
+
+// setRefuse makes further upgrades fail with 503, like a server at capacity.
+func (r *wsRelay) setRefuse(refuse bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.refuse = refuse
 }
 
 // wsStartRelay serves the relay on an ephemeral loopback port for the test's
 // lifetime, over TLS when secure is set. GET /health answers 200.
 func wsStartRelay(t *testing.T, secure bool) *wsRelay {
+	t.Helper()
+	return wsStartRelayInfo(t, secure, relayInfo{})
+}
+
+// wsStartRelayInfo serves the relay with the limits info reports at GET /info.
+func wsStartRelayInfo(t *testing.T, secure bool, info relayInfo) *wsRelay {
 	t.Helper()
 	bin := os.Getenv("MONTY_BIN")
 	if bin == "" {
@@ -40,7 +75,7 @@ func wsStartRelay(t *testing.T, secure bool) *wsRelay {
 	if _, err := os.Stat(bin); err != nil {
 		t.Skipf("monty binary unavailable: %v", err)
 	}
-	relay := &wsRelay{}
+	relay := &wsRelay{info: info}
 	ctx, cancel := context.WithCancel(context.Background())
 	var bridges sync.WaitGroup
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -51,9 +86,30 @@ func wsStartRelay(t *testing.T, secure bool) *wsRelay {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
+		if r.Method == http.MethodGet && r.URL.Path == "/info" {
+			if !relay.info.served() {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"version":"relay","monty_rev":%q,"protocol_version":%d,
+				"limits":{"idle_timeout_s":0,"keepalive_s":0,"session_timeout_s":%d,"turn_timeout_s":%d,
+				"max_duration_s":0,"max_memory_bytes":0,"max_recursion_depth":1000,
+				"max_sessions":16,"max_sessions_per_client":0}}`,
+				montygo.UpstreamRev, montygo.ProtocolVersion, relay.info.sessionTimeoutS, relay.info.turnTimeoutS)
+			return
+		}
 		relay.mu.Lock()
 		relay.headers = append(relay.headers, r.Header.Clone())
+		refuse := relay.refuse
+		if !refuse {
+			relay.upgrades++
+		}
 		relay.mu.Unlock()
+		if refuse {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
 		if err != nil {
 			return

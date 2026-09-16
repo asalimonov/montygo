@@ -8,14 +8,17 @@ import (
 	"time"
 
 	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/monterr"
+	"github.com/asalimonov/montygo/sandbox"
+	"github.com/asalimonov/montygo/sandbox/host"
 	"github.com/stretchr/testify/require"
 )
 
 func TestImmediateStop(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		ctx := testCtx(t)
-		p := newPool(t, b, montygo.Options{MaxProcesses: 1})
-		s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+		p := newPool(t, b, montygo.PoolOptions{MaxWorkers: 1})
+		s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = s.Close(ctx, montygo.KillNow) })
 		for i := range 1000 {
@@ -29,7 +32,7 @@ func TestImmediateStop(t *testing.T) {
 			require.True(t, result.SessionKept())
 			_, err = r.WaitContext(waitCtx)
 			cancel()
-			var raised *montygo.RuntimeError
+			var raised *monterr.RuntimeError
 			require.ErrorAs(t, err, &raised)
 			require.Equal(t, "KeyboardInterrupt", raised.TypeName)
 			v, err := s.FeedRun(ctx, "1", nil)
@@ -40,7 +43,7 @@ func TestImmediateStop(t *testing.T) {
 }
 
 func TestExecutionOwnership(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		t.Run("busy requests do not queue or change the current run", func(t *testing.T) {
 			ctx := testCtx(t)
 			s := newSession(t, b, montygo.CheckoutOptions{})
@@ -48,11 +51,11 @@ func TestExecutionOwnership(t *testing.T) {
 			r := s.Go(ctx, "wait()", &montygo.FeedOptions{ExternalLookup: blockingLookup(started)})
 			<-started
 			_, err := s.FeedRun(ctx, "1", nil)
-			require.ErrorIs(t, err, montygo.ErrSessionBusy)
+			require.ErrorIs(t, err, monterr.ErrSessionBusy)
 			_, err = s.FeedStart(ctx, "1", nil)
-			require.ErrorIs(t, err, montygo.ErrSessionBusy)
+			require.ErrorIs(t, err, monterr.ErrSessionBusy)
 			_, err = s.Dump(ctx)
-			require.ErrorIs(t, err, montygo.ErrSessionBusy)
+			require.ErrorIs(t, err, monterr.ErrSessionBusy)
 			busy := s.Go(ctx, "1", nil)
 			select {
 			case <-busy.Done():
@@ -60,11 +63,11 @@ func TestExecutionOwnership(t *testing.T) {
 				t.Fatal("admission error did not return a completed Run")
 			}
 			_, err = busy.Wait()
-			require.ErrorIs(t, err, montygo.ErrSessionBusy)
+			require.ErrorIs(t, err, monterr.ErrSessionBusy)
 			result, err := busy.Stop(ctx)
 			require.NoError(t, err)
 			require.Equal(t, montygo.StopFinished, result.How)
-			require.ErrorIs(t, result.Err, montygo.ErrSessionBusy)
+			require.ErrorIs(t, result.Err, monterr.ErrSessionBusy)
 			waitCtx, cancel := context.WithCancel(ctx)
 			cancel()
 			_, err = r.WaitContext(waitCtx)
@@ -97,13 +100,13 @@ func TestExecutionOwnership(t *testing.T) {
 			require.NoError(t, err)
 			old := snap.(*montygo.FunctionSnapshot)
 			_, err = s.FeedRun(ctx, "1", nil)
-			require.ErrorIs(t, err, montygo.ErrSessionBusy)
+			require.ErrorIs(t, err, monterr.ErrSessionBusy)
 			_, err = s.Stop(ctx)
 			require.NoError(t, err)
 			snap, err = s.FeedStart(ctx, "new()", nil)
 			require.NoError(t, err)
 			_, err = old.Resume(ctx, 99)
-			var raised *montygo.RuntimeError
+			var raised *monterr.RuntimeError
 			require.ErrorAs(t, err, &raised)
 			require.Equal(t, "KeyboardInterrupt", raised.TypeName)
 			require.NoError(t, s.Err())
@@ -129,10 +132,10 @@ func TestExecutionOwnership(t *testing.T) {
 }
 
 func TestStopUncooperativeCallback(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		ctx := testCtx(t)
-		p := newPool(t, b, montygo.Options{MaxProcesses: 1})
-		s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+		p := newPool(t, b, montygo.PoolOptions{MaxWorkers: 1})
+		s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 		require.NoError(t, err)
 		defer s.Close(ctx, montygo.KillNow)
 		started, release := make(chan struct{}), make(chan struct{})
@@ -153,10 +156,10 @@ func TestStopUncooperativeCallback(t *testing.T) {
 		require.Equal(t, montygo.StopPending, result.How)
 		require.NoError(t, s.Err())
 		result, err = r.Stop(ctx, montygo.StopPolicy{Reason: errors.New("ignored reason"), Timeout: -1, Join: 50 * time.Millisecond})
-		require.ErrorIs(t, err, montygo.ErrCallbackDetached)
+		require.ErrorIs(t, err, monterr.ErrCallbackDetached)
 		require.Equal(t, montygo.StopKilled, result.How)
 		require.ErrorIs(t, result.SessionErr, firstReason)
-		require.ErrorIs(t, result.SessionErr, montygo.ErrSessionLost)
+		require.ErrorIs(t, result.SessionErr, monterr.ErrSessionLost)
 		require.Same(t, result.SessionErr, s.Err())
 		require.NoError(t, s.Close(ctx, montygo.KillNow))
 		cancelled, cancel := context.WithCancel(ctx)
@@ -164,7 +167,7 @@ func TestStopUncooperativeCallback(t *testing.T) {
 		require.NoError(t, s.Close(cancelled))
 		_, err = r.WaitContext(cancelled)
 		require.ErrorIs(t, err, context.Canceled)
-		fresh, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+		fresh, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 		require.NoError(t, err)
 		defer fresh.Close(ctx)
 		v, err := fresh.FeedRun(ctx, "42", nil)
@@ -178,26 +181,26 @@ func TestStopUncooperativeCallback(t *testing.T) {
 }
 
 func TestForceDuringPrint(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		ctx := testCtx(t)
-		p := newPool(t, b, montygo.Options{MaxProcesses: 1})
-		s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+		p := newPool(t, b, montygo.PoolOptions{MaxWorkers: 1})
+		s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 		require.NoError(t, err)
 		defer s.Close(ctx, montygo.KillNow)
 		entered, release := make(chan struct{}), make(chan struct{})
 		var once sync.Once
 		unblock := func() { once.Do(func() { close(release) }) }
 		defer unblock()
-		r := s.Go(ctx, "print('hello')\n42", &montygo.FeedOptions{Print: montygo.PrintFunc(func(montygo.Stream, string) error {
+		r := s.Go(ctx, "print('hello')\n42", &montygo.FeedOptions{Print: sandbox.PrintFunc(func(sandbox.Stream, string) error {
 			close(entered)
 			<-release
 			return nil
 		})})
 		<-entered
 		result, err := r.Stop(ctx, montygo.StopPolicy{Timeout: -1, Join: 50 * time.Millisecond})
-		require.ErrorIs(t, err, montygo.ErrCallbackDetached)
+		require.ErrorIs(t, err, monterr.ErrCallbackDetached)
 		require.Equal(t, montygo.StopKilled, result.How)
-		fresh, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+		fresh, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 		require.NoError(t, err)
 		defer fresh.Close(ctx)
 		unblock()
@@ -207,19 +210,19 @@ func TestForceDuringPrint(t *testing.T) {
 }
 
 func TestTerminalPathsReleaseCapacity(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		for _, failure := range []string{"idle close", "failed host registration", "failed restore"} {
 			t.Run(failure, func(t *testing.T) {
 				ctx := testCtx(t)
-				p := newPool(t, b, montygo.Options{MaxProcesses: 1})
+				p := newPool(t, b, montygo.PoolOptions{MaxWorkers: 1})
 				if failure == "failed host registration" {
 					h, err := recordHost()
 					require.NoError(t, err)
-					require.NoError(t, h.Object("other", &recordTable{}, montygo.ClassInstanceOptions{}))
-					_, err = p.Checkout(ctx, montygo.CheckoutOptions{Host: h, MaxHostObjects: 1})
+					require.NoError(t, h.Object("other", &recordTable{}, host.ClassInstanceOptions{}))
+					_, err = p.Checkout(ctx, mustRuntime(montygo.RuntimeOptions{Host: h, MaxHostObjects: 1}), montygo.CheckoutOptions{})
 					require.ErrorContains(t, err, "host object limit")
 				} else {
-					s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+					s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 					require.NoError(t, err)
 					if failure == "failed restore" {
 						err = s.LoadSession(ctx, []byte("invalid dump"))
@@ -229,7 +232,7 @@ func TestTerminalPathsReleaseCapacity(t *testing.T) {
 						require.NoError(t, s.Close(ctx, montygo.KillNow))
 					}
 				}
-				fresh, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+				fresh, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 				require.NoError(t, err)
 				defer fresh.Close(ctx)
 				v, err := fresh.FeedRun(ctx, "42", nil)
@@ -241,7 +244,7 @@ func TestTerminalPathsReleaseCapacity(t *testing.T) {
 }
 
 func TestPausedCancellationBoundaries(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		for _, code := range []string{"f()", "name", "from pathlib import Path\nPath('/missing').exists()"} {
 			t.Run(code, func(t *testing.T) {
 				ctx := testCtx(t)
@@ -262,7 +265,7 @@ func TestPausedCancellationBoundaries(t *testing.T) {
 				default:
 					t.Fatalf("unexpected snapshot %T", snap)
 				}
-				var raised *montygo.RuntimeError
+				var raised *monterr.RuntimeError
 				require.ErrorAs(t, resumeErr, &raised)
 				require.Equal(t, "KeyboardInterrupt", raised.TypeName)
 				require.NoError(t, s.Err())
@@ -274,7 +277,7 @@ func TestPausedCancellationBoundaries(t *testing.T) {
 type conversionProbe struct{ Value int }
 
 func TestStopDuringConversion(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		for _, point := range []string{"preparation", "function resume", "name resume"} {
 			t.Run(point, func(t *testing.T) {
 				ctx := testCtx(t)
@@ -283,8 +286,8 @@ func TestStopDuringConversion(t *testing.T) {
 				var once sync.Once
 				unblock := func() { once.Do(func() { close(release) }) }
 				defer unblock()
-				probe := montygo.MustClassInstance(&conversionProbe{Value: 42}, montygo.ClassInstanceOptions{
-					EagerAttrs: montygo.All(), ConvertValue: func(_ string, value any) (any, error) {
+				probe := host.MustClassInstance(&conversionProbe{Value: 42}, host.ClassInstanceOptions{
+					EagerAttrs: host.All(), ConvertValue: func(_ string, value any) (any, error) {
 						close(entered)
 						<-release
 						return value, nil
@@ -324,7 +327,7 @@ func TestStopDuringConversion(t *testing.T) {
 				require.Equal(t, montygo.StopPending, result.How)
 				unblock()
 				err = <-finished
-				var raised *montygo.RuntimeError
+				var raised *monterr.RuntimeError
 				require.ErrorAs(t, err, &raised)
 				require.Equal(t, "KeyboardInterrupt", raised.TypeName)
 				require.NoError(t, s.Err())

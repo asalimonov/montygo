@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/monterr"
 )
 
 func excAs[T error](t *testing.T, err error) T {
@@ -26,80 +27,80 @@ func excNotAs[T error](t *testing.T, err error) {
 	require.False(t, errors.As(err, &target), "unexpected %T: %v", err, err)
 }
 
-func excRunErr(t *testing.T, b montygo.Backend, code string, opts runOptions) error {
+func excRunErr(t *testing.T, b backend, code string, opts runOptions) error {
 	t.Helper()
 	_, err := run(t, b, code, opts)
 	require.Error(t, err)
 	return err
 }
 
-func excRuntime(t *testing.T, b montygo.Backend, code string, opts runOptions) *montygo.RuntimeError {
+func excRuntime(t *testing.T, b backend, code string, opts runOptions) *monterr.RuntimeError {
 	t.Helper()
-	return excAs[*montygo.RuntimeError](t, excRunErr(t, b, code, opts))
+	return excAs[*monterr.RuntimeError](t, excRunErr(t, b, code, opts))
 }
 
-func excSyntax(t *testing.T, b montygo.Backend, code string) *montygo.SyntaxError {
+func excSyntax(t *testing.T, b backend, code string) *monterr.SyntaxError {
 	t.Helper()
-	return excAs[*montygo.SyntaxError](t, excRunErr(t, b, code, runOptions{}))
+	return excAs[*monterr.SyntaxError](t, excRunErr(t, b, code, runOptions{}))
 }
 
-var excTypeCheck = runOptions{CheckoutOptions: montygo.CheckoutOptions{TypeCheck: true}}
+var excTypeCheck = runOptions{Runtime: mustRuntime(montygo.RuntimeOptions{TypeCheck: true})}
 
 func TestExceptions(t *testing.T) {
 	t.Run("MontyError extends Error", func(t *testing.T) {
-		var err error = &montygo.RuntimeError{TypeName: "ValueError", Message: "test message"}
-		excAs[montygo.Error](t, err)
-		excAs[montygo.Error](t, fmt.Errorf("wrapped: %w", err))
+		var err error = &monterr.RuntimeError{TypeName: "ValueError", Message: "test message"}
+		excAs[monterr.Error](t, err)
+		excAs[monterr.Error](t, fmt.Errorf("wrapped: %w", err))
 	})
 
 	t.Run("MontyError constructor and properties", func(t *testing.T) {
-		err := &montygo.RuntimeError{TypeName: "ValueError", Message: "test message"}
-		require.Equal(t, montygo.ExceptionInfo{TypeName: "ValueError", Message: "test message"}, err.Exception())
+		err := &monterr.RuntimeError{TypeName: "ValueError", Message: "test message"}
+		require.Equal(t, monterr.ExceptionInfo{TypeName: "ValueError", Message: "test message"}, err.Exception())
 		require.Equal(t, "ValueError: test message", err.Error())
 	})
 
 	t.Run("MontyError display()", func(t *testing.T) {
-		var err montygo.Error = &montygo.RuntimeError{TypeName: "ValueError", Message: "test message"}
-		require.Equal(t, "test message", err.Display(montygo.DisplayMsg))
-		require.Equal(t, "ValueError: test message", err.Display(montygo.DisplayTypeMsg))
+		var err monterr.Error = &monterr.RuntimeError{TypeName: "ValueError", Message: "test message"}
+		require.Equal(t, "test message", err.Display(monterr.DisplayMsg))
+		require.Equal(t, "ValueError: test message", err.Display(monterr.DisplayTypeMsg))
 	})
 
 	t.Run("MontyError with empty message", func(t *testing.T) {
-		var err montygo.Error = &montygo.RuntimeError{TypeName: "TypeError"}
-		require.Equal(t, "TypeError", err.Display(montygo.DisplayTypeMsg))
+		var err monterr.Error = &monterr.RuntimeError{TypeName: "TypeError"}
+		require.Equal(t, "TypeError", err.Display(monterr.DisplayTypeMsg))
 		require.Equal(t, "TypeError", err.Error())
 	})
 
 	t.Run("MontySyntaxError extends MontyError and Error", func(t *testing.T) {
-		var err error = &montygo.SyntaxError{Message: "invalid syntax"}
-		excAs[montygo.Error](t, err)
-		excAs[*montygo.SyntaxError](t, fmt.Errorf("wrapped: %w", err))
-		excNotAs[*montygo.RuntimeError](t, err)
-		excNotAs[*montygo.TypingError](t, err)
+		var err error = &monterr.SyntaxError{Message: "invalid syntax"}
+		excAs[monterr.Error](t, err)
+		excAs[*monterr.SyntaxError](t, fmt.Errorf("wrapped: %w", err))
+		excNotAs[*monterr.RuntimeError](t, err)
+		excNotAs[*monterr.TypingError](t, err)
 	})
 
 	t.Run("MontySyntaxError constructor and properties", func(t *testing.T) {
-		err := &montygo.SyntaxError{Message: "invalid syntax"}
-		require.Equal(t, montygo.ExceptionInfo{TypeName: "SyntaxError", Message: "invalid syntax"}, err.Exception())
+		err := &monterr.SyntaxError{Message: "invalid syntax"}
+		require.Equal(t, monterr.ExceptionInfo{TypeName: "SyntaxError", Message: "invalid syntax"}, err.Exception())
 		require.Equal(t, "SyntaxError: invalid syntax", err.Error())
 	})
 
 	t.Run("MontySyntaxError display()", func(t *testing.T) {
-		err := &montygo.SyntaxError{Message: "unexpected token"}
+		err := &monterr.SyntaxError{Message: "unexpected token"}
 		require.Equal(t, "unexpected token", err.Display(""))
-		require.Equal(t, "unexpected token", err.Display(montygo.DisplayMsg))
-		require.Equal(t, "SyntaxError: unexpected token", err.Display(montygo.DisplayTypeMsg))
+		require.Equal(t, "unexpected token", err.Display(monterr.DisplayMsg))
+		require.Equal(t, "SyntaxError: unexpected token", err.Display(monterr.DisplayTypeMsg))
 	})
 
 	t.Run("MontyTypingError extends MontyError and Error", func(t *testing.T) {
-		var err error = &montygo.TypingError{Diagnostics: "type mismatch"}
-		excAs[montygo.Error](t, err)
-		excAs[*montygo.TypingError](t, fmt.Errorf("wrapped: %w", err))
-		excNotAs[*montygo.RuntimeError](t, err)
-		excNotAs[*montygo.SyntaxError](t, err)
+		var err error = &monterr.TypingError{Diagnostics: "type mismatch"}
+		excAs[monterr.Error](t, err)
+		excAs[*monterr.TypingError](t, fmt.Errorf("wrapped: %w", err))
+		excNotAs[*monterr.RuntimeError](t, err)
+		excNotAs[*monterr.SyntaxError](t, err)
 	})
 
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		t.Run("zero division error", func(t *testing.T) {
 			require.Equal(t, "ZeroDivisionError: division by zero", excRuntime(t, b, "1 / 0", runOptions{}).Error())
 		})
@@ -153,18 +154,18 @@ func TestExceptions(t *testing.T) {
 		})
 
 		t.Run("assertMessageAnnotations: false restores CPython behavior", func(t *testing.T) {
-			opts := runOptions{CheckoutOptions: montygo.CheckoutOptions{AssertMessageAnnotations: montygo.Uint32(0)}}
+			opts := runOptions{Runtime: mustRuntime(montygo.RuntimeOptions{AssertMessageAnnotations: montygo.Uint32(0)})}
 			require.Equal(t, "AssertionError", excRuntime(t, b, "assert 1 == 2", opts).Error())
 		})
 
 		t.Run("assertMessageAnnotations: integer customizes repr truncation", func(t *testing.T) {
-			opts := runOptions{CheckoutOptions: montygo.CheckoutOptions{AssertMessageAnnotations: montygo.Uint32(6)}}
+			opts := runOptions{Runtime: mustRuntime(montygo.RuntimeOptions{AssertMessageAnnotations: montygo.Uint32(6)})}
 			require.Equal(t, "AssertionError: assert 'abcde… == ''", excRuntime(t, b, "assert 'abcdefghij' == ''", opts).Error())
 		})
 
 		t.Run("assertMessageAnnotations: invalid numbers are rejected", func(t *testing.T) {
 			for _, value := range []uint32{1, math.MaxUint32} {
-				opts := runOptions{CheckoutOptions: montygo.CheckoutOptions{AssertMessageAnnotations: montygo.Uint32(value)}}
+				opts := runOptions{Runtime: mustRuntime(montygo.RuntimeOptions{AssertMessageAnnotations: montygo.Uint32(value)})}
 				v, err := run(t, b, "assert True", opts)
 				require.NoError(t, err, "assertMessageAnnotations %d", value)
 				require.Nil(t, v)
@@ -204,11 +205,11 @@ func TestExceptions(t *testing.T) {
 		})
 
 		t.Run("catch with base class", func(t *testing.T) {
-			excAs[montygo.Error](t, excRunErr(t, b, "1 / 0", runOptions{}))
+			excAs[monterr.Error](t, excRunErr(t, b, "1 / 0", runOptions{}))
 		})
 
 		t.Run("catch syntax error with base class", func(t *testing.T) {
-			excAs[montygo.Error](t, excRunErr(t, b, "def", runOptions{}))
+			excAs[monterr.Error](t, excRunErr(t, b, "def", runOptions{}))
 		})
 
 		t.Run("raise caught exception", func(t *testing.T) {
@@ -238,22 +239,22 @@ fail()
   File "<python-input-0>", line 1, in <module>
     1 / 0
     ~~~~~
-ZeroDivisionError: division by zero`, err.Display(montygo.DisplayTraceback))
+ZeroDivisionError: division by zero`, err.Display(monterr.DisplayTraceback))
 		})
 
 		t.Run("display type msg", func(t *testing.T) {
 			err := excRuntime(t, b, `raise ValueError("test message")`, runOptions{})
-			require.Equal(t, "ValueError: test message", err.Display(montygo.DisplayTypeMsg))
+			require.Equal(t, "ValueError: test message", err.Display(monterr.DisplayTypeMsg))
 		})
 
 		t.Run("runtime display", func(t *testing.T) {
 			err := excRuntime(t, b, `raise ValueError("test message")`, runOptions{})
-			require.Equal(t, "test message", err.Display(montygo.DisplayMsg))
-			require.Equal(t, "ValueError: test message", err.Display(montygo.DisplayTypeMsg))
+			require.Equal(t, "test message", err.Display(monterr.DisplayMsg))
+			require.Equal(t, "ValueError: test message", err.Display(monterr.DisplayTypeMsg))
 			require.Equal(t, `Traceback (most recent call last):
   File "<python-input-0>", line 1, in <module>
     raise ValueError("test message")
-ValueError: test message`, err.Display(montygo.DisplayTraceback))
+ValueError: test message`, err.Display(monterr.DisplayTraceback))
 		})
 
 		t.Run("str returns type msg", func(t *testing.T) {
@@ -264,7 +265,7 @@ ValueError: test message`, err.Display(montygo.DisplayTraceback))
 		t.Run("syntax error display", func(t *testing.T) {
 			err := excSyntax(t, b, "def")
 			require.Equal(t, "Expected an identifier", err.Display(""))
-			require.Equal(t, "SyntaxError: Expected an identifier", err.Display(montygo.DisplayTypeMsg))
+			require.Equal(t, "SyntaxError: Expected an identifier", err.Display(monterr.DisplayTypeMsg))
 		})
 
 		excNestedCode := `def inner():
@@ -287,12 +288,12 @@ outer()
     ~~~~~~~
   File "<python-input-0>", line 2, in inner
     raise ValueError('error')
-ValueError: error`, err.Display(montygo.DisplayTraceback))
+ValueError: error`, err.Display(monterr.DisplayTraceback))
 		})
 
 		t.Run("traceback() returns structured frames", func(t *testing.T) {
 			err := excRuntime(t, b, excNestedCode, runOptions{})
-			require.Equal(t, []montygo.Frame{
+			require.Equal(t, []monterr.Frame{
 				{Filename: "<python-input-0>", Line: 7, Column: 1, EndLine: 7, EndColumn: 8, FunctionName: "<module>", SourceLine: "outer()"},
 				{Filename: "<python-input-0>", Line: 5, Column: 5, EndLine: 5, EndColumn: 12, FunctionName: "outer", SourceLine: "    inner()"},
 				{Filename: "<python-input-0>", Line: 2, Column: 11, EndLine: 2, EndColumn: 30, FunctionName: "inner", SourceLine: "    raise ValueError('error')"},
@@ -301,30 +302,30 @@ ValueError: error`, err.Display(montygo.DisplayTraceback))
 
 		t.Run("MontyRuntimeError display()", func(t *testing.T) {
 			raw := excRunErr(t, b, "1 / 0", runOptions{})
-			excAs[montygo.Error](t, raw)
-			err := excAs[*montygo.RuntimeError](t, raw)
+			excAs[monterr.Error](t, raw)
+			err := excAs[*monterr.RuntimeError](t, raw)
 			require.Equal(t, "ZeroDivisionError: division by zero", err.Error())
-			traceback := err.Display(montygo.DisplayTraceback)
+			traceback := err.Display(monterr.DisplayTraceback)
 			require.Equal(t, traceback, err.Display(""))
 			require.Equal(t, `Traceback (most recent call last):
   File "<python-input-0>", line 1, in <module>
     1 / 0
     ~~~~~
 ZeroDivisionError: division by zero`, traceback)
-			require.Equal(t, "ZeroDivisionError: division by zero", err.Display(montygo.DisplayTypeMsg))
-			require.Equal(t, "division by zero", err.Display(montygo.DisplayMsg))
+			require.Equal(t, "ZeroDivisionError: division by zero", err.Display(monterr.DisplayTypeMsg))
+			require.Equal(t, "division by zero", err.Display(monterr.DisplayMsg))
 		})
 
 		t.Run("MontyRuntimeError can be caught with instanceof", func(t *testing.T) {
 			err := excRunErr(t, b, "1 / 0", runOptions{})
-			excAs[*montygo.RuntimeError](t, err)
-			excAs[montygo.Error](t, err)
+			excAs[*monterr.RuntimeError](t, err)
+			excAs[monterr.Error](t, err)
 		})
 
 		t.Run("MontyTypingError is thrown on type check failure", func(t *testing.T) {
 			raw := excRunErr(t, b, `x: int = "not an int"`, excTypeCheck)
-			excAs[montygo.Error](t, raw)
-			err := excAs[*montygo.TypingError](t, raw)
+			excAs[monterr.Error](t, raw)
+			err := excAs[*monterr.TypingError](t, raw)
 			require.Equal(t, "TypeError: error[invalid-assignment]: Object of type `Literal[\"not an int\"]` is not assignable to `int`", err.Error())
 			require.Equal(t, "error[invalid-assignment]: Object of type `Literal[\"not an int\"]` is not assignable to `int`\n"+
 				" --> main.py:1:10\n"+
@@ -336,26 +337,26 @@ ZeroDivisionError: division by zero`, traceback)
 		})
 
 		t.Run("MontyError catches all Monty exceptions", func(t *testing.T) {
-			excAs[montygo.Error](t, excRunErr(t, b, "def", runOptions{}))
-			excAs[montygo.Error](t, excRunErr(t, b, "1 / 0", runOptions{}))
-			excAs[montygo.Error](t, excRunErr(t, b, `x: int = "str"`, excTypeCheck))
+			excAs[monterr.Error](t, excRunErr(t, b, "def", runOptions{}))
+			excAs[monterr.Error](t, excRunErr(t, b, "1 / 0", runOptions{}))
+			excAs[monterr.Error](t, excRunErr(t, b, `x: int = "str"`, excTypeCheck))
 		})
 
 		t.Run("can distinguish error types with instanceof", func(t *testing.T) {
 			syntaxErr := excRunErr(t, b, "def", runOptions{})
-			excAs[*montygo.SyntaxError](t, syntaxErr)
-			excNotAs[*montygo.RuntimeError](t, syntaxErr)
-			excNotAs[*montygo.TypingError](t, syntaxErr)
+			excAs[*monterr.SyntaxError](t, syntaxErr)
+			excNotAs[*monterr.RuntimeError](t, syntaxErr)
+			excNotAs[*monterr.TypingError](t, syntaxErr)
 
 			runtimeErr := excRunErr(t, b, "1 / 0", runOptions{})
-			excAs[*montygo.RuntimeError](t, runtimeErr)
-			excNotAs[*montygo.SyntaxError](t, runtimeErr)
-			excNotAs[*montygo.TypingError](t, runtimeErr)
+			excAs[*monterr.RuntimeError](t, runtimeErr)
+			excNotAs[*monterr.SyntaxError](t, runtimeErr)
+			excNotAs[*monterr.TypingError](t, runtimeErr)
 
 			typingErr := excRunErr(t, b, `x: int = "str"`, excTypeCheck)
-			excAs[*montygo.TypingError](t, typingErr)
-			excNotAs[*montygo.SyntaxError](t, typingErr)
-			excNotAs[*montygo.RuntimeError](t, typingErr)
+			excAs[*monterr.TypingError](t, typingErr)
+			excNotAs[*monterr.SyntaxError](t, typingErr)
+			excNotAs[*monterr.RuntimeError](t, typingErr)
 		})
 
 		t.Run("exception getter returns correct info for runtime error", func(t *testing.T) {
@@ -369,8 +370,8 @@ ZeroDivisionError: division by zero`, traceback)
 		})
 
 		t.Run("display() works polymorphically on MontyTypingError", func(t *testing.T) {
-			err := excAs[montygo.Error](t, excRunErr(t, b, `x: int = "str"`, excTypeCheck))
-			require.True(t, strings.HasPrefix(err.Display(montygo.DisplayMsg), "error[invalid-assignment]:"), err.Display(montygo.DisplayMsg))
+			err := excAs[monterr.Error](t, excRunErr(t, b, `x: int = "str"`, excTypeCheck))
+			require.True(t, strings.HasPrefix(err.Display(monterr.DisplayMsg), "error[invalid-assignment]:"), err.Display(monterr.DisplayMsg))
 			require.Equal(t, "TypeError: error[invalid-assignment]: Object of type `Literal[\"str\"]` is not assignable to `int`", err.Error())
 		})
 	})

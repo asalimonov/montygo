@@ -42,6 +42,37 @@ func ConnectHeaders(ctx context.Context) [][2]string {
 	return h
 }
 
+type endpointKey struct{}
+
+// Endpoint is the server one dial reaches, resolved per attempt.
+type Endpoint struct {
+	URL string
+	// TLSConfig overrides the dialer's config when set.
+	TLSConfig *tls.Config
+}
+
+// WithEndpoint attaches the endpoint of the next dial, health check or GET.
+func WithEndpoint(ctx context.Context, ep Endpoint) context.Context {
+	return context.WithValue(ctx, endpointKey{}, ep)
+}
+
+// EndpointFrom returns the endpoint attached by WithEndpoint.
+func EndpointFrom(ctx context.Context) (Endpoint, bool) {
+	ep, ok := ctx.Value(endpointKey{}).(Endpoint)
+	return ep, ok
+}
+
+// target resolves the URL and TLS config of one request: a context endpoint wins.
+func (d *WebSocketDialer) target(ctx context.Context) (string, *tls.Config) {
+	if ep, ok := EndpointFrom(ctx); ok && ep.URL != "" {
+		if ep.TLSConfig != nil {
+			return ep.URL, ep.TLSConfig
+		}
+		return ep.URL, d.TLSConfig
+	}
+	return d.URL, d.TLSConfig
+}
+
 // WebSocketDialer reaches a remote protocol child over a WebSocket: one binary
 // message per protocol frame, no length prefix.
 type WebSocketDialer struct {
@@ -61,29 +92,30 @@ func (d *WebSocketDialer) Kind() Kind                  { return KindWebSocket }
 func (d *WebSocketDialer) Close(context.Context) error { return nil }
 
 func (d *WebSocketDialer) Spawn(ctx context.Context) (Worker, error) {
-	u, err := url.Parse(d.URL)
+	target, tlsConfig := d.target(ctx)
+	u, err := url.Parse(target)
 	if err != nil {
 		var uerr *url.Error
 		if errors.As(err, &uerr) {
 			err = uerr.Err
 		}
-		return nil, fmt.Errorf("%s: %w", d.URL, err)
+		return nil, fmt.Errorf("%s: %w", target, err)
 	}
 	switch u.Scheme {
 	case "ws", "wss", "http", "https":
 	default:
-		return nil, fmt.Errorf("%s: unsupported URL scheme %q", d.URL, u.Scheme)
+		return nil, fmt.Errorf("%s: unsupported URL scheme %q", target, u.Scheme)
 	}
-	header, host, err := d.upgradeHeader(ConnectHeaders(ctx))
+	header, host, err := d.upgradeHeader(target, ConnectHeaders(ctx))
 	if err != nil {
 		return nil, err
 	}
 	dctx, timeout, cancel := d.bound(ctx)
 	defer cancel()
 	var raw atomic.Pointer[net.Conn]
-	transport := d.transport(&raw)
+	transport := d.transport(&raw, tlsConfig)
 	defer transport.CloseIdleConnections()
-	conn, _, err := websocket.Dial(dctx, d.URL, &websocket.DialOptions{
+	conn, _, err := websocket.Dial(dctx, target, &websocket.DialOptions{
 		HTTPClient:      &http.Client{Transport: transport},
 		HTTPHeader:      header,
 		Host:            host,
@@ -94,9 +126,9 @@ func (d *WebSocketDialer) Spawn(ctx context.Context) (Worker, error) {
 			return nil, ctx.Err()
 		}
 		if dctx.Err() != nil {
-			return nil, fmt.Errorf("%s: connect timed out after %s", d.URL, timeout)
+			return nil, fmt.Errorf("%s: connect timed out after %s", target, timeout)
 		}
-		return nil, fmt.Errorf("%s: %w", d.URL, err)
+		return nil, fmt.Errorf("%s: %w", target, err)
 	}
 	conn.SetReadLimit(wire.MaxFrameLen)
 	w := &wsWorker{
@@ -125,10 +157,10 @@ func (d *WebSocketDialer) bound(ctx context.Context) (context.Context, time.Dura
 	return bounded, timeout, cancel
 }
 
-func (d *WebSocketDialer) transport(raw *atomic.Pointer[net.Conn]) *http.Transport {
+func (d *WebSocketDialer) transport(raw *atomic.Pointer[net.Conn], tlsConfig *tls.Config) *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
-	if d.TLSConfig != nil {
-		t.TLSClientConfig = d.TLSConfig.Clone()
+	if tlsConfig != nil {
+		t.TLSClientConfig = tlsConfig.Clone()
 	}
 	dial := d.DialContext
 	if dial == nil {
@@ -146,17 +178,18 @@ func (d *WebSocketDialer) transport(raw *atomic.Pointer[net.Conn]) *http.Transpo
 
 // HealthCheck reports nil when GET <path>/health on the dialer's server answers 200.
 func (d *WebSocketDialer) HealthCheck(ctx context.Context, headers [][2]string) error {
-	target, err := healthURL(d.URL)
+	server, tlsConfig := d.target(ctx)
+	target, err := healthURL(server)
 	if err != nil {
-		return fmt.Errorf("%s: %w", d.URL, err)
+		return fmt.Errorf("%s: %w", server, err)
 	}
-	header, host, err := d.upgradeHeader(headers)
+	header, host, err := d.upgradeHeader(server, headers)
 	if err != nil {
 		return err
 	}
 	hctx, timeout, cancel := d.bound(ctx)
 	defer cancel()
-	transport := d.transport(nil)
+	transport := d.transport(nil, tlsConfig)
 	defer transport.CloseIdleConnections()
 	req, err := http.NewRequestWithContext(hctx, http.MethodGet, target, nil)
 	if err != nil {
@@ -206,7 +239,7 @@ func healthURL(raw string) (string, error) {
 	return u.String(), nil
 }
 
-func (d *WebSocketDialer) upgradeHeader(pairs [][2]string) (http.Header, string, error) {
+func (d *WebSocketDialer) upgradeHeader(server string, pairs [][2]string) (http.Header, string, error) {
 	header := http.Header{}
 	ua := d.UserAgent
 	if ua == "" {
@@ -217,10 +250,10 @@ func (d *WebSocketDialer) upgradeHeader(pairs [][2]string) (http.Header, string,
 	for _, pair := range pairs {
 		name, val := pair[0], pair[1]
 		if !validHeaderName(name) {
-			return nil, "", fmt.Errorf("%s: connect header %s: invalid HTTP header name", d.URL, value.RustDebugString(name))
+			return nil, "", fmt.Errorf("%s: connect header %s: invalid HTTP header name", server, value.RustDebugString(name))
 		}
 		if !validHeaderValue(val) {
-			return nil, "", fmt.Errorf("%s: connect header %s value: failed to parse header value", d.URL, value.RustDebugString(strings.ToLower(name)))
+			return nil, "", fmt.Errorf("%s: connect header %s value: failed to parse header value", server, value.RustDebugString(strings.ToLower(name)))
 		}
 		if strings.EqualFold(name, "Host") {
 			host = val

@@ -3,10 +3,11 @@ package pyargs
 
 import (
 	"fmt"
+	"github.com/asalimonov/montygo/monterr"
+	"github.com/asalimonov/montygo/sandbox"
+	"github.com/asalimonov/montygo/sandbox/host"
 	"math"
 	"sort"
-
-	"github.com/asalimonov/montygo"
 )
 
 // Param is one parameter of a Python signature.
@@ -23,7 +24,7 @@ func Required(name string) Param { return Param{Name: name} }
 func Optional(name string, def any) Param { return Param{Name: name, Default: def, Optional: true} }
 
 // Bind maps positional and keyword arguments onto params, filling defaults.
-func Bind(fn string, args []any, kwargs montygo.Kwargs, params ...Param) ([]any, error) {
+func Bind(fn string, args []any, kwargs host.Kwargs, params ...Param) ([]any, error) {
 	if len(args) > len(params) {
 		return nil, typeError("%s() takes %d positional arguments but %d were given", fn, len(params), len(args))
 	}
@@ -66,7 +67,7 @@ func Bind(fn string, args []any, kwargs montygo.Kwargs, params ...Param) ([]any,
 }
 
 func typeError(format string, args ...any) error {
-	return montygo.Raise("TypeError", fmt.Sprintf(format, args...))
+	return monterr.Raise("TypeError", fmt.Sprintf(format, args...))
 }
 
 func wrongType(name, want string, v any) error {
@@ -87,7 +88,7 @@ func typeName(v any) string {
 		return "float"
 	case []any:
 		return "list"
-	case *montygo.Dict:
+	case *sandbox.Dict:
 		return "dict"
 	}
 	return fmt.Sprintf("%T", v)

@@ -1,6 +1,6 @@
 # monty-server
 
-`monty-server` is an open WebSocket server for Monty workers. It follows Full Monty, specified by upstream `docs/server.md`: the same flags, admission status codes, limit ceilings, timeouts, drain protocol and signed dumps. Any Monty WebSocket client can use it, including montygo's `NewWebSocket` and Python's `AsyncMontyWebsocket`. Deviations are listed in `docs/parity/server.md`.
+`monty-server` is an open WebSocket server for Monty workers. It follows Full Monty, specified by upstream `docs/server.md`: the same flags, admission status codes, limit ceilings, timeouts, drain protocol and signed dumps. Any Monty WebSocket client can use it, including montygo's `Remote` workers and Python's `AsyncMontyWebsocket`. Deviations are listed in `docs/parity/server.md`.
 
 The crate lives in `server/`. It is built on `monty_pool`: every request after `Configure` goes through `Checkout::turn_raw`, which relays decoded `monty.v1` protobuf messages to the worker without converting them to Monty values.
 

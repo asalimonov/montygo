@@ -9,6 +9,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/asalimonov/montygo/monterr"
+	"github.com/asalimonov/montygo/sandbox"
+	"github.com/asalimonov/montygo/sandbox/host"
 	"io"
 	"math"
 	"math/big"
@@ -130,11 +133,15 @@ func run(ctx context.Context, out io.Writer, args []string) error {
 		source = string(b)
 	}
 
-	pool, err := montygo.New(ctx, montyenv.PoolOptions())
+	pool, err := montygo.NewPool(ctx, montyenv.PoolOptions())
 	if err != nil {
 		return err
 	}
 	defer pool.Close(ctx)
+	runtime, err := montygo.NewRuntime(montygo.RuntimeOptions{TypeCheck: true, TypeCheckStubs: stubs})
+	if err != nil {
+		return err
+	}
 	browser, err := startBrowser(ctx)
 	if err != nil {
 		return err
@@ -147,14 +154,15 @@ func run(ctx context.Context, out io.Writer, args []string) error {
 	}
 	records := newRecordModels(coercer)
 	s := &scraper{
-		llm:   llm,
-		model: *model,
-		pool:  pool,
-		out:   out,
+		llm:     llm,
+		model:   *model,
+		pool:    pool,
+		runtime: runtime,
+		out:     out,
 		externals: map[string]any{
-			"open_page":         montygo.FunctionFunc(browser.openPage),
-			"beautiful_soup":    montygo.FunctionFunc(beautifulSoup),
-			"record_model_info": montygo.FunctionFunc(records.recordModelInfo),
+			"open_page":         host.FunctionFunc(browser.openPage),
+			"beautiful_soup":    host.FunctionFunc(beautifulSoup),
+			"record_model_info": host.FunctionFunc(records.recordModelInfo),
 		},
 	}
 
@@ -191,6 +199,7 @@ type scraper struct {
 	llm       messagesAPI
 	model     string
 	pool      *montygo.Pool
+	runtime   *montygo.Runtime
 	externals map[string]any
 	out       io.Writer
 }
@@ -244,7 +253,7 @@ func responseText(resp *anthropic.Message) string {
 func (s *scraper) runCode(ctx context.Context, code string, inputs map[string]any, typeCheck bool) (string, error) {
 	var printOutput strings.Builder
 	output, err := func() (any, error) {
-		session, err := s.pool.Checkout(ctx, montygo.CheckoutOptions{TypeCheck: true, TypeCheckStubs: stubs})
+		session, err := s.pool.Checkout(ctx, s.runtime, montygo.CheckoutOptions{})
 		if err != nil {
 			return nil, err
 		}
@@ -253,7 +262,7 @@ func (s *scraper) runCode(ctx context.Context, code string, inputs map[string]an
 			Inputs:         inputs,
 			ExternalLookup: s.externals,
 			SkipTypeCheck:  !typeCheck,
-			Print: montygo.PrintFunc(func(_ montygo.Stream, text string) error {
+			Print: sandbox.PrintFunc(func(_ sandbox.Stream, text string) error {
 				printOutput.WriteString(text)
 				return nil
 			}),
@@ -261,14 +270,14 @@ func (s *scraper) runCode(ctx context.Context, code string, inputs map[string]an
 	}()
 
 	var msg string
-	var runtimeErr *montygo.RuntimeError
-	var typingErr *montygo.TypingError
-	var montyErr montygo.Error
+	var runtimeErr *monterr.RuntimeError
+	var typingErr *monterr.TypingError
+	var montyErr monterr.Error
 	switch {
 	case errors.As(err, &runtimeErr):
-		msg = "Error running code: " + runtimeErr.Display(montygo.DisplayTraceback)
+		msg = "Error running code: " + runtimeErr.Display(monterr.DisplayTraceback)
 	case errors.As(err, &typingErr):
-		msg = "Error Preparing Code: " + typingErr.Display(montygo.DisplayTraceback)
+		msg = "Error Preparing Code: " + typingErr.Display(monterr.DisplayTraceback)
 	case errors.As(err, &montyErr):
 		msg = "Error Preparing Code: " + montyErr.Error()
 	case err != nil:
@@ -314,7 +323,7 @@ func extractCode(response string) ExtractCode {
 }
 
 type dictable interface {
-	asDict() *montygo.Dict
+	asDict() *sandbox.Dict
 }
 
 func toJSON(v any) string {
@@ -342,7 +351,7 @@ func writeJSON(b *strings.Builder, v any) {
 		case math.IsInf(x, -1):
 			b.WriteString("-Infinity")
 		default:
-			b.WriteString(strings.Replace(montygo.Repr(x), "e+", "e", 1))
+			b.WriteString(strings.Replace(sandbox.Repr(x), "e+", "e", 1))
 		}
 	case string:
 		writeJSONString(b, x)
@@ -350,13 +359,13 @@ func writeJSON(b *strings.Builder, v any) {
 		writeJSONString(b, string(x))
 	case []any:
 		writeJSONArray(b, x)
-	case montygo.Tuple:
+	case sandbox.Tuple:
 		writeJSONArray(b, x)
-	case *montygo.Set:
+	case *sandbox.Set:
 		writeJSONArray(b, x.Items())
-	case *montygo.FrozenSet:
+	case *sandbox.FrozenSet:
 		writeJSONArray(b, x.Items())
-	case *montygo.Dict:
+	case *sandbox.Dict:
 		b.WriteByte('{')
 		for i, p := range x.Pairs() {
 			if i > 0 {
@@ -364,19 +373,19 @@ func writeJSON(b *strings.Builder, v any) {
 			}
 			key, ok := p.Key.(string)
 			if !ok {
-				key = montygo.Repr(p.Key)
+				key = sandbox.Repr(p.Key)
 			}
 			writeJSONString(b, key)
 			b.WriteByte(':')
 			writeJSON(b, p.Value)
 		}
 		b.WriteByte('}')
-	case *montygo.ClassProxy:
+	case *host.ClassProxy:
 		writeJSON(b, x.Attributes)
 	case dictable:
 		writeJSON(b, x.asDict())
 	default:
-		writeJSONString(b, montygo.Repr(x))
+		writeJSONString(b, sandbox.Repr(x))
 	}
 }
 

@@ -8,6 +8,8 @@ import (
 	"github.com/asalimonov/montygo/internal/pool"
 	"github.com/asalimonov/montygo/internal/value"
 	"github.com/asalimonov/montygo/internal/wire"
+	monterr "github.com/asalimonov/montygo/monterr"
+	host "github.com/asalimonov/montygo/sandbox/host"
 )
 
 // Snapshot is a paused execution or its completion.
@@ -61,7 +63,7 @@ func (d *snapshotDriver) advance(ev *wire.Event, err error) (snap Snapshot, resu
 		if d.pt.failure != nil {
 			return nil, d.pt.failure
 		}
-		value := restoreValue(ev.Value, s.store)
+		value := host.RestoreValue(ev.Value, s.store)
 		s.finishExecution(e, value, nil)
 		return &Complete{Output: e.value}, e.err
 	}
@@ -75,11 +77,11 @@ func (d *snapshotDriver) advance(ev *wire.Event, err error) (snap Snapshot, resu
 	switch ev.Kind {
 	case wire.EventOsCall:
 		args, kw := ev.OsCall.Args()
-		f := &FunctionSnapshot{d: d, ev: ev, FunctionName: ev.OsCall.Name(), Args: d.restoreArgs(args), Kwargs: kwargsRecord(kw, s.store), CallID: ev.OsCall.CallID, IsOSFunction: true}
+		f := &FunctionSnapshot{d: d, ev: ev, FunctionName: ev.OsCall.Name(), Args: d.restoreArgs(args), Kwargs: host.KwargsRecord(kw, s.store), CallID: ev.OsCall.CallID, IsOSFunction: true}
 		snap, token = f, &f.token
 	case wire.EventFunctionCall:
 		fc := ev.FunctionCall
-		f := &FunctionSnapshot{d: d, ev: ev, FunctionName: fc.FunctionName, Args: d.restoreArgs(fc.Args), Kwargs: kwargsRecord(fc.Kwargs, s.store), CallID: fc.CallID, AllowEagerAwait: fc.AllowEagerAwait, ObjectID: fc.ObjectID}
+		f := &FunctionSnapshot{d: d, ev: ev, FunctionName: fc.FunctionName, Args: d.restoreArgs(fc.Args), Kwargs: host.KwargsRecord(fc.Kwargs, s.store), CallID: fc.CallID, AllowEagerAwait: fc.AllowEagerAwait, ObjectID: fc.ObjectID}
 		snap, token = f, &f.token
 	case wire.EventNameLookup:
 		n := &NameLookupSnapshot{d: d, ev: ev, VariableName: ev.NameLookup.Name, ObjectID: ev.NameLookup.ObjectID}
@@ -88,7 +90,7 @@ func (d *snapshotDriver) advance(ev *wire.Event, err error) (snap Snapshot, resu
 		f := &FutureSnapshot{d: d, ev: ev, PendingCallIDs: append([]uint32(nil), ev.PendingCallIDs...)}
 		snap, token = f, &f.token
 	default:
-		return nil, s.poison(&ProtocolError{Message: "unexpected turn kind: " + ev.Kind.String()})
+		return nil, s.poison(&monterr.ProtocolError{Message: "unexpected turn kind: " + ev.Kind.String()})
 	}
 	if err := s.publishPause(e, token); err != nil {
 		return nil, s.abortOrTerminal(d.pt.ctx, e, d.pt, err)
@@ -108,7 +110,7 @@ func (s *Session) publishPause(e *execution, token *snapshotToken) error {
 		return errExecutionInterrupted
 	}
 	if e.sequence == math.MaxUint64 {
-		return &ValueError{Message: "snapshot sequence exhausted"}
+		return &monterr.ValueError{Message: "snapshot sequence exhausted"}
 	}
 	e.sequence++
 	*token = snapshotToken{exec: e, sequence: e.sequence}
@@ -120,7 +122,7 @@ func (s *Session) publishPause(e *execution, token *snapshotToken) error {
 
 func (s *Session) snapshotErrorLocked(t *snapshotToken) error {
 	if t.used {
-		return ErrSnapshotResumed
+		return monterr.ErrSnapshotResumed
 	}
 	if t.exec.terminalCause != nil {
 		return t.exec.terminalCause
@@ -129,16 +131,16 @@ func (s *Session) snapshotErrorLocked(t *snapshotToken) error {
 		if t.exec.err != nil {
 			return t.exec.err
 		}
-		return ErrSnapshotStale
+		return monterr.ErrSnapshotStale
 	}
 	if s.life.terminal != nil {
 		return s.life.terminal
 	}
 	if s.life.current != t.exec || t.sequence != t.exec.sequence {
-		return ErrSnapshotStale
+		return monterr.ErrSnapshotStale
 	}
 	if t.exec.phase != executionPaused {
-		return ErrSessionBusy
+		return monterr.ErrSessionBusy
 	}
 	return s.admissionErrorLocked()
 }
@@ -162,7 +164,7 @@ func (s *Session) claimSnapshot(ctx context.Context, t *snapshotToken) error {
 func (d *snapshotDriver) restoreArgs(args []any) []any {
 	out := make([]any, len(args))
 	for i, a := range args {
-		out[i] = restoreValue(a, d.s.store)
+		out[i] = host.RestoreValue(a, d.s.store)
 	}
 	return out
 }
@@ -185,7 +187,7 @@ func (d *snapshotDriver) resumeValue(ctx context.Context, v any) (*wire.Event, e
 }
 
 func (d *snapshotDriver) resumeError(ctx context.Context, err error) (*wire.Event, error) {
-	excType, msg := exceptionParts(err)
+	excType, msg := monterr.ExceptionParts(err)
 	return d.ans.resumeError(ctx, excType, msg)
 }
 
@@ -214,7 +216,7 @@ type FunctionSnapshot struct {
 	ev              *wire.Event
 	FunctionName    string
 	Args            []any
-	Kwargs          Kwargs
+	Kwargs          host.Kwargs
 	CallID          uint32
 	IsOSFunction    bool
 	AllowEagerAwait bool
@@ -256,7 +258,7 @@ func (f *FunctionSnapshot) ResumeFuture(ctx context.Context) (Snapshot, error) {
 // ResumeNotHandled applies the OS call's default unhandled behaviour.
 func (f *FunctionSnapshot) ResumeNotHandled(ctx context.Context) (Snapshot, error) {
 	if !f.IsOSFunction {
-		return nil, ErrNotOSCall
+		return nil, monterr.ErrNotOSCall
 	}
 	return f.d.resume(ctx, &f.token, func(ctx context.Context) (*wire.Event, error) {
 		return f.d.ans.resumeWire(ctx, wire.ExtResult{Kind: wire.ExtNotHandled})
@@ -294,7 +296,7 @@ func (n *NameLookupSnapshot) ResumeFunction(ctx context.Context, functionName st
 // ResumeValue resolves the name to a value.
 func (n *NameLookupSnapshot) ResumeValue(ctx context.Context, v any) (Snapshot, error) {
 	return n.d.resume(ctx, &n.token, func(ctx context.Context) (*wire.Event, error) {
-		prepared, err := prepareValue(v, n.d.s.store)
+		prepared, err := host.PrepareValue(v, n.d.s.store)
 		if err != nil {
 			return nil, &hostFailure{err: err}
 		}

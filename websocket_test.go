@@ -2,6 +2,7 @@ package montygo_test
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"sort"
@@ -16,16 +17,42 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/monterr"
+	"github.com/asalimonov/montygo/sandbox/host"
+	"github.com/asalimonov/montygo/telemetry"
 )
 
 type wsTraceKey struct{}
 
 const wsUnreachableURL = "ws://127.0.0.1:9"
 
+// wsOptions describe a pool of a fixed server URL: a StaticServer and the
+// RemoteOptions and PoolOptions around it.
+type wsOptions struct {
+	URL            string
+	ConnectHeaders func(ctx context.Context) (map[string]string, error)
+	TLSConfig      *tls.Config
+	DialContext    func(ctx context.Context, network, addr string) (net.Conn, error)
+	RequestTimeout time.Duration
+	Telemetry      *telemetry.Components
+}
+
+func (o wsOptions) server() montygo.ServerSupervisor {
+	return montygo.StaticServer(o.URL, o.TLSConfig, o.ConnectHeaders)
+}
+
+func (o wsOptions) remote() montygo.RemoteOptions {
+	return montygo.RemoteOptions{DialContext: o.DialContext}
+}
+
+func (o wsOptions) pool() montygo.PoolOptions {
+	return montygo.PoolOptions{Workers: montygo.Remote(o.server(), o.remote()), RequestTimeout: o.RequestTimeout, Telemetry: o.Telemetry}
+}
+
 // wsNewPool creates a WebSocket pool closed at test end.
-func wsNewPool(t *testing.T, opts montygo.WebSocketOptions) *montygo.Pool {
+func wsNewPool(t *testing.T, opts wsOptions) *montygo.Pool {
 	t.Helper()
-	p, err := montygo.NewWebSocket(testCtx(t), opts)
+	p, err := montygo.NewPool(testCtx(t), opts.pool())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = p.Close(context.Background()) })
 	return p
@@ -34,7 +61,7 @@ func wsNewPool(t *testing.T, opts montygo.WebSocketOptions) *montygo.Pool {
 // wsCheckout checks out a session closed at test end.
 func wsCheckout(t *testing.T, ctx context.Context, p *montygo.Pool) *montygo.Session {
 	t.Helper()
-	s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+	s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close(context.Background()) })
 	return s
@@ -44,8 +71,9 @@ func TestWebSocket(t *testing.T) {
 	t.Run("feed_run_over_websocket", func(t *testing.T) {
 		relay := wsStartRelay(t, false)
 		ctx := testCtx(t)
-		p := wsNewPool(t, montygo.WebSocketOptions{URL: relay.URL, RequestTimeout: 30 * time.Second})
-		require.Equal(t, montygo.BackendWebSocket, p.Backend())
+		p := wsNewPool(t, wsOptions{URL: relay.URL, RequestTimeout: 30 * time.Second})
+		require.Equal(t, montygo.WorkerRemote, p.Workers())
+		require.Equal(t, "websocket", p.Workers().String())
 		s := wsCheckout(t, ctx, p)
 		v, err := s.FeedRun(ctx, "1 + 1", nil)
 		require.NoError(t, err)
@@ -60,10 +88,10 @@ func TestWebSocket(t *testing.T) {
 	t.Run("inputs_and_async_external_function_over_websocket", func(t *testing.T) {
 		relay := wsStartRelay(t, false)
 		ctx := testCtx(t)
-		double := func(x int) *montygo.Future {
-			return montygo.Async(func() (any, error) { return x * 2, nil })
+		double := func(x int) *host.Future {
+			return host.Async(func() (any, error) { return x * 2, nil })
 		}
-		p := wsNewPool(t, montygo.WebSocketOptions{URL: relay.URL, RequestTimeout: 30 * time.Second})
+		p := wsNewPool(t, wsOptions{URL: relay.URL, RequestTimeout: 30 * time.Second})
 		s := wsCheckout(t, ctx, p)
 		v, err := s.FeedRun(ctx, "await double(n) + 1", &montygo.FeedOptions{
 			Inputs:         map[string]any{"n": 20},
@@ -76,24 +104,24 @@ func TestWebSocket(t *testing.T) {
 	t.Run("separate_checkouts_are_isolated", func(t *testing.T) {
 		relay := wsStartRelay(t, false)
 		ctx := testCtx(t)
-		p := wsNewPool(t, montygo.WebSocketOptions{URL: relay.URL, RequestTimeout: 30 * time.Second})
-		first, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+		p := wsNewPool(t, wsOptions{URL: relay.URL, RequestTimeout: 30 * time.Second})
+		first, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 		require.NoError(t, err)
 		_, err = first.FeedRun(ctx, "leaked = 123", nil)
 		require.NoError(t, err)
 		require.NoError(t, first.Close(ctx))
 		second := wsCheckout(t, ctx, p)
 		_, err = second.FeedRun(ctx, "leaked", nil)
-		var re *montygo.RuntimeError
+		var re *monterr.RuntimeError
 		require.ErrorAs(t, err, &re)
-		require.Equal(t, "name 'leaked' is not defined", re.Display(montygo.DisplayMsg))
+		require.Equal(t, "name 'leaked' is not defined", re.Display(monterr.DisplayMsg))
 	})
 
 	t.Run("connect_headers_sent_per_checkout", func(t *testing.T) {
 		relay := wsStartRelay(t, false)
 		ctx := testCtx(t)
 		var calls atomic.Int32
-		p := wsNewPool(t, montygo.WebSocketOptions{
+		p := wsNewPool(t, wsOptions{
 			URL:            relay.URL,
 			RequestTimeout: 30 * time.Second,
 			ConnectHeaders: func(ctx context.Context) (map[string]string, error) {
@@ -110,7 +138,7 @@ func TestWebSocket(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				cctx := context.WithValue(ctx, wsTraceKey{}, trace)
-				s, err := p.Checkout(cctx, montygo.CheckoutOptions{})
+				s, err := p.Checkout(cctx, defaultRuntime, montygo.CheckoutOptions{})
 				if err != nil {
 					errs[i] = err
 					return
@@ -138,7 +166,7 @@ func TestWebSocket(t *testing.T) {
 		ctx := testCtx(t)
 		type headerMap map[string]string
 		source := headerMap{"x-token": "t"}
-		p := wsNewPool(t, montygo.WebSocketOptions{
+		p := wsNewPool(t, wsOptions{
 			URL:            relay.URL,
 			RequestTimeout: 30 * time.Second,
 			ConnectHeaders: func(context.Context) (map[string]string, error) { return source, nil },
@@ -153,7 +181,7 @@ func TestWebSocket(t *testing.T) {
 	})
 
 	t.Run("connect_headers_not_callable", func(t *testing.T) {
-		t.Skip("ConnectHeaders is a func field; a non-callable value does not compile in Go")
+		t.Skip("the headers callback is a func parameter of StaticServer; a non-callable value does not compile in Go")
 	})
 
 	t.Run("connect_headers_failure_leaves_the_pool_usable", func(t *testing.T) {
@@ -161,7 +189,7 @@ func TestWebSocket(t *testing.T) {
 		ctx := testCtx(t)
 		errNoToken := errors.New("no token yet")
 		var attempts atomic.Int32
-		p := wsNewPool(t, montygo.WebSocketOptions{
+		p := wsNewPool(t, wsOptions{
 			URL:            relay.URL,
 			RequestTimeout: 30 * time.Second,
 			ConnectHeaders: func(context.Context) (map[string]string, error) {
@@ -171,7 +199,7 @@ func TestWebSocket(t *testing.T) {
 				return map[string]string{"x-token": "t"}, nil
 			},
 		})
-		_, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+		_, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 		require.ErrorIs(t, err, errNoToken)
 		require.Equal(t, "no token yet", err.Error())
 		s := wsCheckout(t, ctx, p)
@@ -188,17 +216,17 @@ func TestWebSocket(t *testing.T) {
 	t.Run("connect_headers_not_called_on_an_inactive_pool", func(t *testing.T) {
 		ctx := testCtx(t)
 		var calls atomic.Int32
-		p, err := montygo.NewWebSocket(ctx, montygo.WebSocketOptions{
+		p, err := montygo.NewPool(ctx, wsOptions{
 			URL: wsUnreachableURL,
 			ConnectHeaders: func(context.Context) (map[string]string, error) {
 				calls.Add(1)
 				return map[string]string{}, nil
 			},
-		})
+		}.pool())
 		require.NoError(t, err)
 		require.NoError(t, p.Close(ctx))
-		_, err = p.Checkout(ctx, montygo.CheckoutOptions{})
-		require.ErrorIs(t, err, montygo.ErrPoolClosed)
+		_, err = p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
+		require.ErrorIs(t, err, monterr.ErrPoolClosed)
 		require.Equal(t, int32(0), calls.Load())
 	})
 
@@ -206,7 +234,7 @@ func TestWebSocket(t *testing.T) {
 		errNoToken := errors.New("no token available")
 		spawnError := func(message string) func(t *testing.T, err error) {
 			return func(t *testing.T, err error) {
-				var se *montygo.SpawnError
+				var se *monterr.SpawnError
 				require.ErrorAs(t, err, &se)
 				require.Equal(t, message, err.Error())
 			}
@@ -246,8 +274,8 @@ func TestWebSocket(t *testing.T) {
 					t.Skip(tc.skip)
 				}
 				ctx := testCtx(t)
-				p := wsNewPool(t, montygo.WebSocketOptions{URL: wsUnreachableURL, ConnectHeaders: tc.headers})
-				s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+				p := wsNewPool(t, wsOptions{URL: wsUnreachableURL, ConnectHeaders: tc.headers})
+				s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 				require.Nil(t, s)
 				tc.check(t, err)
 			})
@@ -266,20 +294,22 @@ func TestWebSocket(t *testing.T) {
 			TraceState: state,
 		})
 		traced := trace.ContextWithSpanContext(ctx, span)
-		inst, err := montygo.NewInstrumentation(montygo.InstrumentationConfig{Logs: telBool(false), Metrics: telBool(false)})
+		inst, err := telemetry.NewInstrumentation(telemetry.InstrumentationConfig{Logs: telBool(false), Metrics: telBool(false)})
 		require.NoError(t, err)
-		t.Cleanup(inst.Disable)
 		inst.SetTracerProvider(sdktrace.NewTracerProvider())
-		plain := wsNewPool(t, montygo.WebSocketOptions{URL: relay.URL, RequestTimeout: 30 * time.Second})
-		override := wsNewPool(t, montygo.WebSocketOptions{
+		components := inst.Components()
+		require.NotNil(t, components)
+		plain := wsNewPool(t, wsOptions{URL: relay.URL, RequestTimeout: 30 * time.Second, Telemetry: components})
+		override := wsNewPool(t, wsOptions{
 			URL:            relay.URL,
 			RequestTimeout: 30 * time.Second,
+			Telemetry:      components,
 			ConnectHeaders: func(context.Context) (map[string]string, error) {
 				return map[string]string{"tracestate": "caller=1"}, nil
 			},
 		})
 		for _, p := range []*montygo.Pool{plain, override} {
-			s, err := p.Checkout(traced, montygo.CheckoutOptions{})
+			s, err := p.Checkout(traced, defaultRuntime, montygo.CheckoutOptions{})
 			require.NoError(t, err)
 			v, err := s.FeedRun(traced, "1 + 1", nil)
 			require.NoError(t, err)
@@ -289,8 +319,8 @@ func TestWebSocket(t *testing.T) {
 		untraced := wsCheckout(t, ctx, plain)
 		_, err = untraced.FeedRun(ctx, "1", nil)
 		require.NoError(t, err)
-		inst.Disable()
-		uninstrumented := wsCheckout(t, traced, plain)
+		silent := wsNewPool(t, wsOptions{URL: relay.URL, RequestTimeout: 30 * time.Second})
+		uninstrumented := wsCheckout(t, traced, silent)
 		_, err = uninstrumented.FeedRun(traced, "1", nil)
 		require.NoError(t, err)
 
@@ -312,31 +342,31 @@ func TestWebSocket(t *testing.T) {
 	t.Run("wss_through_tls_relay", func(t *testing.T) {
 		relay := wsStartRelay(t, true)
 		ctx := testCtx(t)
-		untrusted := wsNewPool(t, montygo.WebSocketOptions{URL: relay.URL, RequestTimeout: 30 * time.Second})
-		_, err := untrusted.Checkout(ctx, montygo.CheckoutOptions{})
-		var se *montygo.SpawnError
+		untrusted := wsNewPool(t, wsOptions{URL: relay.URL, RequestTimeout: 30 * time.Second})
+		_, err := untrusted.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
+		var se *monterr.SpawnError
 		require.ErrorAs(t, err, &se)
 
-		opts := montygo.WebSocketOptions{URL: relay.URL, RequestTimeout: 30 * time.Second, TLSConfig: relay.TLS}
+		opts := wsOptions{URL: relay.URL, RequestTimeout: 30 * time.Second, TLSConfig: relay.TLS}
 		p := wsNewPool(t, opts)
 		s := wsCheckout(t, ctx, p)
 		v, err := s.FeedRun(ctx, "1 + 1", nil)
 		require.NoError(t, err)
 		require.Equal(t, int64(2), v)
-		require.NoError(t, montygo.CheckWebSocketHealth(ctx, opts))
+		require.NoError(t, montygo.CheckServerHealth(ctx, opts.server(), opts.remote()))
 		require.Len(t, relay.healthChecks(), 1)
 	})
 
 	t.Run("health_check_against_relay", func(t *testing.T) {
 		relay := wsStartRelay(t, false)
 		ctx := testCtx(t)
-		opts := montygo.WebSocketOptions{
+		opts := wsOptions{
 			URL: relay.URL,
 			ConnectHeaders: func(context.Context) (map[string]string, error) {
 				return map[string]string{"x-token": "t"}, nil
 			},
 		}
-		require.NoError(t, montygo.CheckWebSocketHealth(ctx, opts))
+		require.NoError(t, montygo.CheckServerHealth(ctx, opts.server(), opts.remote()))
 		checks := relay.healthChecks()
 		require.Len(t, checks, 1)
 		require.Equal(t, "t", checks[0].Get("x-token"))
@@ -344,14 +374,14 @@ func TestWebSocket(t *testing.T) {
 
 		errNoToken := errors.New("no token yet")
 		opts.ConnectHeaders = func(context.Context) (map[string]string, error) { return nil, errNoToken }
-		err := montygo.CheckWebSocketHealth(ctx, opts)
+		err := montygo.CheckServerHealth(ctx, opts.server(), opts.remote())
 		require.ErrorIs(t, err, errNoToken)
 		require.Equal(t, "no token yet", err.Error())
 
-		err = montygo.CheckWebSocketHealth(ctx, montygo.WebSocketOptions{URL: "ftp://127.0.0.1:9"})
+		err = montygo.CheckServerHealth(ctx, wsOptions{URL: "ftp://127.0.0.1:9"}.server(), montygo.RemoteOptions{})
 		require.EqualError(t, err, `ftp://127.0.0.1:9: unsupported URL scheme "ftp"`)
 
-		err = montygo.CheckWebSocketHealth(ctx, montygo.WebSocketOptions{URL: wsUnreachableURL})
+		err = montygo.CheckServerHealth(ctx, wsOptions{URL: wsUnreachableURL}.server(), montygo.RemoteOptions{})
 		require.Error(t, err)
 		require.True(t, strings.HasPrefix(err.Error(), "http://127.0.0.1:9/health: "), err.Error())
 	})
@@ -360,7 +390,7 @@ func TestWebSocket(t *testing.T) {
 		relay := wsStartRelay(t, false)
 		ctx := testCtx(t)
 		var dials atomic.Int32
-		opts := montygo.WebSocketOptions{
+		opts := wsOptions{
 			URL:            relay.URL,
 			RequestTimeout: 30 * time.Second,
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -374,7 +404,7 @@ func TestWebSocket(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, int64(2), v)
 		require.Equal(t, int32(1), dials.Load())
-		require.NoError(t, montygo.CheckWebSocketHealth(ctx, opts))
+		require.NoError(t, montygo.CheckServerHealth(ctx, opts.server(), opts.remote()))
 		require.Equal(t, int32(2), dials.Load())
 	})
 }

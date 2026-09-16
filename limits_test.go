@@ -11,24 +11,25 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/monterr"
 )
 
 var limMemoryErrorRe = regexp.MustCompile(`^MemoryError: memory limit exceeded: (\d+) bytes > (\d+) bytes$`)
 
 type limFigures struct{ native, wasm int64 }
 
-func (f limFigures) at(b montygo.Backend) int64 {
-	if b == montygo.BackendWasm {
+func (f limFigures) at(b backend) int64 {
+	if b == backendWasm {
 		return f.wasm
 	}
 	return f.native
 }
 
-func limRuntimeError(t *testing.T, err error) *montygo.RuntimeError {
+func limRuntimeError(t *testing.T, err error) *monterr.RuntimeError {
 	t.Helper()
 	require.Error(t, err)
-	var rerr *montygo.RuntimeError
-	require.ErrorAsf(t, err, &rerr, "expected *montygo.RuntimeError, got %T: %v", err, err)
+	var rerr *monterr.RuntimeError
+	require.ErrorAsf(t, err, &rerr, "expected *monterr.RuntimeError, got %T: %v", err, err)
 	return rerr
 }
 
@@ -50,7 +51,7 @@ func limLimits(l montygo.ResourceLimits) montygo.CheckoutOptions {
 }
 
 func TestLimits(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		t.Run("resource limits custom", func(t *testing.T) {
 			limits := limLimits(montygo.ResourceLimits{
 				MaxDuration:       5 * time.Second,
@@ -128,7 +129,7 @@ func TestLimits(t *testing.T) {
 			_, err := run(t, b, "while True:\n    pass\n", runOptions{CheckoutOptions: limLimits(montygo.ResourceLimits{MaxDuration: 100 * time.Millisecond})})
 			rerr := limRuntimeError(t, err)
 			require.Equal(t, "TimeoutError", rerr.Exception().TypeName)
-			require.Regexp(t, `^time limit exceeded: \d+(\.\d+)?ms > 100ms$`, rerr.Display(montygo.DisplayMsg))
+			require.Regexp(t, `^time limit exceeded: \d+(\.\d+)?ms > 100ms$`, rerr.Display(monterr.DisplayMsg))
 		})
 
 		t.Run("suspension limit", func(t *testing.T) {
@@ -140,7 +141,7 @@ func TestLimits(t *testing.T) {
 			})
 			rerr := limRuntimeError(t, err)
 			require.Equal(t, "RuntimeError", rerr.Exception().TypeName)
-			require.Equal(t, "suspension limit 3 exceeded", rerr.Display(montygo.DisplayMsg))
+			require.Equal(t, "suspension limit 3 exceeded", rerr.Display(monterr.DisplayMsg))
 		})
 
 		t.Run("suspension limit defaults to 1000", func(t *testing.T) {
@@ -150,7 +151,7 @@ func TestLimits(t *testing.T) {
 				ExternalLookup: map[string]any{"fetch": func() any { return nil }},
 			})
 			rerr := limRuntimeError(t, err)
-			require.Equal(t, "suspension limit 1000 exceeded", rerr.Display(montygo.DisplayMsg))
+			require.Equal(t, "suspension limit 1000 exceeded", rerr.Display(monterr.DisplayMsg))
 			v, err := session.FeedRun(ctx, "n", nil)
 			require.NoError(t, err)
 			require.Equal(t, int64(1000), v)
@@ -165,7 +166,7 @@ func TestLimits(t *testing.T) {
 			require.Equal(t, "ok", v)
 			_, err = session.FeedRun(ctx, "fetch('y')", feed)
 			rerr := limRuntimeError(t, err)
-			require.Equal(t, "suspension limit 1 exceeded", rerr.Display(montygo.DisplayMsg))
+			require.Equal(t, "suspension limit 1 exceeded", rerr.Display(monterr.DisplayMsg))
 			v, err = session.FeedRun(ctx, "1 + 1", nil)
 			require.NoError(t, err)
 			require.Equal(t, int64(2), v)
@@ -189,7 +190,7 @@ func TestLimits(t *testing.T) {
 			require.Equal(t, "ok", v)
 			_, err = restored.FeedRun(ctx, "fetch('z')", feed)
 			rerr := limRuntimeError(t, err)
-			require.Equal(t, "suspension limit 1 exceeded", rerr.Display(montygo.DisplayMsg))
+			require.Equal(t, "suspension limit 1 exceeded", rerr.Display(monterr.DisplayMsg))
 		})
 	})
 }

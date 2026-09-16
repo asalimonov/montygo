@@ -75,6 +75,7 @@ examples: ## Run every example program's tests
 
 MONTY_REV_FULL := $(shell sed -n 's/^[[:space:]]*MONTY_REV: //p' .github/workflows/ci.yml)
 IMAGE ?= monty-server
+GHCR_IMAGE ?= ghcr.io/asalimonov/monty-server
 PYCLIENT_IMAGE ?= monty-pyclient
 IMAGE_TAG ?= $(VERSION)
 PLATFORMS ?= linux/amd64,linux/arm64
@@ -106,7 +107,7 @@ docker-stage-src: ## Stage tracked MONTY_SRC files (no target/) as the override 
 docker-build: docker-stage-src ## Build monty-server images for PLATFORMS and load them
 	docker buildx build --platform $(PLATFORMS) --load -f docker/Dockerfile \
 		$(DOCKER_BUILD_ARGS) $(DOCKER_SRC_CONTEXT) $(BUILDX_CACHE) \
-		-t $(IMAGE):$(IMAGE_TAG) -t $(IMAGE):latest .
+		-t $(IMAGE):$(IMAGE_TAG) -t $(IMAGE):latest -t $(GHCR_IMAGE):$(IMAGE_TAG) .
 
 .PHONY: docker-build-pyclient
 docker-build-pyclient: docker-stage-src ## Build the Python client test image (host arch)
@@ -126,14 +127,9 @@ server-check: ## Clippy and tests for the Rust server
 	cd server && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked
 
 .PHONY: test-docker
-test-docker: ## Run the root suite on the websocket backend against the image
-	@cid=$$(docker run -d --rm -p 127.0.0.1::8000 \
-		-e MONTY_SERVER_DUMP_KEY=$(TEST_DUMP_KEY) -e MONTY_SERVER_MAX_SESSIONS_PER_CLIENT=0 \
-		--label montygo.test=docker $(IMAGE):$(IMAGE_TAG)) && \
-	trap 'docker stop $$cid >/dev/null' EXIT && \
-	port=$$(docker port $$cid 8000/tcp | head -1 | sed 's/.*://') && \
-	for i in $$(seq 1 100); do curl -sf http://127.0.0.1:$$port/health >/dev/null && break; sleep 0.1; done && \
-	MONTY_TEST_WS_URL=ws://127.0.0.1:$$port/ MONTY_TEST_BACKENDS=websocket $(GO) test -count=1 -timeout 30m -ldflags '$(GO_LDFLAGS)' .
+test-docker: ## Run the root suite on the docker backend against the image
+	MONTY_TEST_BACKENDS=docker MONTYGO_DOCKER_IMAGE=$(IMAGE):$(IMAGE_TAG) \
+		$(GO) test -count=1 -timeout 30m -ldflags '$(GO_LDFLAGS)' .
 
 .PHONY: test-network
 test-network: ## Run tests/network against the images

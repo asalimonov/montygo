@@ -7,6 +7,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/monterr"
+	"github.com/asalimonov/montygo/sandbox/host"
 )
 
 const fstAsyncGo = "import asyncio\nasync def main():\n    return await go()\nasyncio.run(main())"
@@ -47,11 +49,11 @@ func fstNameLookup(t *testing.T) func(montygo.Snapshot, error) *montygo.NameLook
 	return fstAs[*montygo.NameLookupSnapshot](t)
 }
 
-func fstRuntimeError(t *testing.T, err error) *montygo.RuntimeError {
+func fstRuntimeError(t *testing.T, err error) *monterr.RuntimeError {
 	t.Helper()
 	require.Error(t, err)
-	var rerr *montygo.RuntimeError
-	require.ErrorAsf(t, err, &rerr, "expected *montygo.RuntimeError, got %T: %v", err, err)
+	var rerr *monterr.RuntimeError
+	require.ErrorAsf(t, err, &rerr, "expected *monterr.RuntimeError, got %T: %v", err, err)
 	return rerr
 }
 
@@ -69,7 +71,7 @@ func fstDrive(ctx context.Context, t *testing.T, snap montygo.Snapshot, err erro
 }
 
 func TestFeedStart(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		t.Run("feedStart suspends at a function call, then completes", func(t *testing.T) {
 			ctx := testCtx(t)
 			session := newSession(t, b, montygo.CheckoutOptions{})
@@ -95,20 +97,20 @@ func TestFeedStart(t *testing.T) {
 			_, err := snap.Resume(ctx, 1)
 			require.NoError(t, err)
 			_, err = snap.Resume(ctx, 2)
-			require.ErrorIs(t, err, montygo.ErrSnapshotResumed)
+			require.ErrorIs(t, err, monterr.ErrSnapshotResumed)
 			require.EqualError(t, err, "snapshot has already been resumed")
 		})
 
 		t.Run("os handler is used by resumeAuto, not auto-dispatched", func(t *testing.T) {
 			ctx := testCtx(t)
-			session := newSession(t, b, montygo.CheckoutOptions{})
 			var names []string
-			snap := fstFunction(t)(session.FeedStart(ctx, "from pathlib import Path\nPath('/data/x').read_text()", &montygo.FeedOptions{
-				OS: func(_ context.Context, name string, _ []any, _ montygo.Kwargs) (any, error) {
+			session := newSessionRT(t, b, mustRuntime(montygo.RuntimeOptions{
+				OS: func(_ context.Context, name string, _ []any, _ host.Kwargs) (any, error) {
 					names = append(names, name)
 					return "file body", nil
 				},
-			}))
+			}), montygo.CheckoutOptions{})
+			snap := fstFunction(t)(session.FeedStart(ctx, "from pathlib import Path\nPath('/data/x').read_text()", nil))
 			require.True(t, snap.IsOSFunction)
 			require.Empty(t, names)
 			done := fstComplete(t)(snap.ResumeAuto(ctx))
@@ -177,7 +179,7 @@ func TestFeedStart(t *testing.T) {
 			{
 				session := newSession(t, b, montygo.CheckoutOptions{})
 				_, err := session.LoadSnapshot(ctx, idle, nil)
-				require.ErrorIs(t, err, montygo.ErrDumpIsIdle)
+				require.ErrorIs(t, err, monterr.ErrDumpIsIdle)
 				require.EqualError(t, err, "this dump is an idle session — use loadSession() to restore it")
 				_, err = session.FeedRun(ctx, "1 + 1", nil)
 				require.Error(t, err)
@@ -186,7 +188,7 @@ func TestFeedStart(t *testing.T) {
 			{
 				session := newSession(t, b, montygo.CheckoutOptions{})
 				err := session.LoadSession(ctx, suspended)
-				require.ErrorIs(t, err, montygo.ErrDumpIsSuspended)
+				require.ErrorIs(t, err, monterr.ErrDumpIsSuspended)
 				require.EqualError(t, err, "this dump is a suspended snapshot — use loadSnapshot() to resume it")
 				_, err = session.FeedRun(ctx, "1 + 1", nil)
 				require.Error(t, err)
@@ -202,7 +204,7 @@ func TestFeedStart(t *testing.T) {
 			_, err = session.FeedRun(ctx, "x = 1", nil)
 			require.NoError(t, err)
 			_, err = session.LoadSnapshot(ctx, blob, nil)
-			require.ErrorIs(t, err, montygo.ErrNotFresh)
+			require.ErrorIs(t, err, monterr.ErrNotFresh)
 			require.EqualError(t, err, "loadSession / loadSnapshot is only valid on a fresh session, before any feedRun / feedStart / loadSession / loadSnapshot")
 		})
 
@@ -285,8 +287,8 @@ func TestFeedStart(t *testing.T) {
 			ctx := testCtx(t)
 			session := newSession(t, b, montygo.CheckoutOptions{})
 			snap := fstFunction(t)(session.FeedStart(ctx, fstAsyncGo, &montygo.FeedOptions{
-				ExternalLookup: map[string]any{"go": func() *montygo.Future {
-					return montygo.Async(func() (any, error) { return 99, nil })
+				ExternalLookup: map[string]any{"go": func() *host.Future {
+					return host.Async(func() (any, error) { return 99, nil })
 				}},
 			}))
 			require.True(t, snap.AllowEagerAwait)
@@ -299,8 +301,8 @@ func TestFeedStart(t *testing.T) {
 			session := newSession(t, b, montygo.CheckoutOptions{})
 			code := "import asyncio\nasync def main():\n    return await asyncio.gather(go(1), go(2))\nasyncio.run(main())"
 			snap, err := session.FeedStart(ctx, code, &montygo.FeedOptions{
-				ExternalLookup: map[string]any{"go": func(n int64) *montygo.Future {
-					return montygo.Async(func() (any, error) { return n * 10, nil })
+				ExternalLookup: map[string]any{"go": func(n int64) *host.Future {
+					return host.Async(func() (any, error) { return n * 10, nil })
 				}},
 			})
 			done, _ := fstDrive(ctx, t, snap, err)
@@ -329,7 +331,7 @@ func TestFeedStart(t *testing.T) {
 			_, err := snap.ResumeAuto(ctx)
 			require.NoError(t, err)
 			_, err = snap.ResumeAuto(ctx)
-			require.ErrorIs(t, err, montygo.ErrSnapshotResumed)
+			require.ErrorIs(t, err, monterr.ErrSnapshotResumed)
 			require.EqualError(t, err, "snapshot has already been resumed")
 		})
 

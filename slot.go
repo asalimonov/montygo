@@ -2,6 +2,7 @@ package montygo
 
 import (
 	"context"
+	monterr "github.com/asalimonov/montygo/monterr"
 	"sync"
 )
 
@@ -10,15 +11,16 @@ import (
 // restored after a loss. Overlapping executions return ErrSessionBusy.
 type Slot struct {
 	p      *Pool
+	rt     *Runtime
 	opts   CheckoutOptions
 	mu     sync.Mutex
 	s      *Session
 	closed bool
 }
 
-// Slot returns a holder that always yields a usable session.
-func (p *Pool) Slot(opts CheckoutOptions) *Slot {
-	return &Slot{p: p, opts: opts}
+// Slot returns a holder that always yields a usable session of rt.
+func (p *Pool) Slot(rt *Runtime, opts CheckoutOptions) *Slot {
+	return &Slot{p: p, rt: rt, opts: opts}
 }
 
 // Session is the current session, or nil before the first use or after a loss.
@@ -43,12 +45,12 @@ func (k *Slot) State() SessionState {
 
 func (k *Slot) acquireLocked(ctx context.Context) (*Session, error) {
 	if k.closed {
-		return nil, ErrSessionClosed
+		return nil, monterr.ErrSessionClosed
 	}
 	if k.s != nil && k.s.State() != SessionClosed {
 		return k.s, nil
 	}
-	s, err := k.p.Checkout(ctx, k.opts)
+	s, err := k.p.Checkout(ctx, k.rt, k.opts)
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +71,7 @@ func (k *Slot) idle(ctx context.Context) (*Session, error) {
 	case SessionClosed:
 		return nil, s.Err()
 	}
-	return nil, ErrSessionBusy
+	return nil, monterr.ErrSessionBusy
 }
 
 // Go starts a background feed; see Session.Go.

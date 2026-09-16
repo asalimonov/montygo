@@ -1,6 +1,7 @@
 package network
 
 import (
+	"github.com/asalimonov/montygo/monterr"
 	"runtime"
 	"strings"
 	"testing"
@@ -16,7 +17,7 @@ func TestProtocol_FeedRunAndIsolation(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t)
 	ctx := testCtx(t)
-	p := s.NewPool(montygo.WebSocketOptions{})
+	p := s.NewPool(wsOptions{})
 
 	first := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	v, err := first.FeedRun(ctx, "leaked = 123\nleaked + 1", nil)
@@ -26,9 +27,9 @@ func TestProtocol_FeedRunAndIsolation(t *testing.T) {
 
 	second := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	_, err = second.FeedRun(ctx, "leaked", nil)
-	var re *montygo.RuntimeError
+	var re *monterr.RuntimeError
 	require.ErrorAs(t, err, &re)
-	require.Equal(t, "name 'leaked' is not defined", re.Display(montygo.DisplayMsg))
+	require.Equal(t, "name 'leaked' is not defined", re.Display(monterr.DisplayMsg))
 }
 
 func TestProtocol_VersionSkewIsFatal(t *testing.T) {
@@ -90,7 +91,7 @@ func TestProtocol_LargeFrameAccepted(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--max-memory-mib", "512"))
 	ctx := testCtx(t)
-	p := s.NewPool(montygo.WebSocketOptions{})
+	p := s.NewPool(wsOptions{})
 	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 
 	v, err := session.FeedRun(ctx, "len(x)", &montygo.FeedOptions{
@@ -104,11 +105,11 @@ func TestProtocol_MemoryKillIsMemoryError(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t)
 	ctx := testCtx(t)
-	p := s.NewPool(montygo.WebSocketOptions{})
+	p := s.NewPool(wsOptions{})
 	session := s.Checkout(ctx, p, montygo.CheckoutOptions{Limits: &montygo.ResourceLimits{MaxMemory: 1024}})
 
 	_, err := session.FeedRun(ctx, "# "+strings.Repeat("a", 16*1024*1024), nil)
-	var re *montygo.RuntimeError
+	var re *monterr.RuntimeError
 	require.ErrorAs(t, err, &re)
 	require.Equal(t, "MemoryError: the worker exceeded its memory limit and was terminated", re.Error())
 
@@ -127,7 +128,7 @@ func TestProtocol_RemoteDialByContainerIP(t *testing.T) {
 	ctx := testCtx(t)
 	ip, err := s.Unit.ContainerIP(ctx)
 	require.NoError(t, err)
-	p := s.NewPool(montygo.WebSocketOptions{URL: "ws://" + ip + ":8000/"})
+	p := s.NewPool(wsOptions{URL: "ws://" + ip + ":8000/"})
 	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	v, err := session.FeedRun(ctx, "6 * 7", nil)
 	require.NoError(t, err)

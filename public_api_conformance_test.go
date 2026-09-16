@@ -7,12 +7,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/monterr"
+	"github.com/asalimonov/montygo/sandbox"
 )
 
 func TestPublicAPI(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		coreARunMontyAPITests(t, b.String()+" public API", func(ctx context.Context) (*montygo.Pool, error) {
-			return openPool(ctx, b, montygo.Options{})
+			return openPool(ctx, b, montygo.PoolOptions{})
 		})
 	})
 }
@@ -41,7 +43,7 @@ func coreARunMontyAPITests(t *testing.T, name string, create func(ctx context.Co
 		var printed []string
 		coreAUsingPoolSession(t, create, func(ctx context.Context, session *montygo.Session) {
 			result, err := session.FeedRun(ctx, "print('hello')\n123", &montygo.FeedOptions{
-				Print: montygo.PrintFunc(func(stream montygo.Stream, text string) error {
+				Print: sandbox.PrintFunc(func(stream sandbox.Stream, text string) error {
 					printed = append(printed, string(stream)+":"+text)
 					return nil
 				}),
@@ -64,14 +66,14 @@ func coreAUsingPoolSession(t *testing.T, create func(ctx context.Context) (*mont
 		require.NoError(t, err)
 		pool = p
 		defer func() { require.NoError(t, pool.Close(ctx)) }()
-		s, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
+		s, err := pool.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 		require.NoError(t, err)
 		session = s
 		defer func() { require.NoError(t, session.Close(ctx)) }()
 		fn(ctx, session)
 	}()
 	_, err := session.FeedRun(ctx, "1", nil)
-	require.ErrorIs(t, err, montygo.ErrSessionClosed)
-	_, err = pool.Checkout(ctx, montygo.CheckoutOptions{})
-	require.ErrorIs(t, err, montygo.ErrPoolClosed)
+	require.ErrorIs(t, err, monterr.ErrSessionClosed)
+	_, err = pool.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
+	require.ErrorIs(t, err, monterr.ErrPoolClosed)
 }

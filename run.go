@@ -2,6 +2,7 @@ package montygo
 
 import (
 	"context"
+	sandbox "github.com/asalimonov/montygo/sandbox"
 	"maps"
 )
 
@@ -13,6 +14,11 @@ type Run struct {
 
 // Go runs FeedRun on its own goroutine and returns a handle to wait on or interrupt.
 func (s *Session) Go(ctx context.Context, code string, opts *FeedOptions) *Run {
+	if err := s.rotateIfDue(ctx); err != nil {
+		e := &execution{phase: executionFinished, done: make(chan struct{}), err: err}
+		close(e.done)
+		return &Run{s: s, exec: e}
+	}
 	e, err := s.reserveExecution(ctx)
 	if err != nil {
 		e = &execution{phase: executionFinished, done: make(chan struct{}), err: err}
@@ -60,6 +66,6 @@ func copyFeedOptions(opts *FeedOptions) *FeedOptions {
 	copy := *opts
 	copy.Inputs = maps.Clone(opts.Inputs)
 	copy.ExternalLookup = maps.Clone(opts.ExternalLookup)
-	copy.Mount = append([]*MountDir(nil), opts.Mount...)
+	copy.Mount = append([]*sandbox.MountDir(nil), opts.Mount...)
 	return &copy
 }

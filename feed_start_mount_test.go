@@ -8,18 +8,19 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/sandbox"
 )
 
 func TestFeedStartMounts(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		t.Run("mounts are re-supplied to loadSnapshot", func(t *testing.T) {
 			ctx := testCtx(t)
 			dir := t.TempDir()
 			require.NoError(t, os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hi"), 0o644))
-			mount, err := montygo.NewMountDir(montygo.MountDirOptions{HostPath: dir, VirtualPath: "/data", Mode: "read-only"})
+			mount, err := sandbox.NewMountDir(sandbox.MountDirOptions{HostPath: dir, VirtualPath: "/data", Mode: "read-only"})
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = mount.Close() })
-			mounts := []*montygo.MountDir{mount}
+			mounts := []*sandbox.MountDir{mount}
 			code := "f()\nfrom pathlib import Path\nPath('/data/hello.txt').read_text()"
 
 			first := newSession(t, b, montygo.CheckoutOptions{})

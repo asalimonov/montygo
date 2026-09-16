@@ -1,13 +1,14 @@
 # Telemetry
 
-- `montygo.Instrument` or a `montygo.Instrumentation` installs OpenTelemetry components process-wide. Pools created afterwards record into them. Supplying components opts in to recording fed code, inputs, call arguments, results, exceptions and print output.
-- Each signal fails independently: a tracer, meter or logger that panics or errors turns off its own signal only. Uninstalling drops open spans without ending them.
+- Telemetry is a pool parameter. `PoolOptions.Telemetry` names the `telemetry.Components` (tracer, meter, logger) a pool records into; supplying them opts in to recording fed code, inputs, call arguments, results, exceptions and print output. There is no process-wide installation and no global state in the library.
+- `telemetry.NewInstrumentation(config)` builds components from OpenTelemetry providers, the global providers unless replaced with `SetTracerProvider`, `SetMeterProvider` and `SetLoggerProvider`. `InstrumentationConfig` switches each signal and the whole; `Components()` returns the components of the current providers and configuration, or nil when nothing would be recorded. Flushing belongs to the providers the application owns.
+- Each signal fails independently: a tracer, meter or logger that panics or errors turns off its own signal only.
 
 ## Recorder per pool
 
-- Every pool records into one `Recorder`, resolved when the pool is created. `Options.Telemetry` and `WebSocketOptions.Telemetry` select it: nil uses the process-wide installation (`Global`) at that moment; a value with at least one component builds a recorder owned by the pool; a value with no components records nothing, whatever is installed.
-- Installing or uninstalling process-wide components after a pool exists does not affect that pool. Uninstalling closes the global recorder, so pools that resolved to it stop recording.
-- The instrumentation scope version is `BindingVersion()`.
+- Every pool records into one `Recorder`, built at `NewPool` from `PoolOptions.Telemetry`: nil, or a value with no components, records nothing; a value with at least one component builds a recorder owned by the pool.
+- Components passed to one pool never affect another. A pool records for its whole life into the components it was given.
+- The instrumentation scope name is `github.com/asalimonov/montygo` and its version is `BindingVersion()`.
 
 ## Protocol mirror
 

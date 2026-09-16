@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/monterr"
+	"github.com/asalimonov/montygo/sandbox/host"
 )
 
 const catchableScript = `x = 'before'
@@ -27,9 +29,9 @@ func TestStopPolicy(t *testing.T) {
 		require.Equal(t, "closed", montygo.SessionClosed.String())
 		require.Negative(t, montygo.KillNow.Timeout)
 		require.True(t, montygo.Stopped{}.SessionKept())
-		require.False(t, montygo.Stopped{SessionErr: montygo.ErrSessionClosed}.SessionKept())
+		require.False(t, montygo.Stopped{SessionErr: monterr.ErrSessionClosed}.SessionKept())
 	})
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		t.Run("a catchable stop lets Python clean up with host calls", func(t *testing.T) {
 			ctx := testCtx(t)
 			s := newSession(t, b, montygo.CheckoutOptions{})
@@ -62,7 +64,7 @@ func TestStopPolicy(t *testing.T) {
 			stopped, err := run.Stop(ctx)
 			require.NoError(t, err)
 			require.Equal(t, montygo.StopAborted, stopped.How)
-			var re *montygo.RuntimeError
+			var re *monterr.RuntimeError
 			require.ErrorAs(t, stopped.Err, &re)
 			require.Equal(t, "KeyboardInterrupt", re.TypeName)
 			require.True(t, stopped.SessionKept())
@@ -74,9 +76,9 @@ func TestStopPolicy(t *testing.T) {
 		t.Run("a catchable stop reaches an awaited future", func(t *testing.T) {
 			ctx := testCtx(t)
 			s := newSession(t, b, montygo.CheckoutOptions{})
-			never, _ := montygo.NewFuture()
+			never, _ := host.NewFuture()
 			started := make(chan struct{})
-			lookup := map[string]any{"pending": func() *montygo.Future { close(started); return never }}
+			lookup := map[string]any{"pending": func() *host.Future { close(started); return never }}
 			run := s.Go(ctx, "try:\n    await pending()\nexcept KeyboardInterrupt:\n    r = 'caught'\nr", &montygo.FeedOptions{ExternalLookup: lookup})
 			<-started
 			stopped, err := run.Stop(ctx, montygo.StopPolicy{Catchable: true})
@@ -89,8 +91,8 @@ func TestStopPolicy(t *testing.T) {
 
 		t.Run("a catchable stop that ignores the exception is killed at Timeout", func(t *testing.T) {
 			ctx := testCtx(t)
-			p := newPool(t, b, montygo.Options{MaxProcesses: 1})
-			s, err := p.Checkout(ctx, montygo.CheckoutOptions{Stop: montygo.StopPolicy{Catchable: true, Timeout: 150 * time.Millisecond}})
+			p := newPool(t, b, montygo.PoolOptions{MaxWorkers: 1})
+			s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{Stop: montygo.StopPolicy{Catchable: true, Timeout: 150 * time.Millisecond}})
 			require.NoError(t, err)
 			started := make(chan struct{})
 			run := s.Go(ctx, "try:\n    wait()\nexcept KeyboardInterrupt:\n    pass\nwhile True:\n    pass", &montygo.FeedOptions{ExternalLookup: blockingLookup(started)})
@@ -99,7 +101,7 @@ func TestStopPolicy(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, montygo.StopKilled, stopped.How)
 			require.False(t, stopped.SessionKept())
-			var killed *montygo.SessionKilledError
+			var killed *monterr.SessionKilledError
 			require.ErrorAs(t, stopped.Err, &killed)
 		})
 
@@ -131,8 +133,8 @@ func TestStopPolicy(t *testing.T) {
 
 		t.Run("KillNow ends the run without a request", func(t *testing.T) {
 			ctx := testCtx(t)
-			p := newPool(t, b, montygo.Options{MaxProcesses: 1})
-			s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+			p := newPool(t, b, montygo.PoolOptions{MaxWorkers: 1})
+			s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 			require.NoError(t, err)
 			started := make(chan struct{})
 			run := s.Go(ctx, "wait()", &montygo.FeedOptions{ExternalLookup: blockingLookup(started)})
@@ -140,14 +142,14 @@ func TestStopPolicy(t *testing.T) {
 			stopped, err := run.Stop(ctx, montygo.KillNow)
 			require.NoError(t, err)
 			require.Equal(t, montygo.StopKilled, stopped.How)
-			require.ErrorIs(t, stopped.SessionErr, montygo.ErrSessionLost)
+			require.ErrorIs(t, stopped.SessionErr, monterr.ErrSessionLost)
 			require.Equal(t, montygo.SessionClosed, s.State())
 		})
 
 		t.Run("a second Stop joins the first and can only shorten it", func(t *testing.T) {
 			ctx := testCtx(t)
-			p := newPool(t, b, montygo.Options{MaxProcesses: 1})
-			s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+			p := newPool(t, b, montygo.PoolOptions{MaxWorkers: 1})
+			s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 			require.NoError(t, err)
 			started := make(chan struct{})
 			run := s.Go(ctx, "wait()", &montygo.FeedOptions{ExternalLookup: map[string]any{"wait": func() int { close(started); time.Sleep(400 * time.Millisecond); return 1 }}})
@@ -166,15 +168,15 @@ func TestStopPolicy(t *testing.T) {
 
 		t.Run("policy levels resolve pool, checkout and call", func(t *testing.T) {
 			ctx := testCtx(t)
-			p := newPool(t, b, montygo.Options{MaxProcesses: 1, Stop: montygo.StopPolicy{Reason: montygo.Raise("TimeoutError", "pool")}})
+			p := newPool(t, b, montygo.PoolOptions{MaxWorkers: 1, Stop: montygo.StopPolicy{Reason: monterr.Raise("TimeoutError", "pool")}})
 			started := make(chan struct{})
-			s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+			s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 			require.NoError(t, err)
 			run := s.Go(ctx, "wait()", &montygo.FeedOptions{ExternalLookup: blockingLookup(started)})
 			<-started
 			stopped, err := run.Stop(ctx)
 			require.NoError(t, err)
-			var re *montygo.RuntimeError
+			var re *monterr.RuntimeError
 			require.ErrorAs(t, stopped.Err, &re)
 			require.Equal(t, "TimeoutError", re.TypeName)
 			require.Equal(t, "pool", re.Message)
@@ -182,13 +184,13 @@ func TestStopPolicy(t *testing.T) {
 			started = make(chan struct{})
 			run = s.Go(ctx, "wait()", &montygo.FeedOptions{ExternalLookup: blockingLookup(started)})
 			<-started
-			stopped, err = run.Stop(ctx, montygo.StopPolicy{Reason: montygo.Raise("ValueError", "call")})
+			stopped, err = run.Stop(ctx, montygo.StopPolicy{Reason: monterr.Raise("ValueError", "call")})
 			require.NoError(t, err)
 			require.ErrorAs(t, stopped.Err, &re)
 			require.Equal(t, "ValueError", re.TypeName)
 			require.NoError(t, s.Close(ctx))
 
-			s, err = p.Checkout(ctx, montygo.CheckoutOptions{Stop: montygo.StopPolicy{Reason: montygo.Raise("RuntimeError", "checkout")}})
+			s, err = p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{Stop: montygo.StopPolicy{Reason: monterr.Raise("RuntimeError", "checkout")}})
 			require.NoError(t, err)
 			defer s.Close(ctx)
 			started = make(chan struct{})
@@ -205,7 +207,7 @@ func TestStopPolicy(t *testing.T) {
 			s := newSession(t, b, montygo.CheckoutOptions{})
 			run := s.Go(ctx, "1", nil)
 			_, err := run.Stop(ctx, montygo.StopPolicy{Drain: -time.Second})
-			var oe *montygo.OptionError
+			var oe *monterr.OptionError
 			require.ErrorAs(t, err, &oe)
 			_, err = run.Stop(ctx, montygo.StopPolicy{}, montygo.StopPolicy{})
 			require.ErrorAs(t, err, &oe)
@@ -226,7 +228,7 @@ func TestStopPolicy(t *testing.T) {
 			lookup := blockingLookup(started)
 			go func() { <-started; cancel() }()
 			_, err := s.FeedRun(feed, "wait()", &montygo.FeedOptions{ExternalLookup: lookup})
-			var re *montygo.RuntimeError
+			var re *monterr.RuntimeError
 			require.ErrorAs(t, err, &re, "%v", err)
 			require.Equal(t, "KeyboardInterrupt", re.TypeName)
 			require.Equal(t, montygo.SessionIdle, s.State())
@@ -238,33 +240,33 @@ func TestStopPolicy(t *testing.T) {
 }
 
 // p_checkout_invalid checks out with an invalid stop policy.
-func p_checkout_invalid(ctx context.Context, b montygo.Backend) (*montygo.Session, error) {
-	p, err := openPool(ctx, b, montygo.Options{MaxProcesses: 1, MinProcesses: -1})
+func p_checkout_invalid(ctx context.Context, b backend) (*montygo.Session, error) {
+	p, err := openPool(ctx, b, montygo.PoolOptions{MaxWorkers: 1, MinWorkers: -1})
 	if err != nil {
 		return nil, err
 	}
 	defer p.Close(ctx)
-	return p.Checkout(ctx, montygo.CheckoutOptions{Stop: montygo.StopPolicy{Join: -time.Second}})
+	return p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{Stop: montygo.StopPolicy{Join: -time.Second}})
 }
 
 func TestSessionClose(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		t.Run("Close stops a running feed first", func(t *testing.T) {
 			ctx := testCtx(t)
-			p := newPool(t, b, montygo.Options{MaxProcesses: 1})
-			s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+			p := newPool(t, b, montygo.PoolOptions{MaxWorkers: 1})
+			s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 			require.NoError(t, err)
 			started := make(chan struct{})
 			run := s.Go(ctx, "wait()", &montygo.FeedOptions{ExternalLookup: blockingLookup(started)})
 			<-started
 			require.NoError(t, s.Close(ctx))
 			_, err = run.Wait()
-			var re *montygo.RuntimeError
+			var re *monterr.RuntimeError
 			require.ErrorAs(t, err, &re)
 			require.Equal(t, "KeyboardInterrupt", re.TypeName)
-			require.ErrorIs(t, s.Err(), montygo.ErrSessionClosed)
+			require.ErrorIs(t, s.Err(), monterr.ErrSessionClosed)
 			require.Equal(t, montygo.SessionClosed, s.State())
-			fresh, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+			fresh, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 			require.NoError(t, err)
 			defer fresh.Close(ctx)
 			v, err := fresh.FeedRun(ctx, "2", nil)
@@ -274,8 +276,8 @@ func TestSessionClose(t *testing.T) {
 
 		t.Run("Close continues after the caller stops waiting", func(t *testing.T) {
 			ctx := testCtx(t)
-			p := newPool(t, b, montygo.Options{MaxProcesses: 1})
-			s, err := p.Checkout(ctx, montygo.CheckoutOptions{Stop: montygo.StopPolicy{Timeout: 200 * time.Millisecond, Join: 200 * time.Millisecond}})
+			p := newPool(t, b, montygo.PoolOptions{MaxWorkers: 1})
+			s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{Stop: montygo.StopPolicy{Timeout: 200 * time.Millisecond, Join: 200 * time.Millisecond}})
 			require.NoError(t, err)
 			run := s.Go(ctx, "while True:\n    pass", nil)
 			time.Sleep(50 * time.Millisecond)
@@ -284,7 +286,7 @@ func TestSessionClose(t *testing.T) {
 			cancel()
 			require.ErrorIs(t, err, context.DeadlineExceeded)
 			_, err = run.WaitContext(ctx)
-			require.ErrorIs(t, err, montygo.ErrSessionLost)
+			require.ErrorIs(t, err, monterr.ErrSessionLost)
 			<-s.Done()
 			require.NoError(t, s.Close(ctx))
 		})
@@ -313,15 +315,15 @@ func TestSessionClose(t *testing.T) {
 }
 
 func TestPoolRunAndSlot(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		t.Run("Run checks out, feeds once and closes", func(t *testing.T) {
 			ctx := testCtx(t)
-			p := newPool(t, b, montygo.Options{MaxProcesses: 1})
-			v, err := p.Run(ctx, "x * 2", &montygo.RunOptions{FeedOptions: montygo.FeedOptions{Inputs: map[string]any{"x": 21}}})
+			p := newPool(t, b, montygo.PoolOptions{MaxWorkers: 1})
+			v, err := p.Run(ctx, defaultRuntime, "x * 2", &montygo.RunOptions{FeedOptions: montygo.FeedOptions{Inputs: map[string]any{"x": 21}}})
 			require.NoError(t, err)
 			require.Equal(t, int64(42), v)
-			_, err = p.Run(ctx, "1 / 0", nil)
-			var re *montygo.RuntimeError
+			_, err = p.Run(ctx, defaultRuntime, "1 / 0", nil)
+			var re *monterr.RuntimeError
 			require.ErrorAs(t, err, &re)
 			require.Equal(t, "ZeroDivisionError", re.TypeName)
 			require.Eventually(t, func() bool { return p.Stats().Active == 0 }, 5*time.Second, 10*time.Millisecond)
@@ -329,22 +331,22 @@ func TestPoolRunAndSlot(t *testing.T) {
 
 		t.Run("Shutdown drains before stopping", func(t *testing.T) {
 			ctx := testCtx(t)
-			p, err := openPool(ctx, b, montygo.Options{MaxProcesses: 1})
+			p, err := openPool(ctx, b, montygo.PoolOptions{MaxWorkers: 1})
 			require.NoError(t, err)
-			s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+			s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 			require.NoError(t, err)
 			run := s.Go(ctx, "sum(range(100000))", nil)
 			require.NoError(t, p.Shutdown(ctx, montygo.StopPolicy{Drain: 10 * time.Second}))
 			v, err := run.Wait()
 			require.NoError(t, err)
 			require.Equal(t, int64(4999950000), v)
-			require.ErrorIs(t, s.Err(), montygo.ErrSessionClosed)
+			require.ErrorIs(t, s.Err(), monterr.ErrSessionClosed)
 		})
 
 		t.Run("Slot re-checks out after a loss and rejects overlap", func(t *testing.T) {
 			ctx := testCtx(t)
-			p := newPool(t, b, montygo.Options{MaxProcesses: 1})
-			slot := p.Slot(montygo.CheckoutOptions{})
+			p := newPool(t, b, montygo.PoolOptions{MaxWorkers: 1})
+			slot := p.Slot(defaultRuntime, montygo.CheckoutOptions{})
 			require.Nil(t, slot.Session())
 			require.Equal(t, montygo.SessionIdle, slot.State())
 			v, err := slot.FeedRun(ctx, "x = 1\nx", nil)
@@ -359,23 +361,23 @@ func TestPoolRunAndSlot(t *testing.T) {
 			<-started
 			require.Equal(t, montygo.SessionRunning, slot.State())
 			_, err = slot.Go(ctx, "1", nil)
-			require.ErrorIs(t, err, montygo.ErrSessionBusy)
+			require.ErrorIs(t, err, monterr.ErrSessionBusy)
 			stopped, err := slot.Stop(ctx, montygo.KillNow)
 			require.NoError(t, err)
 			require.Equal(t, montygo.StopKilled, stopped.How)
 			_, err = run.Wait()
-			require.ErrorIs(t, err, montygo.ErrSessionLost)
+			require.ErrorIs(t, err, monterr.ErrSessionLost)
 			require.Equal(t, montygo.SessionIdle, slot.State())
 
 			_, err = slot.FeedRun(ctx, "x", nil)
-			require.ErrorAs(t, err, new(*montygo.RuntimeError), "sandbox state is not restored")
+			require.ErrorAs(t, err, new(*monterr.RuntimeError), "sandbox state is not restored")
 			require.NotSame(t, first, slot.Session())
 			require.NoError(t, slot.Close(ctx))
 			require.NoError(t, slot.Close(ctx))
 			require.Equal(t, montygo.SessionClosed, slot.State())
 			_, err = slot.Go(ctx, "1", nil)
-			require.ErrorIs(t, err, montygo.ErrSessionClosed)
-			require.True(t, errors.Is(err, montygo.ErrSessionClosed))
+			require.ErrorIs(t, err, monterr.ErrSessionClosed)
+			require.True(t, errors.Is(err, monterr.ErrSessionClosed))
 		})
 	})
 }

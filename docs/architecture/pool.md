@@ -2,16 +2,17 @@
 
 ## Pool
 
-- `MinProcesses` workers are spawned at creation (default 1); `MaxProcesses` caps live workers.
+- `MinWorkers` workers are spawned at creation (default 1); `MaxWorkers` caps live workers (default `runtime.NumCPU()`). Remote pools prewarm nothing.
 - Acquiring pops the most recently idle worker, skipping dead ones; otherwise it spawns while under the cap, otherwise it waits (bounded by `CheckoutTimeout`).
 - A finished checkout sends `Reset`. A worker that answers `Ok` returns to the idle list unless `MaxCheckoutsPerWorker` is reached.
-- WebSocket workers are single-use: no prewarming, no `Reset`, a close frame on finish.
+- Remote workers are single-use: no prewarming, no `Reset`, a close frame on finish.
+- A single-use pool can also `Reserve` capacity without a worker and `Bind` one to it later, so a failed dial is retried without queuing for capacity again. `Checkout.Handoff` turns a live checkout back into a reservation: it closes the connection but keeps the capacity, the session budget and `cwdSet`, which is how a session rotation replaces its worker. A rotation MAY hold one worker above `MaxWorkers` while the old connection retires. See `supervisor.md`.
 - `Close` sends `Shutdown` to idle workers and kills any that do not exit within 500 ms. Checked-out workers finish with their sessions.
 
 ### Accounting
 
-- Every worker is in one of four states, reported by `Stats()`: `Starting` (spawn in flight), `Active` (checked out), `Idle`, `Retiring` (handed to a reaper, not yet exited). All four count toward `MaxProcesses`, so a waiter proceeds only once a retiring worker has exited.
-- Retirement is asynchronous. Jobs contain immutable worker references, not mutable checkout slots. The queue has MaxProcesses capacity and at most 8 reapers. A graceful job sends Shutdown and waits 500 ms before killing. Reapers MUST keep Retiring capacity charged until Wait observes exit; repeated 1 s timeouts do not free capacity.
+- Every worker is in one of four states, reported by `Stats()`: `Starting` (spawn in flight), `Active` (checked out), `Idle`, `Retiring` (handed to a reaper, not yet exited). All four count toward `MaxWorkers`, so a waiter proceeds only once a retiring worker has exited.
+- Retirement is asynchronous. Jobs contain immutable worker references, not mutable checkout slots. The queue has `MaxWorkers` capacity and at most 8 reapers. A graceful job sends Shutdown and waits 500 ms before killing. Reapers MUST keep Retiring capacity charged until Wait observes exit; repeated 1 s timeouts do not free capacity.
 - A checkout lease arbitrates normal release versus termination exactly once under its own short mutex. `Terminate` works while the protocol mutex is held by Print or mount servicing. A stop's kill and `Close(ctx, KillNow)` kill both local and remote workers immediately; ordinary remote abandonment retains its graceful close-frame path. A stale checkout MUST NOT kill a normally released worker reused by another session.
 - Observer lifetime is reference-counted across the full root operation and each turn. Requested closure runs once, outside locks, after active callbacks return. Accounting retirement MUST NOT wait for those callbacks.
 - Close moves idle workers to Retiring and waits within ctx for their observed exits. It MUST NOT remove them from live accounting at dispatch time.

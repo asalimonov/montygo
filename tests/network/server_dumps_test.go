@@ -12,7 +12,7 @@ import (
 
 func dumpSession(t *testing.T, ctx context.Context, s *TestServer, code string) []byte {
 	t.Helper()
-	p := s.NewPool(montygo.WebSocketOptions{})
+	p := s.NewPool(wsOptions{})
 	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	_, err := session.FeedRun(ctx, code, nil)
 	require.NoError(t, err)
@@ -24,7 +24,7 @@ func dumpSession(t *testing.T, ctx context.Context, s *TestServer, code string) 
 
 func loadInto(t *testing.T, ctx context.Context, s *TestServer, state []byte) (*montygo.Session, error) {
 	t.Helper()
-	p := s.NewPool(montygo.WebSocketOptions{})
+	p := s.NewPool(wsOptions{})
 	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	return session, session.LoadSession(ctx, state)
 }
@@ -64,10 +64,10 @@ func TestDumps_LocalWasmDumpRejected(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t)
 	ctx := testCtx(t)
-	local, err := montygo.New(ctx, montygo.Options{Backend: montygo.BackendWasm, MaxProcesses: 1})
+	local, err := montygo.NewPool(ctx, montygo.PoolOptions{Workers: montygo.Wasm(montygo.WasmOptions{}), MaxWorkers: 1})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = local.Close(context.Background()) })
-	session, err := local.Checkout(ctx, montygo.CheckoutOptions{})
+	session, err := local.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = session.Close(context.Background()) })
 	_, err = session.FeedRun(ctx, "x = 1", nil)

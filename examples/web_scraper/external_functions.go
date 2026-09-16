@@ -5,6 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/asalimonov/montygo/monterr"
+	"github.com/asalimonov/montygo/sandbox"
+	"github.com/asalimonov/montygo/sandbox/host"
 	"slices"
 	"strings"
 	"time"
@@ -17,7 +20,6 @@ import (
 	"github.com/chromedp/chromedp/kb"
 	"golang.org/x/net/html"
 
-	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/examples/internal/pyargs"
 )
 
@@ -33,24 +35,24 @@ type Page struct {
 
 var pageMethods = []string{"go_to", "click", "fill", "select_option", "check", "press", "wait_for_selector", "screenshot", "evaluate", "get_text", "get_attribute"}
 
-func (p *Page) instance() (*montygo.ClassInstance, error) {
-	return montygo.NewClassInstance(p, montygo.ClassInstanceOptions{
-		EagerAttrs:     montygo.Names("url", "title", "html", "id"),
-		AllowedMethods: montygo.Names(pageMethods...),
+func (p *Page) instance() (*host.ClassInstance, error) {
+	return host.NewClassInstance(p, host.ClassInstanceOptions{
+		EagerAttrs:     host.Names("url", "title", "html", "id"),
+		AllowedMethods: host.Names(pageMethods...),
 	})
 }
 
-func (p *Page) asDict() *montygo.Dict {
-	return montygo.NewDict(
-		montygo.Pair{Key: "url", Value: p.URL},
-		montygo.Pair{Key: "title", Value: p.Title},
-		montygo.Pair{Key: "html", Value: p.HTML},
-		montygo.Pair{Key: "id", Value: p.ID},
+func (p *Page) asDict() *sandbox.Dict {
+	return sandbox.NewDict(
+		sandbox.Pair{Key: "url", Value: p.URL},
+		sandbox.Pair{Key: "title", Value: p.Title},
+		sandbox.Pair{Key: "html", Value: p.HTML},
+		sandbox.Pair{Key: "id", Value: p.ID},
 	)
 }
 
-// CallMethod implements montygo.MethodProvider; every method is a coroutine.
-func (p *Page) CallMethod(_ context.Context, name string, args []any, kwargs montygo.Kwargs) (any, error) {
+// CallMethod implements host.MethodProvider; every method is a coroutine.
+func (p *Page) CallMethod(_ context.Context, name string, args []any, kwargs host.Kwargs) (any, error) {
 	switch name {
 	case "go_to":
 		bound, err := pyargs.Bind("go_to", args, kwargs, pyargs.Required("url"), pyargs.Optional("wait_until", "networkidle"))
@@ -219,11 +221,11 @@ func (p *Page) CallMethod(_ context.Context, name string, args []any, kwargs mon
 			return value, nil
 		}), nil
 	}
-	return nil, montygo.ErrAttrNotExposed
+	return nil, host.ErrAttrNotExposed
 }
 
-func (p *Page) async(timeout time.Duration, fn func(ctx context.Context) (any, error)) *montygo.Future {
-	return montygo.Async(func() (any, error) {
+func (p *Page) async(timeout time.Duration, fn func(ctx context.Context) (any, error)) *host.Future {
+	return host.Async(func() (any, error) {
 		ctx, cancel := context.WithTimeout(p.ctx, timeout)
 		defer cancel()
 		v, err := fn(ctx)
@@ -234,7 +236,7 @@ func (p *Page) async(timeout time.Duration, fn func(ctx context.Context) (any, e
 	})
 }
 
-func (p *Page) action(actions ...chromedp.Action) *montygo.Future {
+func (p *Page) action(actions ...chromedp.Action) *host.Future {
 	return p.async(defaultTimeout, func(ctx context.Context) (any, error) {
 		if err := chromedp.Run(ctx, actions...); err != nil {
 			return nil, err
@@ -297,7 +299,7 @@ func keyString(key string) string {
 	return key
 }
 
-func oneString(fn string, args []any, kwargs montygo.Kwargs, name string) (string, error) {
+func oneString(fn string, args []any, kwargs host.Kwargs, name string) (string, error) {
 	bound, err := pyargs.Bind(fn, args, kwargs, pyargs.Required(name))
 	if err != nil {
 		return "", err
@@ -305,7 +307,7 @@ func oneString(fn string, args []any, kwargs montygo.Kwargs, name string) (strin
 	return pyargs.String(name, bound[0])
 }
 
-func twoStrings(fn string, args []any, kwargs montygo.Kwargs, first, second string) (string, string, error) {
+func twoStrings(fn string, args []any, kwargs host.Kwargs, first, second string) (string, string, error) {
 	bound, err := pyargs.Bind(fn, args, kwargs, pyargs.Required(first), pyargs.Required(second))
 	if err != nil {
 		return "", "", err
@@ -343,7 +345,7 @@ func decodeJSONValue(dec *json.Decoder) (any, error) {
 			_, err := dec.Token()
 			return items, err
 		}
-		d := montygo.NewDict()
+		d := sandbox.NewDict()
 		for dec.More() {
 			key, err := dec.Token()
 			if err != nil {
@@ -370,11 +372,11 @@ func pyStr(v any) string {
 	if s, ok := v.(string); ok {
 		return s
 	}
-	return montygo.Repr(v)
+	return sandbox.Repr(v)
 }
 
 // beautifulSoup parses html and returns the document as a Tag.
-func beautifulSoup(_ context.Context, args []any, kwargs montygo.Kwargs) (any, error) {
+func beautifulSoup(_ context.Context, args []any, kwargs host.Kwargs) (any, error) {
 	markup, err := oneString("beautiful_soup", args, kwargs, "html")
 	if err != nil {
 		return nil, err
@@ -389,7 +391,7 @@ func beautifulSoup(_ context.Context, args []any, kwargs montygo.Kwargs) (any, e
 // Tag mirrors a BeautifulSoup Tag over a parsed goquery node.
 type Tag struct {
 	Name        string        `monty:"name"`
-	Attrs       *montygo.Dict `monty:"attrs"`
+	Attrs       *sandbox.Dict `monty:"attrs"`
 	StringValue *string       `monty:"string"`
 	Text        string        `monty:"text"`
 	HTML        string        `monty:"html"`
@@ -415,7 +417,7 @@ func isMultiValued(tagName, attr string) bool {
 }
 
 func newTag(n *html.Node) (*Tag, error) {
-	t := &Tag{Name: "[document]", Attrs: montygo.NewDict(), node: n}
+	t := &Tag{Name: "[document]", Attrs: sandbox.NewDict(), node: n}
 	if n.Type == html.ElementNode {
 		t.Name = n.Data
 		for _, a := range n.Attr {
@@ -444,7 +446,7 @@ func newTag(n *html.Node) (*Tag, error) {
 	return t, nil
 }
 
-func wrapTag(n *html.Node) (*montygo.ClassInstance, error) {
+func wrapTag(n *html.Node) (*host.ClassInstance, error) {
 	t, err := newTag(n)
 	if err != nil {
 		return nil, err
@@ -464,10 +466,10 @@ func wrapTags(nodes []*html.Node) ([]any, error) {
 	return out, nil
 }
 
-func (t *Tag) instance() (*montygo.ClassInstance, error) {
-	return montygo.NewClassInstance(t, montygo.ClassInstanceOptions{
-		EagerAttrs:     montygo.Names("name", "attrs", "string", "text", "html"),
-		AllowedMethods: montygo.Names("find", "find_all", "select", "select_one", "get", "get_text", "children"),
+func (t *Tag) instance() (*host.ClassInstance, error) {
+	return host.NewClassInstance(t, host.ClassInstanceOptions{
+		EagerAttrs:     host.Names("name", "attrs", "string", "text", "html"),
+		AllowedMethods: host.Names("find", "find_all", "select", "select_one", "get", "get_text", "children"),
 	})
 }
 
@@ -475,22 +477,22 @@ func (t *Tag) selection() *goquery.Selection {
 	return goquery.NewDocumentFromNode(t.node).Selection
 }
 
-func (t *Tag) asDict() *montygo.Dict {
+func (t *Tag) asDict() *sandbox.Dict {
 	var s any
 	if t.StringValue != nil {
 		s = *t.StringValue
 	}
-	return montygo.NewDict(
-		montygo.Pair{Key: "name", Value: t.Name},
-		montygo.Pair{Key: "attrs", Value: t.Attrs},
-		montygo.Pair{Key: "string", Value: s},
-		montygo.Pair{Key: "text", Value: t.Text},
-		montygo.Pair{Key: "html", Value: t.HTML},
+	return sandbox.NewDict(
+		sandbox.Pair{Key: "name", Value: t.Name},
+		sandbox.Pair{Key: "attrs", Value: t.Attrs},
+		sandbox.Pair{Key: "string", Value: s},
+		sandbox.Pair{Key: "text", Value: t.Text},
+		sandbox.Pair{Key: "html", Value: t.HTML},
 	)
 }
 
-// CallMethod implements montygo.MethodProvider.
-func (t *Tag) CallMethod(_ context.Context, name string, args []any, kwargs montygo.Kwargs) (any, error) {
+// CallMethod implements host.MethodProvider.
+func (t *Tag) CallMethod(_ context.Context, name string, args []any, kwargs host.Kwargs) (any, error) {
 	switch name {
 	case "find", "find_all":
 		params := []pyargs.Param{pyargs.Optional("name", nil), pyargs.Optional("attrs", nil), pyargs.Optional("string", nil)}
@@ -528,7 +530,7 @@ func (t *Tag) CallMethod(_ context.Context, name string, args []any, kwargs mont
 		}
 		matcher, err := cascadia.Compile(selector)
 		if err != nil {
-			return nil, montygo.Raise("ValueError", fmt.Sprintf("Malformed CSS selector %q: %v", selector, err))
+			return nil, monterr.Raise("ValueError", fmt.Sprintf("Malformed CSS selector %q: %v", selector, err))
 		}
 		nodes := t.selection().FindMatcher(matcher).Nodes
 		if name == "select" {
@@ -586,7 +588,7 @@ func (t *Tag) CallMethod(_ context.Context, name string, args []any, kwargs mont
 		}
 		return out, nil
 	}
-	return nil, montygo.ErrAttrNotExposed
+	return nil, host.ErrAttrNotExposed
 }
 
 func (t *Tag) findAll(s *strainer, limit int) []*html.Node {
@@ -631,37 +633,37 @@ func newStrainer(name, attrs, text any) (*strainer, error) {
 		for _, item := range n {
 			str, ok := item.(string)
 			if !ok {
-				return nil, montygo.Raise("TypeError", "find_all() name list items must be str")
+				return nil, monterr.Raise("TypeError", "find_all() name list items must be str")
 			}
 			s.names = append(s.names, str)
 		}
 	default:
-		return nil, montygo.Raise("TypeError", fmt.Sprintf("name must be str, list[str] or None, not %s", montygo.Repr(name)))
+		return nil, monterr.Raise("TypeError", fmt.Sprintf("name must be str, list[str] or None, not %s", sandbox.Repr(name)))
 	}
 	switch a := attrs.(type) {
 	case nil:
 	case string:
 		s.attrs = append(s.attrs, attrFilter{key: "class", value: a})
-	case *montygo.Dict:
+	case *sandbox.Dict:
 		for _, p := range a.Pairs() {
 			key, ok := p.Key.(string)
 			if !ok {
-				return nil, montygo.Raise("TypeError", "attrs keys must be str")
+				return nil, monterr.Raise("TypeError", "attrs keys must be str")
 			}
 			switch p.Value.(type) {
 			case nil, bool, string:
 			default:
-				return nil, montygo.Raise("TypeError", fmt.Sprintf("attrs[%s] must be str, bool or None", montygo.Repr(key)))
+				return nil, monterr.Raise("TypeError", fmt.Sprintf("attrs[%s] must be str, bool or None", sandbox.Repr(key)))
 			}
 			s.attrs = append(s.attrs, attrFilter{key: key, value: p.Value})
 		}
 	default:
-		return nil, montygo.Raise("TypeError", "attrs must be dict[str, str] or None")
+		return nil, monterr.Raise("TypeError", "attrs must be dict[str, str] or None")
 	}
 	if text != nil {
 		str, ok := text.(string)
 		if !ok {
-			return nil, montygo.Raise("TypeError", "string must be str or None")
+			return nil, monterr.Raise("TypeError", "string must be str or None")
 		}
 		s.text = &str
 	}

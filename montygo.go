@@ -1,6 +1,11 @@
 // Package montygo runs untrusted Python in Monty sandbox workers: crash-isolated
 // `monty subprocess` children, an embedded WebAssembly worker, or a remote
-// worker over WebSocket.
+// worker over WebSocket to a supervised monty-server.
+//
+// A Runtime is the sandbox configuration and its host extensions; a Pool
+// manages the workers; Pool.Checkout joins the two into a Session. The value
+// model lives in sandbox, host objects in sandbox/host, the error contract in
+// monterr and the OpenTelemetry surface in telemetry.
 package montygo
 
 const (

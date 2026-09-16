@@ -6,6 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/asalimonov/montygo/monterr"
+	"github.com/asalimonov/montygo/sandbox"
+	"github.com/asalimonov/montygo/sandbox/host"
 	"io"
 	"os"
 
@@ -23,7 +26,7 @@ func main() {
 func echo(value any) any { return value }
 
 func run(ctx context.Context, out io.Writer) error {
-	pool, err := montygo.New(ctx, montyenv.PoolOptions())
+	pool, err := montygo.NewPool(ctx, montyenv.PoolOptions())
 	if err != nil {
 		return err
 	}
@@ -37,8 +40,12 @@ func run(ctx context.Context, out io.Writer) error {
 	return nil
 }
 
-func roundTrip(ctx context.Context, pool *montygo.Pool, out io.Writer) (*montygo.ClassProxy, error) {
-	session, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
+func roundTrip(ctx context.Context, pool *montygo.Pool, out io.Writer) (*host.ClassProxy, error) {
+	rt, err := montygo.NewRuntime(montygo.RuntimeOptions{})
+	if err != nil {
+		return nil, err
+	}
+	session, err := pool.Checkout(ctx, rt, montygo.CheckoutOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +58,7 @@ func roundTrip(ctx context.Context, pool *montygo.Pool, out io.Writer) (*montygo
 	if err != nil {
 		return nil, err
 	}
-	proxy, ok := result.(*montygo.ClassProxy)
+	proxy, ok := result.(*host.ClassProxy)
 	if !ok {
 		return nil, fmt.Errorf("assertion failed: expected a ClassProxy, got %T", result)
 	}
@@ -62,7 +69,7 @@ func roundTrip(ctx context.Context, pool *montygo.Pool, out io.Writer) (*montygo
 		return nil, err
 	}
 	if result != true {
-		return nil, fmt.Errorf("assertion failed: input round-trip returned %s", montygo.Repr(result))
+		return nil, fmt.Errorf("assertion failed: input round-trip returned %s", sandbox.Repr(result))
 	}
 
 	result, err = session.FeedRun(ctx, "echo(counter) is counter", &montygo.FeedOptions{ExternalLookup: map[string]any{"echo": echo}})
@@ -70,14 +77,14 @@ func roundTrip(ctx context.Context, pool *montygo.Pool, out io.Writer) (*montygo
 		return nil, err
 	}
 	if result != true {
-		return nil, fmt.Errorf("assertion failed: external-function round-trip returned %s", montygo.Repr(result))
+		return nil, fmt.Errorf("assertion failed: external-function round-trip returned %s", sandbox.Repr(result))
 	}
 
 	if _, err := session.FeedRun(ctx, "counter = back = None", nil); err != nil {
 		return nil, err
 	}
 	_, err = session.FeedRun(ctx, "back", &montygo.FeedOptions{Inputs: map[string]any{"back": proxy}})
-	var exc *montygo.RuntimeError
+	var exc *monterr.RuntimeError
 	switch {
 	case errors.As(err, &exc):
 		fmt.Fprintf(out, "freed object rejected: %v\n", exc)

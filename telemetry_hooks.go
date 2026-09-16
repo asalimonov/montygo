@@ -7,29 +7,30 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/asalimonov/montygo/internal/pool"
-	"github.com/asalimonov/montygo/internal/telemetry"
+	itel "github.com/asalimonov/montygo/internal/telemetry"
+	"github.com/asalimonov/montygo/telemetry"
 )
 
 // resolveRecorder returns the recorder a pool records into: its own components,
 // or the process-wide installation at creation time.
-func resolveRecorder(c *TelemetryComponents) *telemetry.Recorder {
+func resolveRecorder(c *telemetry.Components) *itel.Recorder {
 	if c == nil {
-		return telemetry.Global()
+		return itel.Global()
 	}
 	if c.Tracer == nil && c.Meter == nil && c.Logger == nil {
 		return nil
 	}
-	return telemetry.NewRecorder(telemetry.Components(*c))
+	return itel.NewRecorder(itel.Components(*c))
 }
 
-func poolMetrics(rec *telemetry.Recorder) pool.Metrics {
+func poolMetrics(rec *itel.Recorder) pool.Metrics {
 	if rec.Metering() {
-		return telemetry.NewPoolMetrics(rec)
+		return itel.NewPoolMetrics(rec)
 	}
 	return nil
 }
 
-func traceContextHeaders(rec *telemetry.Recorder, ctx context.Context) [][2]string {
+func traceContextHeaders(rec *itel.Recorder, ctx context.Context) [][2]string {
 	if !rec.Tracing() || !trace.SpanContextFromContext(ctx).IsValid() {
 		return nil
 	}
@@ -40,14 +41,4 @@ func traceContextHeaders(rec *telemetry.Recorder, ctx context.Context) [][2]stri
 		headers = append(headers, [2]string{"tracestate", state})
 	}
 	return headers
-}
-
-func (p *Pool) observe(parent context.Context) func(pid int, hasPID bool) pool.Observer {
-	rec, metered := p.rec, p.metered
-	return func(pid int, hasPID bool) pool.Observer {
-		if o := telemetry.NewCheckout(rec, parent, pid, hasPID, metered); o != nil {
-			return o
-		}
-		return nil
-	}
 }

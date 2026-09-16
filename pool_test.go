@@ -14,11 +14,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/monterr"
+	"github.com/asalimonov/montygo/sandbox/host"
 )
 
-func plNativeOnly(t *testing.T, b montygo.Backend, reason string) {
+func plNativeOnly(t *testing.T, b backend, reason string) {
 	t.Helper()
-	if b != montygo.BackendNative {
+	if b != backendNative {
 		t.Skipf("%s backend: %s", b, reason)
 	}
 }
@@ -40,7 +42,7 @@ func plKill(t *testing.T, pid int) {
 
 func plCheckout(t *testing.T, p *montygo.Pool, opts montygo.CheckoutOptions) *montygo.Session {
 	t.Helper()
-	s, err := p.Checkout(testCtx(t), opts)
+	s, err := p.Checkout(testCtx(t), defaultRuntime, opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close(context.Background()) })
 	return s
@@ -60,51 +62,51 @@ func plClose(t *testing.T, s *montygo.Session) {
 
 // plRequireMemoryError accepts the interpreter's own MemoryError text on the
 // websocket backend, because the server's memory ceiling fires before the allocator abort.
-func plRequireMemoryError(t *testing.T, b montygo.Backend, err error) {
+func plRequireMemoryError(t *testing.T, b backend, err error) {
 	t.Helper()
-	var rt *montygo.RuntimeError
+	var rt *monterr.RuntimeError
 	require.ErrorAs(t, err, &rt)
 	require.Equal(t, "MemoryError", rt.Exception().TypeName)
-	if b != montygo.BackendWebSocket {
+	if !remoteBackend(b) {
 		require.Equal(t, "MemoryError: the worker exceeded its memory limit and was terminated", rt.Error())
 	}
 }
 
-func plRequireCrashed(t *testing.T, err error) *montygo.CrashedError {
+func plRequireCrashed(t *testing.T, err error) *monterr.CrashedError {
 	t.Helper()
-	var crashed *montygo.CrashedError
+	var crashed *monterr.CrashedError
 	require.ErrorAs(t, err, &crashed)
 	return crashed
 }
 
 func TestPool(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		t.Run("checkout after close rejects", func(t *testing.T) {
-			p := newPool(t, b, montygo.Options{})
+			p := newPool(t, b, montygo.PoolOptions{})
 			require.NoError(t, p.Close(testCtx(t)))
-			_, err := p.Checkout(testCtx(t), montygo.CheckoutOptions{})
-			require.ErrorIs(t, err, montygo.ErrPoolClosed)
+			_, err := p.Checkout(testCtx(t), defaultRuntime, montygo.CheckoutOptions{})
+			require.ErrorIs(t, err, monterr.ErrPoolClosed)
 			require.EqualError(t, err, "the pool is closed — create a new Monty pool")
 		})
 
 		t.Run("close is idempotent", func(t *testing.T) {
-			p := newPool(t, b, montygo.Options{})
+			p := newPool(t, b, montygo.PoolOptions{})
 			require.NoError(t, p.Close(testCtx(t)))
 			require.NoError(t, p.Close(testCtx(t)))
 		})
 
 		t.Run("feed after session close rejects", func(t *testing.T) {
-			p := newPool(t, b, montygo.Options{})
+			p := newPool(t, b, montygo.PoolOptions{})
 			s := plCheckout(t, p, montygo.CheckoutOptions{})
 			plClose(t, s)
 			_, err := s.FeedRun(testCtx(t), "1", nil)
-			require.ErrorIs(t, err, montygo.ErrSessionClosed)
+			require.ErrorIs(t, err, monterr.ErrSessionClosed)
 			require.EqualError(t, err, "the session is closed — check out a new one")
 		})
 
 		t.Run("workers are reused across checkouts", func(t *testing.T) {
 			plNativeOnly(t, b, "worker identity is observed through the worker pid")
-			p := newPool(t, b, montygo.Options{MaxProcesses: 1})
+			p := newPool(t, b, montygo.PoolOptions{MaxWorkers: 1})
 			first := plCheckout(t, p, montygo.CheckoutOptions{})
 			pid := plPID(t, first)
 			plClose(t, first)
@@ -115,7 +117,7 @@ func TestPool(t *testing.T) {
 
 		t.Run("maxCheckoutsPerWorker recycles the worker", func(t *testing.T) {
 			plNativeOnly(t, b, "worker identity is observed through the worker pid")
-			p := newPool(t, b, montygo.Options{MaxCheckoutsPerWorker: 1})
+			p := newPool(t, b, montygo.PoolOptions{MaxCheckoutsPerWorker: 1})
 			first := plCheckout(t, p, montygo.CheckoutOptions{})
 			pid := plPID(t, first)
 			plClose(t, first)
@@ -125,17 +127,17 @@ func TestPool(t *testing.T) {
 		})
 
 		t.Run("maxMemory leaves normal work alone", func(t *testing.T) {
-			p := newPool(t, b, montygo.Options{})
+			p := newPool(t, b, montygo.PoolOptions{})
 			s := plCheckout(t, p, montygo.CheckoutOptions{Limits: &montygo.ResourceLimits{MaxMemory: 1024 * 1024}})
 			require.Equal(t, int64(2), plFeed(t, s, "1 + 1", nil))
 			plClose(t, s)
 		})
 
 		t.Run("a refused allocation raises MemoryError and the pool recovers", func(t *testing.T) {
-			p := newPool(t, b, montygo.Options{})
+			p := newPool(t, b, montygo.PoolOptions{})
 			s := plCheckout(t, p, montygo.CheckoutOptions{})
 			code := "x = ' ' * (1 << 60)"
-			if b == montygo.BackendWasm {
+			if b == backendWasm {
 				code = "x = ' ' * ((1 << 31) - 1)"
 			}
 			_, err := s.FeedRun(testCtx(t), code, nil)
@@ -146,7 +148,7 @@ func TestPool(t *testing.T) {
 		})
 
 		t.Run("exceeding maxMemory in the allocator raises MemoryError and the pool recovers", func(t *testing.T) {
-			p := newPool(t, b, montygo.Options{})
+			p := newPool(t, b, montygo.PoolOptions{})
 			s := plCheckout(t, p, montygo.CheckoutOptions{Limits: &montygo.ResourceLimits{MaxMemory: 1024}})
 			_, err := s.FeedRun(testCtx(t), "# "+strings.Repeat("a", 16*1024*1024), nil)
 			plRequireMemoryError(t, b, err)
@@ -156,10 +158,10 @@ func TestPool(t *testing.T) {
 		})
 
 		t.Run("concurrent sessions run in distinct workers", func(t *testing.T) {
-			p := newPool(t, b, montygo.Options{MaxProcesses: 2})
+			p := newPool(t, b, montygo.PoolOptions{MaxWorkers: 2})
 			a := plCheckout(t, p, montygo.CheckoutOptions{})
 			c := plCheckout(t, p, montygo.CheckoutOptions{})
-			if b == montygo.BackendNative {
+			if b == backendNative {
 				require.NotEqual(t, plPID(t, a), plPID(t, c))
 			}
 			var wg sync.WaitGroup
@@ -178,16 +180,16 @@ func TestPool(t *testing.T) {
 		})
 
 		t.Run("exhausted pool times out the checkout", func(t *testing.T) {
-			p := newPool(t, b, montygo.Options{MaxProcesses: 1, CheckoutTimeout: 200 * time.Millisecond})
+			p := newPool(t, b, montygo.PoolOptions{MaxWorkers: 1, CheckoutTimeout: 200 * time.Millisecond})
 			held := plCheckout(t, p, montygo.CheckoutOptions{})
-			_, err := p.Checkout(testCtx(t), montygo.CheckoutOptions{})
-			require.ErrorIs(t, err, montygo.ErrCheckoutTimeout)
+			_, err := p.Checkout(testCtx(t), defaultRuntime, montygo.CheckoutOptions{})
+			require.ErrorIs(t, err, monterr.ErrCheckoutTimeout)
 			require.EqualError(t, err, "no monty worker became available within the checkout timeout")
 			plClose(t, held)
 		})
 
 		t.Run("released worker is handed to a waiting checkout", func(t *testing.T) {
-			p := newPool(t, b, montygo.Options{MaxProcesses: 1})
+			p := newPool(t, b, montygo.PoolOptions{MaxWorkers: 1})
 			held := plCheckout(t, p, montygo.CheckoutOptions{})
 			type result struct {
 				s   *montygo.Session
@@ -195,7 +197,7 @@ func TestPool(t *testing.T) {
 			}
 			waiting := make(chan result, 1)
 			go func() {
-				s, err := p.Checkout(testCtx(t), montygo.CheckoutOptions{})
+				s, err := p.Checkout(testCtx(t), defaultRuntime, montygo.CheckoutOptions{})
 				waiting <- result{s, err}
 			}()
 			time.Sleep(50 * time.Millisecond)
@@ -209,7 +211,7 @@ func TestPool(t *testing.T) {
 
 		t.Run("killed worker surfaces as MontyCrashedError", func(t *testing.T) {
 			plNativeOnly(t, b, "wasm workers have no pid to signal")
-			p := newPool(t, b, montygo.Options{})
+			p := newPool(t, b, montygo.PoolOptions{})
 			s := plCheckout(t, p, montygo.CheckoutOptions{})
 			plKill(t, plPID(t, s))
 			_, err := s.FeedRun(testCtx(t), "1 + 1", nil)
@@ -219,13 +221,13 @@ func TestPool(t *testing.T) {
 		})
 
 		t.Run("session is unusable after a crash but the pool recovers", func(t *testing.T) {
-			opts := montygo.Options{}
-			if b != montygo.BackendNative {
+			opts := montygo.PoolOptions{}
+			if b != backendNative {
 				opts.RequestTimeout = 500 * time.Millisecond
 			}
 			p := newPool(t, b, opts)
 			s := plCheckout(t, p, montygo.CheckoutOptions{})
-			if b == montygo.BackendNative {
+			if b == backendNative {
 				plKill(t, plPID(t, s))
 				_, err := s.FeedRun(testCtx(t), "1", nil)
 				plRequireCrashed(t, err)
@@ -245,7 +247,7 @@ func TestPool(t *testing.T) {
 
 		t.Run("worker crashing while idle is replaced transparently", func(t *testing.T) {
 			plNativeOnly(t, b, "wasm workers have no pid to signal")
-			p := newPool(t, b, montygo.Options{MaxProcesses: 1})
+			p := newPool(t, b, montygo.PoolOptions{MaxWorkers: 1})
 			first := plCheckout(t, p, montygo.CheckoutOptions{})
 			pid := plPID(t, first)
 			plClose(t, first)
@@ -258,7 +260,7 @@ func TestPool(t *testing.T) {
 		})
 
 		t.Run("requestTimeout kills a wedged worker", func(t *testing.T) {
-			p := newPool(t, b, montygo.Options{RequestTimeout: 500 * time.Millisecond})
+			p := newPool(t, b, montygo.PoolOptions{RequestTimeout: 500 * time.Millisecond})
 			s := plCheckout(t, p, montygo.CheckoutOptions{})
 			_, err := s.FeedRun(testCtx(t), "while True:\n    pass", nil)
 			crashed := plRequireCrashed(t, err)
@@ -268,11 +270,11 @@ func TestPool(t *testing.T) {
 		})
 
 		t.Run("suspension time does not consume the duration budget", func(t *testing.T) {
-			p := newPool(t, b, montygo.Options{})
+			p := newPool(t, b, montygo.PoolOptions{})
 			s := plCheckout(t, p, montygo.CheckoutOptions{Limits: &montygo.ResourceLimits{MaxDuration: 300 * time.Millisecond}})
 			v := plFeed(t, s, "await fetch_data('u') + '!'", &montygo.FeedOptions{ExternalLookup: map[string]any{
-				"fetch_data": func(string) *montygo.Future {
-					return montygo.Async(func() (any, error) {
+				"fetch_data": func(string) *host.Future {
+					return host.Async(func() (any, error) {
 						time.Sleep(600 * time.Millisecond)
 						return "body", nil
 					})
@@ -284,7 +286,7 @@ func TestPool(t *testing.T) {
 		t.Run("worker environment is empty", func(t *testing.T) {
 			plNativeOnly(t, b, "wasm workers are not processes")
 			require.NotEmpty(t, os.Getenv("PATH"), "test process should have PATH set")
-			p := newPool(t, b, montygo.Options{})
+			p := newPool(t, b, montygo.PoolOptions{})
 			s := plCheckout(t, p, montygo.CheckoutOptions{})
 			pid := plPID(t, s)
 			switch runtime.GOOS {

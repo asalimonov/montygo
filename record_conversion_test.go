@@ -6,6 +6,9 @@ import (
 	"testing"
 
 	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/monterr"
+	"github.com/asalimonov/montygo/sandbox"
+	"github.com/asalimonov/montygo/sandbox/host"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,8 +26,8 @@ func (*recordTable) Read(id int) *recordDTO {
 	}
 	return &recordDTO{ID: 1, Name: "Ada"}
 }
-func (*recordTable) Later(ctx context.Context) *montygo.Future {
-	return montygo.AsyncContext(ctx, func(context.Context) (any, error) {
+func (*recordTable) Later(ctx context.Context) *host.Future {
+	return host.AsyncContext(ctx, func(context.Context) (any, error) {
 		return recordDTO{ID: 2, Name: "Grace"}, nil
 	})
 }
@@ -32,37 +35,37 @@ func (*recordTable) Later(ctx context.Context) *montygo.Future {
 type recordsAPI interface {
 	Insert(string) recordDTO
 	Read(int) *recordDTO
-	Later(context.Context) *montygo.Future
+	Later(context.Context) *host.Future
 }
 
 func recordResult(_ string, v any) (any, error) {
 	switch record := v.(type) {
 	case recordDTO:
-		return montygo.AsNamedTuple(record)
+		return host.AsNamedTuple(record)
 	case *recordDTO:
 		if record == nil {
 			return nil, nil
 		}
-		return montygo.AsNamedTuple(*record)
+		return host.AsNamedTuple(*record)
 	default:
 		return v, nil
 	}
 }
 
-func recordHost() (*montygo.Host, error) {
-	host := montygo.NewHost()
-	err := host.Object("records", &recordTable{}, montygo.ClassInstanceOptions{
-		Name: "Records", AllowedMethods: montygo.Expose[recordsAPI](), ConvertValue: recordResult,
+func recordHost() (*host.Host, error) {
+	h := host.NewHost()
+	err := h.Object("records", &recordTable{}, host.ClassInstanceOptions{
+		Name: "Records", AllowedMethods: host.Expose[recordsAPI](), ConvertValue: recordResult,
 	})
-	return host, err
+	return h, err
 }
 
 func Example_recordConversion() {
 	ctx := context.Background()
-	pool, _ := montygo.New(ctx, montygo.Options{})
+	pool, _ := montygo.NewPool(ctx, montygo.PoolOptions{})
 	defer pool.Close(ctx)
 	host, _ := recordHost()
-	session, _ := pool.Checkout(ctx, montygo.CheckoutOptions{Host: host})
+	session, _ := pool.Checkout(ctx, mustRuntime(montygo.RuntimeOptions{Host: host}), montygo.CheckoutOptions{})
 	defer session.Close(ctx)
 	value, _ := session.FeedRun(ctx, "[records.insert('Ada').name, records.read(99) is None, (await records.later()).name]", nil)
 	fmt.Println(value)
@@ -70,14 +73,14 @@ func Example_recordConversion() {
 }
 
 func TestRecordConversionRecipe(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		host, err := recordHost()
 		require.NoError(t, err)
-		s := newSession(t, b, montygo.CheckoutOptions{Host: host})
+		s := newSessionRT(t, b, mustRuntime(montygo.RuntimeOptions{Host: host}), montygo.CheckoutOptions{})
 		value, err := s.FeedRun(testCtx(t), "[records.insert('Ada').name, records.read(1).id, records.read(99) is None, (await records.later()).name]", nil)
 		require.NoError(t, err)
 		require.Equal(t, []any{"Ada", int64(1), true, "Grace"}, value)
-		unchanged := montygo.DateTime{}
+		unchanged := sandbox.DateTime{}
 		converted, err := recordResult("date", unchanged)
 		require.NoError(t, err)
 		require.Equal(t, unchanged, converted)
@@ -86,13 +89,13 @@ func TestRecordConversionRecipe(t *testing.T) {
 
 type nilFutureTable struct{}
 
-func (*nilFutureTable) Later() *montygo.Future { return nil }
+func (*nilFutureTable) Later() *host.Future { return nil }
 
 func TestNilMethodFutureIsReported(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
-		wrapped := montygo.MustClassInstance(&nilFutureTable{}, montygo.ClassInstanceOptions{AllowedMethods: montygo.Names("later")})
+	eachBackend(t, func(t *testing.T, b backend) {
+		wrapped := host.MustClassInstance(&nilFutureTable{}, host.ClassInstanceOptions{AllowedMethods: host.Names("later")})
 		_, err := run(t, b, "await table.later()", runOptions{FeedOptions: montygo.FeedOptions{Inputs: map[string]any{"table": wrapped}}})
-		var runtimeErr *montygo.RuntimeError
+		var runtimeErr *monterr.RuntimeError
 		require.ErrorAs(t, err, &runtimeErr)
 		require.Contains(t, runtimeErr.Message, "nil Future")
 	})

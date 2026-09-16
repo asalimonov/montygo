@@ -8,6 +8,9 @@ import (
 
 	"github.com/asalimonov/montygo/internal/pool"
 	"github.com/asalimonov/montygo/internal/wire"
+	monterr "github.com/asalimonov/montygo/monterr"
+	sandbox "github.com/asalimonov/montygo/sandbox"
+	host "github.com/asalimonov/montygo/sandbox/host"
 )
 
 // FeedOptions configure one snippet.
@@ -17,34 +20,36 @@ type FeedOptions struct {
 	// ExternalLookup resolves undefined names lazily: functions become host
 	// functions, other values are returned directly, absent names raise NameError.
 	ExternalLookup map[string]any
-	// Print receives output; nil writes to the process stdout/stderr.
-	Print PrintTarget
-	Mount []*MountDir
+	// Print receives output; nil uses the runtime's target, then the process stdout/stderr.
+	Print sandbox.PrintTarget
+	// Mount adds mounts for this feed after the runtime's mounts.
+	Mount []*sandbox.MountDir
 	// Cwd switches the sandbox working directory (absolute virtual path).
-	Cwd string
-	// OS answers OS calls no mount covered.
-	OS            OSHandler
+	Cwd           string
 	SkipTypeCheck bool
 }
 
 // LoadSnapshotOptions configure LoadSnapshot.
 type LoadSnapshotOptions struct {
-	Print          PrintTarget
-	Mount          []*MountDir
+	Print          sandbox.PrintTarget
+	Mount          []*sandbox.MountDir
 	ExternalLookup map[string]any
-	OS             OSHandler
 }
 
 // Session is one worker dedicated to one REPL session.
 type Session struct {
 	pool       *Pool
+	rt         *Runtime
 	co         *pool.Checkout
 	driven     bool
-	store      *instanceStore
+	store      *host.InstanceStore
 	scriptName string
-	host       *Host
 	limits     sessionLimits
 	life       lifecycle
+	// cfg configures every worker this session runs on, including one it rotates to.
+	cfg wire.Configure
+	// conn tracks the current connection's deadline and rotation timer.
+	conn connection
 }
 
 func (s *Session) ensureUsable() error { return s.Err() }
@@ -70,7 +75,7 @@ type SessionStats struct {
 
 // Stats reports the session's host-side counters.
 func (s *Session) Stats() SessionStats {
-	count, peak := s.store.stats()
+	count, peak := s.store.Stats()
 	return SessionStats{HostObjects: count, PeakHostObjects: peak, PendingFutures: s.pendingCount()}
 }
 
@@ -122,7 +127,7 @@ func (s *Session) mapError(err error) error {
 	}
 	var perr *pool.Error
 	if !errors.As(err, &perr) {
-		if errors.Is(err, ErrSessionLost) {
+		if errors.Is(err, monterr.ErrSessionLost) {
 			return s.poison(err)
 		}
 		return err
@@ -132,31 +137,31 @@ func (s *Session) mapError(err error) error {
 	}
 	switch perr.Kind {
 	case pool.KindRuntime:
-		result := errorFromException(perr.Exception)
+		result := monterr.ErrorFromException(perr.Exception)
 		if perr.WorkerLost {
-			if re, ok := result.(*RuntimeError); ok {
-				re.lost = true
+			if re, ok := result.(*monterr.RuntimeError); ok {
+				re.MarkSessionLost()
 			}
 			return s.poison(result)
 		}
 		return result
 	case pool.KindTyping:
-		return &TypingError{Diagnostics: perr.Diagnostics}
+		return &monterr.TypingError{Diagnostics: perr.Diagnostics}
 	case pool.KindTimeout:
-		return s.poison(&CrashedError{Message: perr.Error(), TimedOut: true})
+		return s.poison(&monterr.CrashedError{Message: perr.Error(), TimedOut: true})
 	case pool.KindCrashed:
-		return s.poison(&CrashedError{Message: perr.Error(), ExitStatus: perr.Status.String()})
+		return s.poison(&monterr.CrashedError{Message: perr.Error(), ExitStatus: perr.Status.String()})
 	case pool.KindDisconnected:
-		return s.poison(&DisconnectError{Message: perr.Error(), Code: perr.CloseCode, Reason: perr.CloseReason})
+		return s.poison(&monterr.DisconnectError{Message: perr.Error(), Code: perr.CloseCode, Reason: perr.CloseReason})
 	case pool.KindShutdown:
-		return s.poison(&ShutdownError{Message: perr.Error(), Dump: perr.Dump})
+		return s.poison(&monterr.ShutdownError{Message: perr.Error(), Dump: perr.Dump})
 	case pool.KindCancelled:
 		if perr.Cause != nil {
-			return s.poison(&ProtocolError{Message: perr.Error(), cause: errors.Join(ErrTurnCancelled, perr.Cause)})
+			return s.poison(monterr.NewProtocolError(perr.Error(), errors.Join(monterr.ErrTurnCancelled, perr.Cause)))
 		}
-		return s.poison(&ProtocolError{Message: perr.Error(), cause: ErrTurnCancelled})
+		return s.poison(monterr.NewProtocolError(perr.Error(), monterr.ErrTurnCancelled))
 	}
-	return s.poison(&ProtocolError{Message: perr.Error()})
+	return s.poison(&monterr.ProtocolError{Message: perr.Error()})
 }
 
 func (s *Session) prepareInputs(inputs map[string]any) ([]wire.NamedValue, error) {
@@ -167,7 +172,7 @@ func (s *Session) prepareInputs(inputs map[string]any) ([]wire.NamedValue, error
 	sort.Strings(names)
 	out := make([]wire.NamedValue, 0, len(names))
 	for _, name := range names {
-		v, err := prepareValue(inputs[name], s.store)
+		v, err := host.PrepareValue(inputs[name], s.store)
 		if err != nil {
 			return nil, err
 		}
@@ -185,6 +190,9 @@ func cwdPtr(cwd string) *string {
 
 // FeedRun executes one snippet. An overlapping operation returns ErrSessionBusy.
 func (s *Session) FeedRun(ctx context.Context, code string, opts *FeedOptions) (any, error) {
+	if err := s.rotateIfDue(ctx); err != nil {
+		return nil, err
+	}
 	e, err := s.reserveExecution(ctx)
 	if err != nil {
 		return nil, err
@@ -202,16 +210,16 @@ func (s *Session) feedRun(ctx context.Context, e *execution, code string, opts *
 	if err != nil {
 		return nil, err
 	}
-	mounts, first, err := buildMounts(opts.Mount)
+	mounts, first, err := s.rt.feedMounts(opts.Mount)
 	if err != nil {
 		return nil, err
 	}
 	// The feed context ends the run through the stop policy, never the wire.
 	wctx := context.WithoutCancel(ctx)
-	pt := newPrintTarget(wctx, s.co, opts.Print)
+	pt := newPrintTarget(wctx, s.co, s.printTarget(opts.Print))
 	pt.exec = e
 	e.print = pt
-	ans := s.newAnswerer(e, opts.ExternalLookup, opts.OS, pt)
+	ans := s.newAnswerer(e, opts.ExternalLookup, pt)
 	if err := s.beginSend(e); err != nil {
 		return nil, err
 	}
@@ -219,8 +227,16 @@ func (s *Session) feedRun(ctx context.Context, e *execution, code string, opts *
 	return s.drive(wctx, e, ev, err, pt, ans)
 }
 
-func (s *Session) newAnswerer(e *execution, lookup map[string]any, os OSHandler, pt *printTarget) *answerer {
-	return &answerer{s: s, exec: e, lookup: lookup, host: s.host, os: os, pt: pt}
+// printTarget is the feed's target, else the runtime's; nil is the process stdout/stderr.
+func (s *Session) printTarget(feed sandbox.PrintTarget) sandbox.PrintTarget {
+	if feed != nil {
+		return feed
+	}
+	return s.rt.opts.Print
+}
+
+func (s *Session) newAnswerer(e *execution, lookup map[string]any, pt *printTarget) *answerer {
+	return &answerer{s: s, exec: e, lookup: lookup, host: s.rt.opts.Host, os: s.rt.opts.OS, pt: pt}
 }
 
 func (s *Session) drive(ctx context.Context, e *execution, ev *wire.Event, err error, pt *printTarget, ans *answerer) (any, error) {
@@ -252,7 +268,7 @@ func (s *Session) drive(ctx context.Context, e *execution, ev *wire.Event, err e
 			if pt.failure != nil {
 				return nil, pt.failure
 			}
-			return restoreValue(ev.Value, s.store), nil
+			return host.RestoreValue(ev.Value, s.store), nil
 		}
 		if pt.failure != nil {
 			return nil, s.poison(pt.failure)
@@ -263,6 +279,9 @@ func (s *Session) drive(ctx context.Context, e *execution, ev *wire.Event, err e
 
 // FeedStart starts a snippet and retains ownership across its snapshot chain.
 func (s *Session) FeedStart(ctx context.Context, code string, opts *FeedOptions) (snap Snapshot, err error) {
+	if err := s.rotateIfDue(ctx); err != nil {
+		return nil, err
+	}
 	e, err := s.reserveExecution(ctx)
 	if err != nil {
 		return nil, err
@@ -280,12 +299,12 @@ func (s *Session) FeedStart(ctx context.Context, code string, opts *FeedOptions)
 	if err != nil {
 		return nil, err
 	}
-	mounts, first, err := buildMounts(opts.Mount)
+	mounts, first, err := s.rt.feedMounts(opts.Mount)
 	if err != nil {
 		return nil, err
 	}
 	wctx := context.WithoutCancel(ctx)
-	d := s.newDriver(e, wctx, opts.Print, opts.ExternalLookup, opts.OS)
+	d := s.newDriver(e, wctx, opts.Print, opts.ExternalLookup)
 	if err = s.beginSend(e); err != nil {
 		return nil, err
 	}
@@ -293,11 +312,11 @@ func (s *Session) FeedStart(ctx context.Context, code string, opts *FeedOptions)
 	return d.advance(ev, err)
 }
 
-func (s *Session) newDriver(e *execution, ctx context.Context, print PrintTarget, lookup map[string]any, os OSHandler) *snapshotDriver {
-	pt := newPrintTarget(ctx, s.co, print)
+func (s *Session) newDriver(e *execution, ctx context.Context, print sandbox.PrintTarget, lookup map[string]any) *snapshotDriver {
+	pt := newPrintTarget(ctx, s.co, s.printTarget(print))
 	pt.exec = e
 	e.print = pt
-	return &snapshotDriver{s: s, exec: e, pt: pt, ans: s.newAnswerer(e, lookup, os, pt)}
+	return &snapshotDriver{s: s, exec: e, pt: pt, ans: s.newAnswerer(e, lookup, pt)}
 }
 
 func (s *Session) claimFresh() error {
@@ -305,7 +324,7 @@ func (s *Session) claimFresh() error {
 		return err
 	}
 	if s.driven {
-		return ErrNotFresh
+		return monterr.ErrNotFresh
 	}
 	return nil
 }
@@ -314,13 +333,16 @@ func (s *Session) failedLoad(err error) error { return s.poison(err) }
 
 // LoadSession restores an idle dump into a fresh session.
 func (s *Session) LoadSession(ctx context.Context, state []byte) error {
+	if err := s.rotateIfDue(ctx); err != nil {
+		return err
+	}
 	release, err := s.reserveControl(ctx, false)
 	if err != nil {
 		return err
 	}
 	defer release()
-	if s.host != nil {
-		if err := s.host.Restorable(); err != nil {
+	if h := s.rt.opts.Host; h != nil {
+		if err := h.Restorable(); err != nil {
 			return err
 		}
 	}
@@ -334,13 +356,16 @@ func (s *Session) LoadSession(ctx context.Context, state []byte) error {
 		return s.failedLoad(s.mapError(err))
 	}
 	if ev != nil {
-		return s.failedLoad(ErrDumpIsSuspended)
+		return s.failedLoad(monterr.ErrDumpIsSuspended)
 	}
 	return nil
 }
 
 // LoadSnapshot restores a suspended dump into a fresh session.
 func (s *Session) LoadSnapshot(ctx context.Context, state []byte, opts *LoadSnapshotOptions) (snap Snapshot, err error) {
+	if err := s.rotateIfDue(ctx); err != nil {
+		return nil, err
+	}
 	e, err := s.reserveExecution(ctx)
 	if err != nil {
 		return nil, err
@@ -350,8 +375,8 @@ func (s *Session) LoadSnapshot(ctx context.Context, state []byte, opts *LoadSnap
 			s.finishExecution(e, nil, err)
 		}
 	}()
-	if s.host != nil {
-		if err := s.host.Restorable(); err != nil {
+	if h := s.rt.opts.Host; h != nil {
+		if err := h.Restorable(); err != nil {
 			return nil, err
 		}
 	}
@@ -364,12 +389,12 @@ func (s *Session) LoadSnapshot(ctx context.Context, state []byte, opts *LoadSnap
 	if opts == nil {
 		opts = &LoadSnapshotOptions{}
 	}
-	mounts, _, err := buildMounts(opts.Mount)
+	mounts, _, err := s.rt.feedMounts(opts.Mount)
 	if err != nil {
 		return nil, err
 	}
 	wctx := context.WithoutCancel(ctx)
-	d := s.newDriver(e, wctx, opts.Print, opts.ExternalLookup, opts.OS)
+	d := s.newDriver(e, wctx, opts.Print, opts.ExternalLookup)
 	if err = s.beginSend(e); err != nil {
 		return nil, err
 	}
@@ -378,13 +403,16 @@ func (s *Session) LoadSnapshot(ctx context.Context, state []byte, opts *LoadSnap
 		return nil, s.failedLoad(s.mapError(err))
 	}
 	if ev == nil {
-		return nil, s.failedLoad(ErrDumpIsIdle)
+		return nil, s.failedLoad(monterr.ErrDumpIsIdle)
 	}
 	return d.advance(ev, nil)
 }
 
 // Dump serializes an idle or paused session; a running turn returns ErrSessionBusy.
 func (s *Session) Dump(ctx context.Context) ([]byte, error) {
+	if err := s.rotateIfDue(ctx); err != nil {
+		return nil, err
+	}
 	release, err := s.reserveControl(ctx, true)
 	if err != nil {
 		return nil, err
@@ -399,6 +427,9 @@ func (s *Session) Dump(ctx context.Context) ([]byte, error) {
 
 // InstallDependencies installs packages into a CPython worker's session.
 func (s *Session) InstallDependencies(ctx context.Context, requirements []string) error {
+	if err := s.rotateIfDue(ctx); err != nil {
+		return err
+	}
 	release, err := s.reserveControl(ctx, false)
 	if err != nil {
 		return err
@@ -418,13 +449,13 @@ type printTarget struct {
 	exec    *execution
 	ctx     context.Context
 	co      *pool.Checkout
-	target  PrintTarget
+	target  sandbox.PrintTarget
 	failure error
 }
 
 // finish flushes a buffering target at the end of a turn.
 func (p *printTarget) finish() error {
-	f, ok := p.target.(FlushingPrintTarget)
+	f, ok := p.target.(sandbox.FlushingPrintTarget)
 	if !ok || p.failure != nil {
 		return nil
 	}
@@ -435,7 +466,7 @@ func (p *printTarget) finish() error {
 	return nil
 }
 
-func newPrintTarget(ctx context.Context, co *pool.Checkout, target PrintTarget) *printTarget {
+func newPrintTarget(ctx context.Context, co *pool.Checkout, target sandbox.PrintTarget) *printTarget {
 	return &printTarget{ctx: ctx, co: co, target: target}
 }
 
@@ -443,12 +474,12 @@ func (p *printTarget) onPrint(stream uint8, text string) {
 	if p.failure != nil {
 		return
 	}
-	st := Stdout
+	st := sandbox.Stdout
 	if stream == 2 {
-		st = Stderr
+		st = sandbox.Stderr
 	}
 	if p.target == nil {
-		if st == Stdout {
+		if st == sandbox.Stdout {
 			_, _ = os.Stdout.WriteString(text)
 		} else {
 			_, _ = os.Stderr.WriteString(text)
@@ -461,7 +492,7 @@ func (p *printTarget) onPrint(stream uint8, text string) {
 		}
 	}()
 	var err error
-	if ct, ok := p.target.(ContextPrintTarget); ok {
+	if ct, ok := p.target.(sandbox.ContextPrintTarget); ok {
 		cb := p.co.CallbackContext(p.ctx)
 		if p.exec != nil {
 			cb = callbackContext{Context: p.exec.callbackCtx, values: cb}

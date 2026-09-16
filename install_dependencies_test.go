@@ -6,19 +6,20 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/monterr"
 )
 
 func TestInstallDependencies(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		t.Run("installDependencies is rejected by the sandbox worker, session survives", func(t *testing.T) {
 			ctx := testCtx(t)
-			pool, err := openPool(ctx, b, montygo.Options{})
+			pool, err := openPool(ctx, b, montygo.PoolOptions{})
 			require.NoError(t, err)
 			defer func() { require.NoError(t, pool.Close(ctx)) }()
-			session, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
+			session, err := pool.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 			require.NoError(t, err)
 			err = session.InstallDependencies(ctx, []string{"httpx>=0.27"})
-			var runtimeErr *montygo.RuntimeError
+			var runtimeErr *monterr.RuntimeError
 			require.ErrorAs(t, err, &runtimeErr)
 			require.EqualError(t, err, "RuntimeError: dependency installation is only supported by the CPython worker")
 			v, err := session.FeedRun(ctx, "1 + 1", nil)
@@ -28,10 +29,10 @@ func TestInstallDependencies(t *testing.T) {
 
 		t.Run("installDependencies with an empty list is a no-op", func(t *testing.T) {
 			ctx := testCtx(t)
-			pool, err := openPool(ctx, b, montygo.Options{})
+			pool, err := openPool(ctx, b, montygo.PoolOptions{})
 			require.NoError(t, err)
 			defer func() { require.NoError(t, pool.Close(ctx)) }()
-			session, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
+			session, err := pool.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 			require.NoError(t, err)
 			require.NoError(t, session.InstallDependencies(ctx, []string{}))
 			v, err := session.FeedRun(ctx, "1 + 1", nil)

@@ -73,10 +73,12 @@ MONTYGO_NETWORK_TESTS=1 MONTYGO_TEST_IMAGE=monty-server:0.0.23-f8acf4fa \
 | `TestRepl_` | `repl_session_test.go` | REPL sessions: state, errors, dump restore across recreate, drain restore of a suspended feed, type-check stubs |
 | `TestReplCLI_` | `repl_cli_test.go` | `examples/repl -ws` over pipes: state and print, continuation, errors, mounts, interrupt, unavailable server |
 | `TestPyClient_` | `pyclient_test.go` | pinned Python client: feed, host function and dump restore, drain dump restore; PyPI `0.0.23` client refused |
+| `TestDockerSupervisor_` | `docker_supervisor_test.go` | `montygo.NewDockerSupervisor`: sessions and reported limits, close removes the container, rotation across the server's session timeout, a killed container with and without `RestartServer` |
 
 ## Writing a test
 
 - Name it `Test<Group>_<Behaviour>` and put it in the group's file. Call `t.Parallel()` first. Signalling or recreating a container is safe, because units are exclusive.
+- `TestDockerSupervisor_*` is the exception. Those tests exercise montygo's own container management, so they start containers through `montygo.NewDockerSupervisor` with `GetPool().Image()`, take no unit, and do not call `t.Parallel()`, which keeps the extra containers bounded.
 - `s := SetupServer(t, opts...)` lends a unit until the test ends. Options:
   - `WithArgs(flags...)` appends server flags;
   - `WithEnv(key, value)` sets a container variable.

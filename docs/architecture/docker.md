@@ -72,9 +72,11 @@ The `build` stage:
 
 | Image | Tags |
 |---|---|
-| server | `$(IMAGE):$(IMAGE_TAG)` and `$(IMAGE):latest`; `IMAGE` defaults to `monty-server` |
+| server | `$(IMAGE):$(IMAGE_TAG)`, `$(IMAGE):latest` and `$(GHCR_IMAGE):$(IMAGE_TAG)`; `IMAGE` defaults to `monty-server`, `GHCR_IMAGE` to `ghcr.io/asalimonov/monty-server` |
 | Python client | `$(PYCLIENT_IMAGE):$(IMAGE_TAG)` and `$(PYCLIENT_IMAGE):latest`; `PYCLIENT_IMAGE` defaults to `monty-pyclient` |
 | pushed | `$(REGISTRY)/$(IMAGE):$(IMAGE_TAG)` only |
+
+The `GHCR_IMAGE` tag is what `supervisor/docker` looks for: a development build of `X.Y.Z-<hash>` then resolves from the local daemon, before the published `X.Y.Z` is considered. See `supervisor.md`.
 
 `IMAGE_TAG` defaults to `$(VERSION)`, the output of `scripts/version.sh`: `monty-server:0.1.0` at a tag, `monty-server:0.1.0-3f2a9c1` after it, with `-dirty` on an uncommitted tree. The same value is the `org.opencontainers.image.version` label and the server's reported version. A tag names a commit, not the server sources alone, so an image MUST be rebuilt after a change to `server/` or `docker/`.
 
@@ -87,7 +89,7 @@ The `build` stage:
 | `docker-build-pyclient` | builds and loads the Python client image for the host architecture |
 | `docker-push` | pushes the multi-architecture server manifest to `REGISTRY`, which is required, with `--sbom=true --provenance=true` |
 | `server-check` | `cargo clippy --locked --all-targets -- -D warnings` and `cargo test --locked` in `server/` |
-| `test-docker` | root suite on the `websocket` backend against one container |
+| `test-docker` | root suite on the `docker` backend, which starts a container per test pool from `$(IMAGE):$(IMAGE_TAG)` |
 | `test-network` | `tests/network` against `$(IMAGE):$(IMAGE_TAG)` and `$(PYCLIENT_IMAGE):$(IMAGE_TAG)` |
 | `test-network-clean` | removes containers labelled `montygo.test` |
 
@@ -113,6 +115,36 @@ docker run --rm \
 - The listener speaks plain `ws://` without authentication. It SHOULD be reachable only from a private network or through a TLS ingress. See `server.md`.
 - Replicas MUST share `MONTY_SERVER_DUMP_KEY`, so a dump restores on any of them.
 - The orchestrator's stop grace period SHOULD exceed `--drain-grace`.
+
+## Containers montygo starts
+
+`docker.New` in `supervisor/docker` runs this image through the local `docker` CLI and serves its endpoint to pools built with `montygo.Remote`. `supervisor.md` covers the contract; this section covers the container.
+
+| Aspect | Value |
+|---|---|
+| image | `docker.Options.Image` / `MONTYGO_DOCKER_IMAGE`, default `ghcr.io/asalimonov/monty-server` |
+| tag | `docker.Options.Version` / `MONTYGO_DOCKER_VERSION`, else `BindingVersion()`: the exact version, then its base release |
+| lookup | per candidate `docker image inspect`, else `docker pull`, else the next candidate |
+| port | `-p 127.0.0.1::8000`, an ephemeral loopback port read back with `docker port` |
+| hardening | `--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--pids-limit max(512, 32 × MaxSessions)` |
+| labels | `io.montygo.supervisor`, `io.montygo.version`, `io.montygo.pid` |
+| lifetime | started by `docker.New`, stopped and removed by `Supervisor.Close`, which the application calls after the pools that dial it |
+
+Server variables the supervisor sets, before `docker.Options.Env` overrides them:
+
+| Variable | Value | Reason |
+|---|---|---|
+| `MONTY_SERVER_DUMP_KEY` | 32 random bytes, hex | required; kept across a restart so rotated dumps still verify |
+| `MONTY_SERVER_MAX_SESSIONS` | `MaxSessions` (0 means `2 × runtime.NumCPU()`) | a rotation's new connection MUST NOT hit capacity while the old one closes |
+| `MONTY_SERVER_MAX_SESSIONS_PER_CLIENT` | `0` | every connection shares one peer address |
+| `MONTY_SERVER_IDLE_TIMEOUT` | `0` | an idle `Slot` or REPL session MUST survive |
+| `MONTY_SERVER_MAX_MEMORY_MIB`, `MONTY_SERVER_MAX_DURATION` | `0` | the runtime's limits govern, as on the local workers |
+
+- The session and turn timeouts stay at the image defaults. Rotation relies on the turn timeout bounding every execution.
+- Values are passed as `-e NAME` with the value in the CLI's own environment, so the dump key never appears in `ps`.
+- `--read-only` is safe: the server writes nothing, and the worker's filesystem access is served by the parent.
+- A container left behind by a process that died is not reaped. `docker.Options.Reaper` is the extension point; remove them with `docker rm -f $(docker ps -aq --filter label=io.montygo.supervisor)`.
+- Only local daemons are supported: the published port is on the daemon's host. Use a supervisor of your own for remote servers.
 
 ## Python client image
 

@@ -6,10 +6,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/monterr"
 )
 
 func TestBasic(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		t.Run("simple expression", func(t *testing.T) {
 			require.Equal(t, int64(3), mustRun(t, b, "1 + 2", runOptions{}))
 		})
@@ -24,7 +25,7 @@ func TestBasic(t *testing.T) {
 
 		t.Run("syntax error", func(t *testing.T) {
 			_, err := run(t, b, "def", runOptions{})
-			var syntaxErr *montygo.SyntaxError
+			var syntaxErr *monterr.SyntaxError
 			require.ErrorAs(t, err, &syntaxErr)
 			require.Contains(t, err.Error(), "SyntaxError")
 		})
@@ -74,7 +75,7 @@ add(3, 4)
 			var result any
 			var session *montygo.Session
 			func() {
-				s, err := sharedPool(t, b).Checkout(ctx, montygo.CheckoutOptions{})
+				s, err := sharedPool(t, b).Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 				require.NoError(t, err)
 				session = s
 				defer func() { require.NoError(t, session.Close(ctx)) }()
@@ -83,7 +84,7 @@ add(3, 4)
 			}()
 			require.Equal(t, int64(42), result)
 			_, err := session.FeedRun(ctx, "21 * 2", nil)
-			require.ErrorIs(t, err, montygo.ErrSessionClosed)
+			require.ErrorIs(t, err, monterr.ErrSessionClosed)
 		})
 	})
 }

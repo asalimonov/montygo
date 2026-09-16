@@ -6,16 +6,18 @@ import (
 	"time"
 
 	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/monterr"
+	"github.com/asalimonov/montygo/sandbox/host"
 	"github.com/stretchr/testify/require"
 )
 
 func TestExecutionFutures(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		t.Run("failed gather clears subscriptions but does not settle shared futures", func(t *testing.T) {
 			ctx := testCtx(t)
-			s := newSession(t, b, montygo.CheckoutOptions{MaxPendingFutures: 1})
-			shared, settle := montygo.NewFuture()
-			opts := &montygo.FeedOptions{ExternalLookup: map[string]any{"pending": func() *montygo.Future { return shared }}}
+			s := newSessionRT(t, b, mustRuntime(montygo.RuntimeOptions{MaxPendingFutures: 1}), montygo.CheckoutOptions{})
+			shared, settle := host.NewFuture()
+			opts := &montygo.FeedOptions{ExternalLookup: map[string]any{"pending": func() *host.Future { return shared }}}
 			for range 3 {
 				_, err := s.FeedRun(ctx, "import asyncio\nawait asyncio.gather(pending(), pending())", opts)
 				require.ErrorContains(t, err, "pending future limit 1 exceeded")
@@ -36,9 +38,9 @@ func TestExecutionFutures(t *testing.T) {
 			ctx := testCtx(t)
 			s := newSession(t, b, montygo.CheckoutOptions{})
 			callbacks := make(chan context.Context, 2)
-			opts := &montygo.FeedOptions{ExternalLookup: map[string]any{"pending": func(cb context.Context) *montygo.Future {
+			opts := &montygo.FeedOptions{ExternalLookup: map[string]any{"pending": func(cb context.Context) *host.Future {
 				callbacks <- cb
-				return montygo.AsyncContext(cb, func(ctx context.Context) (any, error) { <-ctx.Done(); return nil, ctx.Err() })
+				return host.AsyncContext(cb, func(ctx context.Context) (any, error) { <-ctx.Done(); return nil, ctx.Err() })
 			}}}
 			snap, err := s.FeedStart(ctx, "import asyncio\nawait asyncio.gather(pending(), pending())", opts)
 			require.NoError(t, err)
@@ -68,9 +70,9 @@ func TestExecutionFutures(t *testing.T) {
 			ctx := testCtx(t)
 			first := newSession(t, b, montygo.CheckoutOptions{})
 			second := newSession(t, b, montygo.CheckoutOptions{})
-			shared, settle := montygo.NewFuture()
+			shared, settle := host.NewFuture()
 			entered := make(chan struct{}, 4)
-			opts := &montygo.FeedOptions{ExternalLookup: map[string]any{"pending": func() *montygo.Future { entered <- struct{}{}; return shared }}}
+			opts := &montygo.FeedOptions{ExternalLookup: map[string]any{"pending": func() *host.Future { entered <- struct{}{}; return shared }}}
 			a := first.Go(ctx, "import asyncio\nawait asyncio.gather(pending(), pending())", opts)
 			<-entered
 			<-entered
@@ -78,7 +80,7 @@ func TestExecutionFutures(t *testing.T) {
 			<-entered
 			require.NoError(t, first.Close(ctx, montygo.KillNow))
 			_, err := a.WaitContext(ctx)
-			require.ErrorIs(t, err, montygo.ErrSessionClosed)
+			require.ErrorIs(t, err, monterr.ErrSessionClosed)
 			require.Zero(t, first.Stats().PendingFutures)
 			settle(42, nil)
 			v, err := other.WaitContext(ctx)
@@ -87,9 +89,9 @@ func TestExecutionFutures(t *testing.T) {
 		})
 		t.Run("shared future pointer counts each wire call separately", func(t *testing.T) {
 			ctx := testCtx(t)
-			s := newSession(t, b, montygo.CheckoutOptions{MaxPendingFutures: 2})
-			shared, settle := montygo.NewFuture()
-			opts := &montygo.FeedOptions{ExternalLookup: map[string]any{"pending": func() *montygo.Future { return shared }}}
+			s := newSessionRT(t, b, mustRuntime(montygo.RuntimeOptions{MaxPendingFutures: 2}), montygo.CheckoutOptions{})
+			shared, settle := host.NewFuture()
+			opts := &montygo.FeedOptions{ExternalLookup: map[string]any{"pending": func() *host.Future { return shared }}}
 			r := s.Go(ctx, "import asyncio\nawait asyncio.gather(pending(), pending())", opts)
 			require.Eventually(t, func() bool { return s.Stats().PendingFutures == 2 }, time.Second, time.Millisecond)
 			settle(42, nil)
@@ -101,8 +103,8 @@ func TestExecutionFutures(t *testing.T) {
 		t.Run("cooperative abort drops the subscription without settling the future", func(t *testing.T) {
 			ctx := testCtx(t)
 			s := newSession(t, b, montygo.CheckoutOptions{})
-			pending, _ := montygo.NewFuture()
-			opts := &montygo.FeedOptions{ExternalLookup: map[string]any{"pending": func() *montygo.Future { return pending }}}
+			pending, _ := host.NewFuture()
+			opts := &montygo.FeedOptions{ExternalLookup: map[string]any{"pending": func() *host.Future { return pending }}}
 			snap, err := s.FeedStart(ctx, "import asyncio\nawait asyncio.gather(pending())", opts)
 			require.NoError(t, err)
 			snap, err = snap.(*montygo.FunctionSnapshot).ResumeAuto(ctx)

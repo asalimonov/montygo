@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"github.com/asalimonov/montygo/monterr"
 	"io"
 	"net"
 	"strings"
@@ -16,7 +17,7 @@ import (
 
 func requireDisconnect(t *testing.T, err error) {
 	t.Helper()
-	var de *montygo.DisconnectError
+	var de *monterr.DisconnectError
 	require.ErrorAs(t, err, &de)
 }
 
@@ -24,18 +25,18 @@ func TestTimeouts_IdleClosesSession(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--idle-timeout", "1"))
 	ctx := testCtx(t)
-	p := s.NewPool(montygo.WebSocketOptions{})
+	p := s.NewPool(wsOptions{})
 	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	_, err := session.FeedRun(ctx, "x = 1", nil)
 	require.NoError(t, err)
 
 	time.Sleep(2500 * time.Millisecond)
 	_, err = session.FeedRun(ctx, "x", nil)
-	var de *montygo.DisconnectError
+	var de *monterr.DisconnectError
 	require.ErrorAs(t, err, &de)
 	require.Equal(t, 1008, de.Code)
 	require.Equal(t, "idle timeout of 1s exceeded", de.Reason)
-	require.ErrorIs(t, err, montygo.ErrSessionLost)
+	require.ErrorIs(t, err, monterr.ErrSessionLost)
 	s.WaitMetric("monty_server_timeouts_total", map[string]string{"kind": "idle"}, 1, 5*time.Second)
 }
 
@@ -43,7 +44,7 @@ func TestTimeouts_TurnTimeoutIncludesHostCallback(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--turn-timeout", "1"))
 	ctx := testCtx(t)
-	p := s.NewPool(montygo.WebSocketOptions{})
+	p := s.NewPool(wsOptions{})
 	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 
 	slow := func() int {
@@ -59,7 +60,7 @@ func TestTimeouts_ServerCloseDuringStop(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--turn-timeout", "1"))
 	ctx := testCtx(t)
-	p := s.NewPool(montygo.WebSocketOptions{})
+	p := s.NewPool(wsOptions{})
 	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 
 	started := make(chan struct{})
@@ -73,7 +74,7 @@ func TestTimeouts_ServerCloseDuringStop(t *testing.T) {
 	stopped, err := run.Stop(ctx, montygo.StopPolicy{Timeout: 10 * time.Second})
 	require.NoError(t, err)
 	require.Equal(t, montygo.StopFinished, stopped.How, "the server ended the run, not the stop")
-	var de *montygo.DisconnectError
+	var de *monterr.DisconnectError
 	require.ErrorAs(t, stopped.Err, &de)
 	require.False(t, stopped.SessionKept())
 	require.Equal(t, montygo.SessionClosed, session.State())
@@ -84,7 +85,7 @@ func TestTimeouts_SessionTimeout(t *testing.T) {
 	requireSlowTests(t)
 	s := SetupServer(t, WithArgs("--session-timeout", "2"))
 	ctx := testCtx(t)
-	p := s.NewPool(montygo.WebSocketOptions{})
+	p := s.NewPool(wsOptions{})
 	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	for range 2 {
 		_, err := session.FeedRun(ctx, "1", nil)
@@ -151,7 +152,7 @@ func TestTimeouts_KeepaliveDropsFrozenClient(t *testing.T) {
 	s := SetupServer(t, WithArgs("--keepalive", "1", "--idle-timeout", "0"))
 	ctx := testCtx(t)
 	proxy := startFreezeProxy(t, strings.TrimPrefix(s.Unit.HTTPBase(), "http://"))
-	p := s.NewPool(montygo.WebSocketOptions{URL: proxy.URL()})
+	p := s.NewPool(wsOptions{URL: proxy.URL()})
 	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	_, err := session.FeedRun(ctx, "1", nil)
 	require.NoError(t, err)

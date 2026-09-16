@@ -2,24 +2,25 @@ package main
 
 import (
 	"context"
+	"github.com/asalimonov/montygo/sandbox"
+	"github.com/asalimonov/montygo/sandbox/host"
 
-	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/examples/internal/pyargs"
 )
 
-func dict(kv ...any) *montygo.Dict {
-	d := montygo.NewDict()
+func dict(kv ...any) *sandbox.Dict {
+	d := sandbox.NewDict()
 	for i := 0; i < len(kv); i += 2 {
 		d.Set(kv[i], kv[i+1])
 	}
 	return d
 }
 
-func member(id int64, name string) *montygo.Dict {
+func member(id int64, name string) *sandbox.Dict {
 	return dict("id", id, "name", name)
 }
 
-func item(date string, amount float64, description string) *montygo.Dict {
+func item(date string, amount float64, description string) *sandbox.Dict {
 	return dict("date", date, "amount", amount, "description", description)
 }
 
@@ -114,12 +115,12 @@ var customBudgets = map[int64]customBudget{
 	2: {Amount: 7000.00, Reason: "International travel required"},
 }
 
-func resolved(v any) *montygo.Future {
-	return montygo.Async(func() (any, error) { return v, nil })
+func resolved(v any) *host.Future {
+	return host.Async(func() (any, error) { return v, nil })
 }
 
 // getTeamMembers gets the list of team members for a department.
-func getTeamMembers(_ context.Context, args []any, kwargs montygo.Kwargs) (any, error) {
+func getTeamMembers(_ context.Context, args []any, kwargs host.Kwargs) (any, error) {
 	bound, err := pyargs.Bind("get_team_members", args, kwargs, pyargs.Required("department"))
 	if err != nil {
 		return nil, err
@@ -132,7 +133,7 @@ func getTeamMembers(_ context.Context, args []any, kwargs montygo.Kwargs) (any, 
 }
 
 // getExpenses gets expense line items for a user.
-func getExpenses(_ context.Context, args []any, kwargs montygo.Kwargs) (any, error) {
+func getExpenses(_ context.Context, args []any, kwargs host.Kwargs) (any, error) {
 	bound, err := pyargs.Bind("get_expenses", args, kwargs,
 		pyargs.Required("user_id"), pyargs.Required("quarter"), pyargs.Required("category"))
 	if err != nil {
@@ -158,7 +159,7 @@ func getExpenses(_ context.Context, args []any, kwargs montygo.Kwargs) (any, err
 }
 
 // getCustomBudget gets the custom budget for a user if they have one.
-func getCustomBudget(_ context.Context, args []any, kwargs montygo.Kwargs) (any, error) {
+func getCustomBudget(_ context.Context, args []any, kwargs host.Kwargs) (any, error) {
 	bound, err := pyargs.Bind("get_custom_budget", args, kwargs, pyargs.Required("user_id"))
 	if err != nil {
 		return nil, err

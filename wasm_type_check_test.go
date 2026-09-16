@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/monterr"
 )
 
 const wsmTypeCheckAttempts = 15
@@ -14,14 +15,14 @@ const wsmTypeCheckAttempts = 15
 func TestWasmTypeCheck(t *testing.T) {
 	t.Run("a feed after a failed type check leaves the worker alive", func(t *testing.T) {
 		ctx := testCtx(t)
-		p := newPool(t, montygo.BackendWasm, montygo.Options{})
+		p := newPool(t, backendWasm, montygo.PoolOptions{})
 		for attempt := 0; attempt < wsmTypeCheckAttempts; attempt++ {
-			s := wsmCheckout(t, p, montygo.CheckoutOptions{TypeCheck: true})
+			s := wsmCheckout(t, p, mustRuntime(montygo.RuntimeOptions{TypeCheck: true}), montygo.CheckoutOptions{})
 			_, err := s.FeedRun(ctx, "x = 1", nil)
 			require.NoError(t, err)
 
 			_, err = s.FeedRun(ctx, "x = 2\n\"hello\" + 1", nil)
-			var te *montygo.TypingError
+			var te *monterr.TypingError
 			require.ErrorAs(t, err, &te)
 			require.Equal(t, "TypeError: error[invalid-assignment]: Object of type `Literal[2]` is not assignable to `Literal[1]`", err.Error())
 
@@ -34,8 +35,8 @@ func TestWasmTypeCheck(t *testing.T) {
 
 	t.Run("a repeated failing feed reports the same diagnostic every time", func(t *testing.T) {
 		ctx := testCtx(t)
-		p := newPool(t, montygo.BackendWasm, montygo.Options{})
-		s := wsmCheckout(t, p, montygo.CheckoutOptions{TypeCheck: true})
+		p := newPool(t, backendWasm, montygo.PoolOptions{})
+		s := wsmCheckout(t, p, mustRuntime(montygo.RuntimeOptions{TypeCheck: true}), montygo.CheckoutOptions{})
 		_, err := s.FeedRun(ctx, "x = 1", nil)
 		require.NoError(t, err)
 		expected := strings.Join([]string{
@@ -52,9 +53,9 @@ func TestWasmTypeCheck(t *testing.T) {
 		}, "\n")
 		for attempt := 0; attempt < wsmTypeCheckAttempts; attempt++ {
 			_, err := s.FeedRun(ctx, "\"hello\" + 1", nil)
-			var te *montygo.TypingError
+			var te *monterr.TypingError
 			require.ErrorAs(t, err, &te)
-			require.Equal(t, expected, te.Display(montygo.DisplayTraceback))
+			require.Equal(t, expected, te.Display(monterr.DisplayTraceback))
 		}
 		require.NoError(t, s.Close(ctx))
 	})

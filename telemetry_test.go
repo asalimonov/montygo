@@ -1,14 +1,10 @@
 package montygo_test
 
 import (
-	"bytes"
 	"context"
-	"os"
-	"os/exec"
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,58 +22,26 @@ import (
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/asalimonov/montygo"
-)
-
-const (
-	telScenarioEnv = "MONTY_TELEMETRY_SCENARIO"
-	telBackendEnv  = "MONTY_TELEMETRY_BACKEND"
+	"github.com/asalimonov/montygo/sandbox"
+	"github.com/asalimonov/montygo/telemetry"
 )
 
 type telCase struct {
 	title string
-	run   func(t *testing.T, b montygo.Backend)
+	run   func(t *testing.T, b backend)
 }
 
-// telRun runs each case in a child test process, because telemetry is installed process-wide.
-func telRun(t *testing.T, test string, cases []telCase) {
-	if title := os.Getenv(telScenarioEnv); title != "" {
-		b, ok := backendByName(os.Getenv(telBackendEnv))
-		if !ok {
-			t.Fatalf("unknown telemetry backend %q", os.Getenv(telBackendEnv))
-		}
-		for _, c := range cases {
-			if c.title == title {
-				c.run(t, b)
-				return
-			}
-		}
-		t.Fatalf("unknown telemetry scenario %q", title)
-	}
+// telRun runs each case on every backend. Telemetry is a pool parameter, so
+// cases share the process.
+func telRun(t *testing.T, cases []telCase) {
 	for _, c := range cases {
 		t.Run(c.title, func(t *testing.T) {
-			eachBackend(t, func(t *testing.T, b montygo.Backend) { telChild(t, test, c.title, b) })
+			eachBackend(t, c.run)
 		})
 	}
 }
 
-func telChild(t *testing.T, test, title string, b montygo.Backend) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^"+test+"$", "-test.count=1", "-test.v")
-	cmd.Env = append(os.Environ(), telScenarioEnv+"="+title, telBackendEnv+"="+b.String())
-	out, err := cmd.CombinedOutput()
-	switch {
-	case err != nil:
-		t.Fatalf("scenario failed: %v\n%s", err, out)
-	case bytes.Contains(out, []byte("--- SKIP: "+test)):
-		t.Skipf("scenario skipped:\n%s", out)
-	case !bytes.Contains(out, []byte("--- PASS: "+test)):
-		t.Fatalf("scenario did not run:\n%s", out)
-	}
-}
-
-func telPool(t *testing.T, b montygo.Backend, opts montygo.Options) *montygo.Pool {
+func telPool(t *testing.T, b backend, opts montygo.PoolOptions) *montygo.Pool {
 	t.Helper()
 	p, err := openPool(testCtx(t), b, opts)
 	if err != nil {
@@ -85,6 +49,12 @@ func telPool(t *testing.T, b montygo.Backend, opts montygo.Options) *montygo.Poo
 	}
 	t.Cleanup(func() { _ = p.Close(context.Background()) })
 	return p
+}
+
+// telTraced builds a pool that records into tracer only.
+func telTraced(t *testing.T, b backend, tracer trace.Tracer) *montygo.Pool {
+	t.Helper()
+	return telPool(t, b, montygo.PoolOptions{Telemetry: &telemetry.Components{Tracer: tracer}})
 }
 
 func telTracing(opts ...sdktrace.TracerProviderOption) (*sdktrace.TracerProvider, *tracetest.SpanRecorder) {
@@ -226,10 +196,10 @@ func (s *telRejectFirstRun) ShouldSample(p sdktrace.SamplingParameters) sdktrace
 func (*telRejectFirstRun) Description() string { return "RejectFirstRun" }
 
 func TestTelemetry(t *testing.T) {
-	telRun(t, "TestTelemetry", []telCase{
+	telRun(t, []telCase{
 		{"MontyInstrumentation accepts SDK providers", telAcceptsProviders},
-		{"a second MontyInstrumentation is rejected", telSecondRejected},
-		{"disable stops telemetry from an active session", telDisableStops},
+		{"instrumentations are independent", telIndependent},
+		{"a disabled instrumentation has no components", telDisabledComponents},
 		{"concurrent checkouts deliver complete span trees", telConcurrentCheckouts},
 		{"host sampling can reject one child without disabling its root", telSamplingRejectsChild},
 		{"logging failure does not disable tracing", telLoggingFailure},
@@ -241,66 +211,87 @@ func TestTelemetry(t *testing.T) {
 	})
 }
 
-func telAcceptsProviders(t *testing.T, b montygo.Backend) {
+func telAcceptsProviders(t *testing.T, b backend) {
 	ctx := testCtx(t)
 	tp, spans := telTracing()
-	inst, err := montygo.NewInstrumentation(montygo.InstrumentationConfig{Logs: telBool(false), Metrics: telBool(false)})
+	inst, err := telemetry.NewInstrumentation(telemetry.InstrumentationConfig{Logs: telBool(false), Metrics: telBool(false)})
 	require.NoError(t, err)
 	inst.SetTracerProvider(tp)
-	p := telPool(t, b, montygo.Options{})
-	s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+	c := inst.Components()
+	require.NotNil(t, c)
+	require.NotNil(t, c.Tracer)
+	require.Nil(t, c.Meter)
+	require.Nil(t, c.Logger)
+	p := telPool(t, b, montygo.PoolOptions{Telemetry: c})
+	s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 	require.NoError(t, err)
 	require.Equal(t, int64(3), telRunCode(t, ctx, s, "1 + 2", nil))
 	require.NoError(t, s.Close(ctx))
 	require.NoError(t, p.Close(ctx))
-	require.NoError(t, inst.ForceFlush(ctx))
+	require.NoError(t, tp.ForceFlush(ctx))
 	require.Equal(t, []string{"run code", "session {script_name}"}, telNames(spans.Ended()))
-	inst.Disable()
 	require.NoError(t, tp.Shutdown(ctx))
 }
 
-func telSecondRejected(t *testing.T, _ montygo.Backend) {
-	off := montygo.InstrumentationConfig{Logs: telBool(false), Metrics: telBool(false), Traces: telBool(false)}
-	first, err := montygo.NewInstrumentation(off)
+func telIndependent(t *testing.T, b backend) {
+	ctx := testCtx(t)
+	tp1, spans1 := telTracing()
+	tp2, spans2 := telTracing()
+	off := telemetry.InstrumentationConfig{Logs: telBool(false), Metrics: telBool(false)}
+	first, err := telemetry.NewInstrumentation(off)
 	require.NoError(t, err)
-	second, err := montygo.NewInstrumentation(off)
-	require.Nil(t, second)
-	require.ErrorIs(t, err, montygo.ErrTelemetryPresent)
-	require.EqualError(t, err, "Monty telemetry is already configured")
-	first.Disable()
+	first.SetTracerProvider(tp1)
+	second, err := telemetry.NewInstrumentation(off)
+	require.NoError(t, err)
+	second.SetTracerProvider(tp2)
+	p1 := telPool(t, b, montygo.PoolOptions{Telemetry: first.Components()})
+	p2 := telPool(t, b, montygo.PoolOptions{Telemetry: second.Components()})
+	for _, p := range []*montygo.Pool{p1, p2} {
+		s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
+		require.NoError(t, err)
+		require.Equal(t, int64(3), telRunCode(t, ctx, s, "1 + 2", nil))
+		require.NoError(t, s.Close(ctx))
+	}
+	require.Equal(t, []string{"run code", "session {script_name}"}, telNames(spans1.Ended()))
+	require.Equal(t, []string{"run code", "session {script_name}"}, telNames(spans2.Ended()))
+	require.NoError(t, tp1.Shutdown(ctx))
+	require.NoError(t, tp2.Shutdown(ctx))
 }
 
-func telDisableStops(t *testing.T, b montygo.Backend) {
+func telDisabledComponents(t *testing.T, b backend) {
 	ctx := testCtx(t)
 	tp, spans := telTracing()
-	inst, err := montygo.NewInstrumentation(montygo.InstrumentationConfig{Logs: telBool(false), Metrics: telBool(false)})
+	inst, err := telemetry.NewInstrumentation(telemetry.InstrumentationConfig{Logs: telBool(false), Metrics: telBool(false)})
 	require.NoError(t, err)
 	inst.SetTracerProvider(tp)
-	p := telPool(t, b, montygo.Options{})
-	s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
-	require.NoError(t, err)
-	require.Equal(t, int64(3), telRunCode(t, ctx, s, "1 + 2", nil))
-	require.NoError(t, inst.ForceFlush(ctx))
-	inst.Disable()
-	require.Equal(t, int64(9), telRunCode(t, ctx, s, "4 + 5", nil))
-	require.NoError(t, s.Close(ctx))
-	require.NoError(t, p.Close(ctx))
-	require.NoError(t, inst.ForceFlush(ctx))
-	require.Equal(t, []string{"run code"}, telNames(spans.Ended()))
+	traced := telPool(t, b, montygo.PoolOptions{Telemetry: inst.Components()})
+	inst.SetConfig(telemetry.InstrumentationConfig{Enabled: telBool(false)})
+	require.Nil(t, inst.Components())
+	silent := telPool(t, b, montygo.PoolOptions{Telemetry: inst.Components()})
+	for _, p := range []*montygo.Pool{traced, silent} {
+		s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
+		require.NoError(t, err)
+		require.Equal(t, int64(3), telRunCode(t, ctx, s, "1 + 2", nil))
+		require.NoError(t, s.Close(ctx))
+	}
+	require.Equal(t, []string{"run code", "session {script_name}"}, telNames(spans.Ended()))
+	// Re-enabled without a tracer provider and with the other signals off, nothing is left to record into.
+	inst.SetTracerProvider(nil)
+	inst.SetConfig(telemetry.InstrumentationConfig{Logs: telBool(false), Metrics: telBool(false)})
+	require.Nil(t, inst.Components())
 	require.NoError(t, tp.Shutdown(ctx))
 }
 
-func telConcurrentCheckouts(t *testing.T, b montygo.Backend) {
+func telConcurrentCheckouts(t *testing.T, b backend) {
 	ctx := testCtx(t)
 	tp, spans := telTracing()
-	require.NoError(t, montygo.Instrument(montygo.TelemetryComponents{Tracer: tp.Tracer("test")}))
-	p := telPool(t, b, montygo.Options{MinProcesses: 2, MaxProcesses: 2})
+	p := telPool(t, b, montygo.PoolOptions{MinWorkers: 2, MaxWorkers: 2, Telemetry: &telemetry.Components{Tracer: tp.Tracer("test")}})
 	var wg sync.WaitGroup
 	for _, v := range []int64{1, 2} {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+			s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 			if !assert.NoError(t, err) {
 				return
 			}
@@ -312,7 +303,6 @@ func telConcurrentCheckouts(t *testing.T, b montygo.Backend) {
 	}
 	wg.Wait()
 	require.NoError(t, p.Close(ctx))
-	require.NoError(t, montygo.Flush(ctx))
 	ended := spans.Ended()
 	require.Len(t, ended, 4, telNames(ended))
 	traces := map[trace.TraceID]struct{}{}
@@ -323,64 +313,56 @@ func telConcurrentCheckouts(t *testing.T, b montygo.Backend) {
 	require.NoError(t, tp.Shutdown(ctx))
 }
 
-func telSamplingRejectsChild(t *testing.T, b montygo.Backend) {
+func telSamplingRejectsChild(t *testing.T, b backend) {
 	ctx := testCtx(t)
 	tp, spans := telTracing(sdktrace.WithSampler(&telRejectFirstRun{}))
-	require.NoError(t, montygo.Instrument(montygo.TelemetryComponents{Tracer: tp.Tracer("test")}))
-	p := telPool(t, b, montygo.Options{})
-	s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+	p := telTraced(t, b, tp.Tracer("test"))
+	s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 	require.NoError(t, err)
 	require.Equal(t, int64(3), telRunCode(t, ctx, s, "1 + 2", nil))
 	require.Equal(t, int64(9), telRunCode(t, ctx, s, "4 + 5", nil))
 	require.NoError(t, s.Close(ctx))
 	require.NoError(t, p.Close(ctx))
-	require.NoError(t, montygo.Flush(ctx))
 	require.Equal(t, []string{"run code", "session {script_name}"}, telNames(spans.Ended()))
 	require.NoError(t, tp.Shutdown(ctx))
 }
 
-func telLoggingFailure(t *testing.T, b montygo.Backend) {
+func telLoggingFailure(t *testing.T, b backend) {
 	ctx := testCtx(t)
 	tp, spans := telTracing()
-	require.NoError(t, montygo.Instrument(montygo.TelemetryComponents{Tracer: tp.Tracer("test"), Logger: telPanicLogger{}}))
-	p := telPool(t, b, montygo.Options{})
-	s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+	p := telPool(t, b, montygo.PoolOptions{Telemetry: &telemetry.Components{Tracer: tp.Tracer("test"), Logger: telPanicLogger{}}})
+	s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 	require.NoError(t, err)
 	require.Equal(t, int64(3), telRunCode(t, ctx, s, "print('hello')\n1 + 2", nil))
 	require.NoError(t, s.Close(ctx))
 	require.NoError(t, p.Close(ctx))
-	require.NoError(t, montygo.Flush(ctx))
 	require.Equal(t, []string{"run code", "session {script_name}"}, telNames(spans.Ended()))
 	require.NoError(t, tp.Shutdown(ctx))
 }
 
-func telMetricFailure(t *testing.T, b montygo.Backend) {
+func telMetricFailure(t *testing.T, b backend) {
 	ctx := testCtx(t)
 	tp, spans := telTracing()
-	require.NoError(t, montygo.Instrument(montygo.TelemetryComponents{Tracer: tp.Tracer("test"), Meter: telPanicMeter{}}))
-	p := telPool(t, b, montygo.Options{})
-	s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+	p := telPool(t, b, montygo.PoolOptions{Telemetry: &telemetry.Components{Tracer: tp.Tracer("test"), Meter: telPanicMeter{}}})
+	s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 	require.NoError(t, err)
 	require.Equal(t, int64(3), telRunCode(t, ctx, s, "1 + 2", nil))
 	require.NoError(t, s.Close(ctx))
 	require.NoError(t, p.Close(ctx))
-	require.NoError(t, montygo.Flush(ctx))
 	require.Equal(t, []string{"run code", "session {script_name}"}, telNames(spans.Ended()))
 	require.NoError(t, tp.Shutdown(ctx))
 }
 
-func telLoggerOnly(t *testing.T, b montygo.Backend) {
+func telLoggerOnly(t *testing.T, b backend) {
 	ctx := testCtx(t)
 	logs := &telLogs{}
 	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(logs))
-	require.NoError(t, montygo.Instrument(montygo.TelemetryComponents{Logger: lp.Logger("test")}))
-	p := telPool(t, b, montygo.Options{})
-	s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+	p := telPool(t, b, montygo.PoolOptions{Telemetry: &telemetry.Components{Logger: lp.Logger("test")}})
+	s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 	require.NoError(t, err)
 	require.Equal(t, int64(3), telRunCode(t, ctx, s, "print('hello')\n1 + 2", nil))
 	require.NoError(t, s.Close(ctx))
 	require.NoError(t, p.Close(ctx))
-	require.NoError(t, montygo.Flush(ctx))
 	records := logs.all()
 	require.NotEmpty(t, records)
 	require.True(t, records[0].TraceID().IsValid())
@@ -388,18 +370,16 @@ func telLoggerOnly(t *testing.T, b montygo.Backend) {
 	require.NoError(t, lp.Shutdown(ctx))
 }
 
-func telTracingFailure(t *testing.T, b montygo.Backend) {
+func telTracingFailure(t *testing.T, b backend) {
 	ctx := testCtx(t)
 	logs := &telLogs{}
 	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(logs))
-	require.NoError(t, montygo.Instrument(montygo.TelemetryComponents{Tracer: telPanicTracer{}, Logger: lp.Logger("test")}))
-	p := telPool(t, b, montygo.Options{})
-	s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+	p := telPool(t, b, montygo.PoolOptions{Telemetry: &telemetry.Components{Tracer: telPanicTracer{}, Logger: lp.Logger("test")}})
+	s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 	require.NoError(t, err)
 	require.Equal(t, int64(3), telRunCode(t, ctx, s, "print('still logged')\n1 + 2", nil))
 	require.NoError(t, s.Close(ctx))
 	require.NoError(t, p.Close(ctx))
-	require.NoError(t, montygo.Flush(ctx))
 	records := logs.all()
 	require.NotEmpty(t, records)
 	require.Equal(t, "print stdout", records[0].Body().AsString())
@@ -409,16 +389,16 @@ func telTracingFailure(t *testing.T, b montygo.Backend) {
 	require.NoError(t, lp.Shutdown(ctx))
 }
 
-func telStandardComponents(t *testing.T, b montygo.Backend) {
+func telStandardComponents(t *testing.T, b backend) {
 	ctx := testCtx(t)
-	inst, err := montygo.NewInstrumentation(montygo.InstrumentationConfig{Traces: telBool(false), Metrics: telBool(false), Logs: telBool(false)})
+	inst, err := telemetry.NewInstrumentation(telemetry.InstrumentationConfig{Traces: telBool(false), Metrics: telBool(false), Logs: telBool(false)})
 	require.NoError(t, err)
 	require.Equal(t, "github.com/asalimonov/montygo", inst.Name())
 	require.Equal(t, montygo.BindingVersion(), inst.Version())
 	cfg := inst.Config()
 	require.NotNil(t, cfg.Enabled)
 	require.True(t, *cfg.Enabled)
-	inst.Disable()
+	require.Nil(t, inst.Components())
 
 	tp, spans := telTracing()
 	tracer := tp.Tracer("test")
@@ -430,23 +410,22 @@ func telStandardComponents(t *testing.T, b montygo.Backend) {
 		sdkmetric.WithView(sdkmetric.NewView(sdkmetric.Instrument{Name: "monty.run.duration"}, sdkmetric.Stream{Name: "monty.custom.run.duration"})),
 	)
 
-	require.EqualError(t, montygo.Instrument(montygo.TelemetryComponents{}), "at least one OpenTelemetry component is required")
-	require.NoError(t, montygo.Instrument(montygo.TelemetryComponents{Tracer: tracer, Meter: mp.Meter("test"), Logger: lp.Logger("test")}))
-	require.EqualError(t, montygo.Instrument(montygo.TelemetryComponents{Tracer: tracer}), "Monty telemetry is already configured")
+	// Empty components record nothing and are not an error.
+	empty := telPool(t, b, montygo.PoolOptions{Telemetry: &telemetry.Components{}})
+	require.NoError(t, empty.Close(ctx))
 
 	parentCtx, parent := tracer.Start(ctx, "parent")
 	func() {
-		p := telPool(t, b, montygo.Options{})
+		p := telPool(t, b, montygo.PoolOptions{Telemetry: &telemetry.Components{Tracer: tracer, Meter: mp.Meter("test"), Logger: lp.Logger("test")}})
 		defer func() { require.NoError(t, p.Close(ctx)) }()
-		s, err := p.Checkout(parentCtx, montygo.CheckoutOptions{ScriptName: "calculation.py"})
+		s, err := p.Checkout(parentCtx, defaultRuntime, montygo.CheckoutOptions{ScriptName: "calculation.py"})
 		require.NoError(t, err)
 		defer func() { require.NoError(t, s.Close(ctx)) }()
-		v := telRunCode(t, parentCtx, s, "print('hello')\n'\\x00' * 70000", &montygo.FeedOptions{Print: &montygo.CollectString{}})
+		v := telRunCode(t, parentCtx, s, "print('hello')\n'\\x00' * 70000", &montygo.FeedOptions{Print: &sandbox.CollectString{}})
 		require.Len(t, v, 70000)
 	}()
 	parent.End()
 
-	require.NoError(t, montygo.Flush(ctx))
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(ctx, &rm))
 
@@ -488,18 +467,16 @@ func telStandardComponents(t *testing.T, b montygo.Backend) {
 	require.NoError(t, mp.Shutdown(ctx))
 }
 
-func telAnswerAttributes(t *testing.T, b montygo.Backend) {
+func telAnswerAttributes(t *testing.T, b backend) {
 	ctx := testCtx(t)
 	tp, spans := telTracing()
-	require.NoError(t, montygo.Instrument(montygo.TelemetryComponents{Tracer: tp.Tracer("test")}))
-	p := telPool(t, b, montygo.Options{})
-	s, err := p.Checkout(ctx, montygo.CheckoutOptions{})
+	p := telTraced(t, b, tp.Tracer("test"))
+	s, err := p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 	require.NoError(t, err)
 	double := func(x int) int { return x * 2 }
 	require.Equal(t, int64(42), telRunCode(t, ctx, s, "double(21)", &montygo.FeedOptions{ExternalLookup: map[string]any{"double": double}}))
 	require.NoError(t, s.Close(ctx))
 	require.NoError(t, p.Close(ctx))
-	require.NoError(t, montygo.Flush(ctx))
 
 	ended := spans.Ended()
 	call := telFind(ended, telNamed("call {function_name}"))
@@ -516,6 +493,6 @@ func telAnswerAttributes(t *testing.T, b montygo.Backend) {
 	session := telFind(ended, telNamed("session {script_name}"))
 	require.NotNil(t, session, telNames(ended))
 	_, hasPID := telSpanAttr(session, "worker_pid")
-	require.Equal(t, b == montygo.BackendNative, hasPID)
+	require.Equal(t, b == backendNative, hasPID)
 	require.NoError(t, tp.Shutdown(ctx))
 }

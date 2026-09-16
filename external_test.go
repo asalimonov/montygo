@@ -8,6 +8,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/monterr"
+	"github.com/asalimonov/montygo/sandbox"
+	"github.com/asalimonov/montygo/sandbox/host"
 )
 
 type extPoint struct {
@@ -16,27 +19,27 @@ type extPoint struct {
 
 type extCall struct {
 	args   []any
-	kwargs montygo.Kwargs
+	kwargs host.Kwargs
 }
 
 func extLookup(entries map[string]any) runOptions {
 	return runOptions{FeedOptions: montygo.FeedOptions{ExternalLookup: entries}}
 }
 
-func extRecorder(calls *[]extCall, result any) montygo.FunctionFunc {
-	return func(_ context.Context, args []any, kwargs montygo.Kwargs) (any, error) {
+func extRecorder(calls *[]extCall, result any) host.FunctionFunc {
+	return func(_ context.Context, args []any, kwargs host.Kwargs) (any, error) {
 		*calls = append(*calls, extCall{args: args, kwargs: kwargs})
 		return result, nil
 	}
 }
 
 func extRaiser(excType, message string) func() error {
-	return func() error { return montygo.Raise(excType, message) }
+	return func() error { return monterr.Raise(excType, message) }
 }
 
-func extRuntimeError(t *testing.T, err error) *montygo.RuntimeError {
+func extRuntimeError(t *testing.T, err error) *monterr.RuntimeError {
 	t.Helper()
-	var re *montygo.RuntimeError
+	var re *monterr.RuntimeError
 	require.ErrorAs(t, err, &re)
 	return re
 }
@@ -48,7 +51,7 @@ func extRequireRuntimeMessage(t *testing.T, err error, message string) {
 }
 
 func TestExternal(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		t.Run("external function no args", func(t *testing.T) {
 			var calls []extCall
 			v := mustRun(t, b, "noop()", extLookup(map[string]any{"noop": extRecorder(&calls, "called")}))
@@ -73,7 +76,7 @@ func TestExternal(t *testing.T) {
 			require.Equal(t, "ok", v)
 			require.Len(t, calls, 1)
 			require.Empty(t, calls[0].args)
-			require.Equal(t, montygo.Kwargs{"a": int64(1), "b": "two"}, calls[0].kwargs)
+			require.Equal(t, host.Kwargs{"a": int64(1), "b": "two"}, calls[0].kwargs)
 		})
 
 		t.Run("external function mixed args kwargs", func(t *testing.T) {
@@ -82,7 +85,7 @@ func TestExternal(t *testing.T) {
 			require.Equal(t, "ok", v)
 			require.Len(t, calls, 1)
 			require.Equal(t, []any{int64(1), int64(2)}, calls[0].args)
-			require.Equal(t, montygo.Kwargs{"x": "hello", "y": true}, calls[0].kwargs)
+			require.Equal(t, host.Kwargs{"x": "hello", "y": true}, calls[0].kwargs)
 		})
 
 		t.Run("external function complex types", func(t *testing.T) {
@@ -92,8 +95,8 @@ func TestExternal(t *testing.T) {
 			require.Len(t, calls, 1)
 			require.Len(t, calls[0].args, 2)
 			require.Equal(t, []any{int64(1), int64(2)}, calls[0].args[0])
-			d, ok := calls[0].args[1].(*montygo.Dict)
-			require.True(t, ok, "dict argument arrives as *montygo.Dict, got %T", calls[0].args[1])
+			d, ok := calls[0].args[1].(*sandbox.Dict)
+			require.True(t, ok, "dict argument arrives as *sandbox.Dict, got %T", calls[0].args[1])
 			got, found := d.Get("key")
 			require.True(t, found)
 			require.Equal(t, "value", got)
@@ -111,15 +114,15 @@ func TestExternal(t *testing.T) {
 				return map[string]any{"a": []int{1, 2, 3}, "b": map[string]any{"nested": true}}
 			}
 			v := mustRun(t, b, "get_data()", extLookup(map[string]any{"get_data": getData}))
-			result, ok := v.(*montygo.Dict)
-			require.True(t, ok, "map result arrives as *montygo.Dict, got %T", v)
+			result, ok := v.(*sandbox.Dict)
+			require.True(t, ok, "map result arrives as *sandbox.Dict, got %T", v)
 			a, found := result.Get("a")
 			require.True(t, found)
 			require.Equal(t, []any{int64(1), int64(2), int64(3)}, a)
 			bv, found := result.Get("b")
 			require.True(t, found)
-			nested, ok := bv.(*montygo.Dict)
-			require.True(t, ok, "nested map arrives as *montygo.Dict, got %T", bv)
+			nested, ok := bv.(*sandbox.Dict)
+			require.True(t, ok, "nested map arrives as *sandbox.Dict, got %T", bv)
 			n, found := nested.Get("nested")
 			require.True(t, found)
 			require.Equal(t, true, n)
@@ -333,7 +336,7 @@ except TypeError as exc:
     caught = str(exc)
 caught
 `
-			bad := func() any { return montygo.Type{Name: "Broken", Origin: montygo.OriginHost} }
+			bad := func() any { return sandbox.Type{Name: "Broken", Origin: sandbox.OriginHost} }
 			v := mustRun(t, b, code, extLookup(map[string]any{"bad": bad}))
 			require.Equal(t, "raw Type markers are not accepted — pass the class through ClassType(...)", v)
 		})
@@ -350,8 +353,8 @@ caught
 
 		t.Run("externalLookup resolves a container value", func(t *testing.T) {
 			v := mustRun(t, b, "data", extLookup(map[string]any{"data": map[string]any{"a": 1, "b": 2}}))
-			result, ok := v.(*montygo.Dict)
-			require.True(t, ok, "map value arrives as *montygo.Dict, got %T", v)
+			result, ok := v.(*sandbox.Dict)
+			require.True(t, ok, "map value arrives as *sandbox.Dict, got %T", v)
 			a, _ := result.Get("a")
 			require.Equal(t, int64(1), a)
 			bv, _ := result.Get("b")
@@ -411,14 +414,14 @@ caught
 			_, err := s.FeedRun(ctx, "f = fn", &montygo.FeedOptions{ExternalLookup: map[string]any{"fn": func() int { return 1 }}})
 			require.NoError(t, err)
 
-			_, err = s.FeedRun(ctx, "f()", &montygo.FeedOptions{ExternalLookup: map[string]any{"fn": montygo.Tuple{int64(1), int64(2)}}})
+			_, err = s.FeedRun(ctx, "f()", &montygo.FeedOptions{ExternalLookup: map[string]any{"fn": sandbox.Tuple{int64(1), int64(2)}}})
 			extRequireRuntimeMessage(t, err, "TypeError: 'tuple' object is not callable")
 
-			datetime := montygo.DateTime{Year: 2020, Month: 1, Day: 2, Hour: 3, Minute: 4, Second: 5, Microsecond: 6}
+			datetime := sandbox.DateTime{Year: 2020, Month: 1, Day: 2, Hour: 3, Minute: 4, Second: 5, Microsecond: 6}
 			_, err = s.FeedRun(ctx, "f()", &montygo.FeedOptions{ExternalLookup: map[string]any{"fn": datetime}})
 			extRequireRuntimeMessage(t, err, "TypeError: 'datetime' object is not callable")
 
-			instance := montygo.MustClassInstance(&extPoint{X: 1, Y: 2}, montygo.ClassInstanceOptions{Name: "Point"})
+			instance := host.MustClassInstance(&extPoint{X: 1, Y: 2}, host.ClassInstanceOptions{Name: "Point"})
 			_, err = s.FeedRun(ctx, "f()", &montygo.FeedOptions{ExternalLookup: map[string]any{"fn": instance}})
 			extRequireRuntimeMessage(t, err, "TypeError: 'Point' object is not callable")
 		})

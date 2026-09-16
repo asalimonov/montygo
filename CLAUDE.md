@@ -12,8 +12,15 @@ montygo is a Go binding for [Monty](https://github.com/pydantic/monty), a sandbo
 
 | Path | Contents |
 |---|---|
-| `*.go` (package `montygo`) | public API: pools, sessions, snapshots, host objects, value conversion, print, mounts, errors, telemetry |
-| `osaccess/` | in-memory OS helpers, a port of `pydantic_monty/os_access.py` |
+| `*.go` (package `montygo`) | the API and its engine: `Runtime`, `Pool`, worker sources, sessions, snapshots, stop policy, the supervisor contract, the upstream pins, `BindingVersion`; the ported upstream suites as `*_test.go` |
+| `sandbox/` | Python value model, conversion, print targets, mounts |
+| `sandbox/host/` | host registry, host functions, futures, class wrappers, the OS handler |
+| `sandbox/osaccess/` | in-memory OS helpers, a port of `pydantic_monty/os_access.py` |
+| `monterr/` | every error the library returns: sandbox exceptions, infrastructure failures, sentinels, `OptionError` |
+| `supervisor/docker/` | supervisor that runs `monty-server` in a container; imports the root |
+| `supervisor/native/` | supervisor that runs `monty-server` as a child process; imports the root |
+| `telemetry/` | OpenTelemetry components and the instrumentation that builds them; nothing global |
+| `internal/buildinfo` | the binding version for packages that cannot import the root |
 | `internal/wire` | framing and the hand-written `monty.v1` protobuf codec |
 | `internal/value` | Go model of Python values |
 | `internal/pool` | worker pool and per-checkout turn engine |
@@ -60,7 +67,7 @@ GOTOOLCHAIN=local go mod tidy -diff               # in the root, examples/ and t
 make server-check            # clippy -D warnings and cargo test in server/ (set MONTY_BIN for session tests)
 make docker-build            # monty-server image for PLATFORMS (default linux/amd64,linux/arm64)
 make docker-build-pyclient   # Python client test image, host architecture
-make test-docker             # root suite on the websocket backend against the image
+make test-docker             # root suite on the docker backend against the image
 make test-network            # tests/network against the images
 make test-network-clean      # remove leaked test containers
 ```
@@ -70,7 +77,9 @@ make test-network-clean      # remove leaked test containers
 | Variable | Effect |
 |---|---|
 | `MONTY_BIN` | native worker binary; tests default it to `../monty/target/debug/monty`; `server/tests/session.rs` skips without it |
-| `MONTY_TEST_BACKENDS` | backends for root tests: `native`, `wasm`, `websocket`; default `native,wasm`, plus `websocket` when `MONTY_TEST_WS_URL` is set |
+| `MONTY_TEST_BACKENDS` | backends for root tests: `native`, `wasm`, `websocket`, `docker`; default `native,wasm`, plus `websocket` when `MONTY_TEST_WS_URL` is set |
+| `MONTYGO_DOCKER_IMAGE` | repository, or pinned reference, of the `monty-server` image `supervisor/docker` runs; default `ghcr.io/asalimonov/monty-server` |
+| `MONTYGO_DOCKER_VERSION` | image tag for `supervisor/docker`; unset derives it from `BindingVersion()` |
 | `MONTY_TEST_WS_URL` | URL of a running `monty-server`; enables the `websocket` backend for root tests |
 | `MONTY_EXAMPLES_BACKEND` | forces `native` or `wasm` in the examples |
 | `MONTY_SRC` | upstream checkout used by `make build-worker`, `make build-wasm` and the image builds, default `../monty` |
@@ -94,10 +103,11 @@ make test-network-clean      # remove leaked test containers
 - Ported tests MUST keep upstream titles as subtest names and run on every backend through `eachBackend`. A test Go cannot express stays as a subtest that calls `t.Skip` with the reason.
 - The worker is untrusted. Code that reads worker output MUST validate it and MUST NOT let a reported limit loosen a configured one.
 - Backends MUST only implement `worker.Worker`. Pool, session, mount and telemetry code MUST NOT branch on the transport, except to classify how a worker ended.
+- The root package MUST NOT alias another package's types. Value types are named through `sandbox`, host objects through `sandbox/host`, errors through `monterr`. Nothing in the library MAY rely on a process-wide variable; configuration travels through `RuntimeOptions`, `PoolOptions` and contexts.
 - The root module MUST build without cgo. New dependencies MUST support Go 1.25.
 - Server texts (close reasons, HTTP bodies, the info page) MUST be defined in `server/src/texts.rs` and listed in `docs/architecture/server.md`. The protocol version refusal and `PoolError` texts MUST come from upstream verbatim.
 - Deviations of `monty-server` from Full Monty (upstream `docs/server.md`) MUST be listed in `docs/parity/server.md`.
-- Server variables use the `MONTY_SERVER_*` prefix. `tests/network` variables use `MONTYGO_*`.
+- Server variables use the `MONTY_SERVER_*` prefix. Library and `tests/network` variables use `MONTYGO_*`.
 - Comments explain only what the code cannot say. Concepts belong in `docs/architecture/`, not in code comments.
 - Docs use short sentences and RFC 2119 keywords for obligations.
 - Commit subjects are imperative. A body holds only facts the diff cannot show.
@@ -118,10 +128,10 @@ make test-network-clean      # remove leaked test containers
 | `internal/mountfs` and its tests | `crates/monty-fs/src`, `crates/monty-fs/tests` |
 | package `montygo` API | `crates/monty-js/ts/` |
 | root `*_test.go` | `crates/monty-js/__test__/*.spec.ts` |
-| `websocket.go`, `internal/pool/websocket_test.go` | `crates/monty-python` WebSocket client and tests, `crates/monty-pool/tests/websocket.rs` |
+| `workers.go`, `serverinfo.go`, `websocket_test.go`, `internal/pool/websocket_test.go` | `crates/monty-python` WebSocket client and tests, `crates/monty-pool/tests/websocket.rs` |
 | `server/` | `docs/server.md` (Full Monty behaviour, flags, defaults), `Checkout::turn_raw` in `crates/monty-pool/src/checkout.rs` |
 | `docker/pyclient.Dockerfile`, `tests/network/pyclient/` | `crates/monty-python` (`pydantic-monty-client` wheel, `AsyncMontyWebsocket`) |
-| `osaccess/` | `crates/monty-python/python/pydantic_monty/os_access.py`, `crates/monty-python/tests/test_os_access*.py` |
+| `sandbox/osaccess/` | `crates/monty-python/python/pydantic_monty/os_access.py`, `crates/monty-python/tests/test_os_access*.py` |
 | `examples/` | `examples/` |
 | `examples/repl` | REPL loop in `crates/monty-runtime/src/run.rs`, continuation in `crates/monty/src/repl.rs` |
 

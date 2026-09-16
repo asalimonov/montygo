@@ -7,10 +7,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/monterr"
 )
 
 func TestRepl(t *testing.T) {
-	eachBackend(t, func(t *testing.T, b montygo.Backend) {
+	eachBackend(t, func(t *testing.T, b backend) {
 		t.Run("feed preserves state without replay", func(t *testing.T) {
 			ctx := testCtx(t)
 			session := newSession(t, b, montygo.CheckoutOptions{})
@@ -36,7 +37,7 @@ func TestRepl(t *testing.T) {
 			_, err := session.FeedRun(ctx, "x = 1", nil)
 			require.NoError(t, err)
 			_, err = session.FeedRun(ctx, "1 / 0", nil)
-			var runtimeErr *montygo.RuntimeError
+			var runtimeErr *monterr.RuntimeError
 			require.ErrorAs(t, err, &runtimeErr)
 			require.EqualError(t, err, "ZeroDivisionError: division by zero")
 			require.Equal(t, strings.Join([]string{
@@ -45,7 +46,7 @@ func TestRepl(t *testing.T) {
 				"    1 / 0",
 				"    ~~~~~",
 				"ZeroDivisionError: division by zero",
-			}, "\n"), runtimeErr.Display(montygo.DisplayTraceback))
+			}, "\n"), runtimeErr.Display(monterr.DisplayTraceback))
 			v, err := session.FeedRun(ctx, "x", nil)
 			require.NoError(t, err)
 			require.Equal(t, int64(1), v)

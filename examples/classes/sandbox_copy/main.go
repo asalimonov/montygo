@@ -5,6 +5,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/asalimonov/montygo/sandbox"
+	"github.com/asalimonov/montygo/sandbox/host"
 	"io"
 	"os"
 
@@ -29,19 +31,23 @@ func main() {
 func run(ctx context.Context, out io.Writer) error {
 	point := &Point{X: 1, Y: 2}
 
-	pool, err := montygo.New(ctx, montyenv.PoolOptions())
+	pool, err := montygo.NewPool(ctx, montyenv.PoolOptions())
 	if err != nil {
 		return err
 	}
 	defer pool.Close(ctx)
 
 	result, err := func() (any, error) {
-		session, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
+		rt, err := montygo.NewRuntime(montygo.RuntimeOptions{})
+		if err != nil {
+			return nil, err
+		}
+		session, err := pool.Checkout(ctx, rt, montygo.CheckoutOptions{})
 		if err != nil {
 			return nil, err
 		}
 		defer session.Close(ctx)
-		p, err := montygo.NewClassInstance(point, montygo.ClassInstanceOptions{EagerAttrs: montygo.All()})
+		p, err := host.NewClassInstance(point, host.ClassInstanceOptions{EagerAttrs: host.All()})
 		if err != nil {
 			return nil, err
 		}
@@ -51,12 +57,12 @@ func run(ctx context.Context, out io.Writer) error {
 		return err
 	}
 
-	if !montygo.Equal(result, 99) {
-		return fmt.Errorf("assertion failed: result == %s", montygo.Repr(result))
+	if !sandbox.Equal(result, 99) {
+		return fmt.Errorf("assertion failed: result == %s", sandbox.Repr(result))
 	}
 	if point.X != 1 {
 		return fmt.Errorf("assertion failed: point.x == %d", point.X)
 	}
-	fmt.Fprintf(out, "sandbox copy saw x=%s, host object still %v\n", montygo.Repr(result), point)
+	fmt.Fprintf(out, "sandbox copy saw x=%s, host object still %v\n", sandbox.Repr(result), point)
 	return nil
 }

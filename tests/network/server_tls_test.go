@@ -35,14 +35,14 @@ func TestTLS_WSSThroughReverseProxy(t *testing.T) {
 	ctx := testCtx(t)
 	wss, tlsConfig := tlsProxy(t, s)
 
-	p := s.NewPool(montygo.WebSocketOptions{URL: wss, TLSConfig: tlsConfig})
+	p := s.NewPool(wsOptions{URL: wss, TLSConfig: tlsConfig})
 	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	v, err := session.FeedRun(ctx, "x = 20\nx + 22", nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(42), v)
 
-	untrusted := s.NewPool(montygo.WebSocketOptions{URL: wss})
-	_, err = untrusted.Checkout(ctx, montygo.CheckoutOptions{})
+	untrusted := s.NewPool(wsOptions{URL: wss})
+	_, err = untrusted.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "certificate")
 }
@@ -53,8 +53,8 @@ func TestTLS_HealthCheckOverTLS(t *testing.T) {
 	ctx := testCtx(t)
 	wss, tlsConfig := tlsProxy(t, s)
 
-	require.NoError(t, montygo.CheckWebSocketHealth(ctx, montygo.WebSocketOptions{URL: wss, TLSConfig: tlsConfig}))
-	require.Error(t, montygo.CheckWebSocketHealth(ctx, montygo.WebSocketOptions{URL: wss}))
+	require.NoError(t, checkHealth(ctx, wsOptions{URL: wss, TLSConfig: tlsConfig}))
+	require.Error(t, checkHealth(ctx, wsOptions{URL: wss}))
 }
 
 func TestTLS_DialContextIsUsed(t *testing.T) {
@@ -63,7 +63,7 @@ func TestTLS_DialContextIsUsed(t *testing.T) {
 	ctx := testCtx(t)
 	var dials atomic.Int32
 	dialer := &net.Dialer{}
-	p := s.NewPool(montygo.WebSocketOptions{
+	p := s.NewPool(wsOptions{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			dials.Add(1)
 			return dialer.DialContext(ctx, network, addr)

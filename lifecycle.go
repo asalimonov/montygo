@@ -8,7 +8,10 @@ import (
 	"time"
 
 	"github.com/asalimonov/montygo/internal/pool"
+	"github.com/asalimonov/montygo/internal/wire"
 	"github.com/asalimonov/montygo/internal/worker"
+	monterr "github.com/asalimonov/montygo/monterr"
+	host "github.com/asalimonov/montygo/sandbox/host"
 )
 
 type executionPhase uint8
@@ -39,7 +42,7 @@ type execution struct {
 	stop            *stopRequest
 	// delivered is set once a catchable stop reason was raised in the sandbox.
 	delivered       bool
-	pending         map[uint32]*Future
+	pending         map[uint32]*host.Future
 	done            chan struct{}
 	operationDone   chan struct{}
 	value           any
@@ -72,15 +75,23 @@ type snapshotToken struct {
 	used     bool
 }
 
-func newSession(p *Pool, scriptName string, limits sessionLimits) *Session {
-	return &Session{pool: p, store: newInstanceStore(limits.hostObjects), scriptName: scriptName, limits: limits, life: lifecycle{done: make(chan struct{})}}
+func newSession(p *Pool, rt *Runtime, cfg wire.Configure, limits sessionLimits) *Session {
+	return &Session{pool: p, rt: rt, store: host.NewInstanceStore(limits.hostObjects), scriptName: cfg.ScriptName, cfg: cfg,
+		limits: limits, life: lifecycle{done: make(chan struct{})}}
 }
 
-func (s *Session) attach(co *pool.Checkout) {
+// attach binds the session to a connection and watches it. A rotation stops the
+// watcher before closing the old connection, so a planned close is not a loss.
+func (s *Session) attach(co *pool.Checkout, dialStart time.Time) {
 	s.co = co
+	stop := make(chan struct{})
+	var once sync.Once
+	s.armRotation(dialStart, func() { once.Do(func() { close(stop) }) })
 	go func() {
 		select {
 		case <-co.Done():
+		case <-stop:
+			return
 		case <-s.Done():
 			return
 		}
@@ -101,13 +112,15 @@ func (s *Session) attach(co *pool.Checkout) {
 			// Let the protocol owner classify queued Error/ShutdownDump frames.
 			select {
 			case <-wait:
+			case <-stop:
+				return
 			case <-s.Done():
 				return
 			}
 		}
 		var err error
-		if s.pool.backend == BackendWebSocket {
-			de := &DisconnectError{Message: "monty worker connection closed while idle"}
+		if co.Kind() == worker.KindWebSocket {
+			de := &monterr.DisconnectError{Message: "monty worker connection closed while idle"}
 			var closed *worker.ClosedError
 			if errors.As(co.WorkerErr(), &closed) {
 				de.Code, de.Reason = closed.Code, closed.Reason
@@ -115,7 +128,7 @@ func (s *Session) attach(co *pool.Checkout) {
 			}
 			err = de
 		} else {
-			err = &CrashedError{Message: "monty worker crashed while idle"}
+			err = &monterr.CrashedError{Message: "monty worker crashed while idle"}
 		}
 		_ = s.terminateSession(err)
 	}()
@@ -131,15 +144,15 @@ func (s *Session) reserveExecution(ctx context.Context) (*execution, error) {
 		return nil, err
 	}
 	if s.life.current != nil || s.life.controlDone != nil {
-		return nil, ErrSessionBusy
+		return nil, monterr.ErrSessionBusy
 	}
 	if s.life.nextID == math.MaxUint64 {
-		return nil, &ValueError{Message: "execution ID exhausted"}
+		return nil, &monterr.ValueError{Message: "execution ID exhausted"}
 	}
 	s.life.nextID++
 	cb, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	e := &execution{id: s.life.nextID, phase: executionStarting, callbackCtx: cb, cancelCallbacks: cancel,
-		pending: map[uint32]*Future{}, done: make(chan struct{}), operationDone: make(chan struct{}), releaseObserver: s.co.HoldObserver()}
+		pending: map[uint32]*host.Future{}, done: make(chan struct{}), operationDone: make(chan struct{}), releaseObserver: s.co.HoldObserver()}
 	s.life.current = e
 	s.installStepLocked(e, ctx)
 	return e, nil
@@ -160,7 +173,7 @@ func (s *Session) admissionErrorLocked() error {
 		return s.life.terminal
 	}
 	if s.life.closeAttempt != nil {
-		return ErrSessionClosed
+		return monterr.ErrSessionClosed
 	}
 	return nil
 }
@@ -173,7 +186,7 @@ func (s *Session) executionErrorLocked(e *execution) error {
 		return e.terminalCause
 	}
 	if s.life.current != e || e.phase == executionFinished {
-		return ErrSnapshotStale
+		return monterr.ErrSnapshotStale
 	}
 	return nil
 }
@@ -383,6 +396,7 @@ func (s *Session) terminateSession(err error) error {
 	if cancel != nil {
 		cancel()
 	}
+	s.conn.disarm()
 	s.co.Terminate(err, "session_ended")
 	s.pool.untrack(s)
 	if paused {
@@ -391,20 +405,20 @@ func (s *Session) terminateSession(err error) error {
 	return err
 }
 
-func (s *Session) addFuture(e *execution, callID uint32, f *Future) error {
+func (s *Session) addFuture(e *execution, callID uint32, f *host.Future) error {
 	s.life.mu.Lock()
 	defer s.life.mu.Unlock()
 	if err := s.executionErrorLocked(e); err != nil {
 		return err
 	}
 	if f == nil {
-		return &ValueError{Message: "host returned a nil Future"}
+		return &monterr.ValueError{Message: "host returned a nil Future"}
 	}
 	if _, exists := e.pending[callID]; exists {
-		return &ProtocolError{Message: "duplicate pending future call ID"}
+		return &monterr.ProtocolError{Message: "duplicate pending future call ID"}
 	}
 	if s.limits.pendingFutures != Unlimited && uint64(len(e.pending)) >= s.limits.pendingFutures {
-		return &ResourceError{Resource: "pending future", Limit: s.limits.pendingFutures}
+		return &monterr.ResourceError{Resource: "pending future", Limit: s.limits.pendingFutures}
 	}
 	e.pending[callID] = f
 	return nil

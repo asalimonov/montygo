@@ -1,6 +1,9 @@
 package montygo
 
-import "context"
+import (
+	"context"
+	monterr "github.com/asalimonov/montygo/monterr"
+)
 
 func (s *Session) reserveControl(ctx context.Context, allowPaused bool) (func(), error) {
 	return s.reserveControlFor(ctx, allowPaused, nil)
@@ -21,12 +24,12 @@ func (s *Session) reserveControlFor(ctx context.Context, allowPaused bool, token
 		return nil, err
 	}
 	if s.life.controlDone != nil {
-		return nil, ErrSessionBusy
+		return nil, monterr.ErrSessionBusy
 	}
 	e := s.life.current
 	if e != nil {
 		if !allowPaused || e.phase != executionPaused {
-			return nil, ErrSessionBusy
+			return nil, monterr.ErrSessionBusy
 		}
 		e.phase, e.wireInFlight = executionControl, true
 		e.turnDone = make(chan struct{})
@@ -72,7 +75,7 @@ func (s *Session) Close(ctx context.Context, policy ...StopPolicy) error {
 		return err
 	}
 	if p.Timeout < 0 {
-		_ = s.terminateSession(ErrSessionClosed)
+		_ = s.terminateSession(monterr.ErrSessionClosed)
 		return nil
 	}
 	s.life.mu.Lock()
@@ -157,7 +160,7 @@ func (s *Session) closeOwned(ctx context.Context) error {
 			s.life.mu.Unlock()
 			release := s.co.HoldObserver()
 			err := s.co.Finish(ctx)
-			cause := error(ErrSessionClosed)
+			cause := error(monterr.ErrSessionClosed)
 			if err != nil {
 				err = s.mapError(err)
 				cause = err
