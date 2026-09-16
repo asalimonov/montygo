@@ -11,15 +11,17 @@ lock = threading.Lock()
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
+        encoded = base64.b64encode(body).decode()
         with lock:
-            received.append({'path': self.path, 'bytes': len(body)})
-        print(f'OTLP {self.path} {base64.b64encode(body).decode()}', flush=True)
+            received.append({'path': self.path, 'bytes': len(body), 'body': encoded})
+        print(f'OTLP {self.path} {encoded}', flush=True)
         self.send_response(200)
         self.send_header('Content-Type', 'application/x-protobuf')
         self.send_header('Content-Length', '0')
         self.end_headers()
 
-    # GET /requests reports what arrived, independently of the container log.
+    # GET /requests returns what arrived; the container log is only a debugging aid,
+    # because docker can lose stdout lines on some runners.
     def do_GET(self) -> None:
         with lock:
             body = json.dumps(received).encode()
