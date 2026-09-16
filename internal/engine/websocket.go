@@ -113,12 +113,12 @@ func NewWebSocket(ctx context.Context, opts WebSocketOptions) (*Pool, error) {
 			info = fetched
 		}
 	}
-	return newWebSocketPool(ctx, opts, BackendWebSocket, info)
+	return NewWebSocketPool(ctx, opts, BackendWebSocket, info)
 }
 
-// newWebSocketPool builds the pool NewWebSocket and NewDocker share. info is the
+// NewWebSocketPool builds the pool NewWebSocket and NewDocker share. info is the
 // server's reported limits, or nil when rotation is off or unavailable.
-func newWebSocketPool(ctx context.Context, opts WebSocketOptions, backend Backend, info *ServerInfo) (*Pool, error) {
+func NewWebSocketPool(ctx context.Context, opts WebSocketOptions, backend Backend, info *ServerInfo) (*Pool, error) {
 	timeout := opts.RequestTimeout
 	switch {
 	case timeout == 0:

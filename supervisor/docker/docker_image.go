@@ -1,20 +1,22 @@
-package engine
+package docker
 
 import (
 	"fmt"
+	"github.com/asalimonov/montygo/internal/buildinfo"
+	pyrt "github.com/asalimonov/montygo/runtime"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 )
 
-// DefaultDockerImage is the repository montygo pulls monty-server from.
-const DefaultDockerImage = "ghcr.io/asalimonov/monty-server"
+// DefaultImage is the repository montygo pulls monty-server from.
+const DefaultImage = "ghcr.io/asalimonov/monty-server"
 
 // Variables that override the image of a Docker pool.
 const (
-	DockerImageEnv   = "MONTYGO_DOCKER_IMAGE"
-	DockerVersionEnv = "MONTYGO_DOCKER_VERSION"
+	ImageEnv   = "MONTYGO_DOCKER_IMAGE"
+	VersionEnv = "MONTYGO_DOCKER_VERSION"
 )
 
 var (
@@ -26,30 +28,30 @@ var (
 	shortHashRE      = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
 )
 
-// dockerImageCandidates resolves the references to try, in order. The option
+// imageCandidates resolves the references to try, in order. The option
 // wins over the variable, which wins over the default; an explicit version or a
 // pinned reference yields exactly one candidate.
-func dockerImageCandidates(image, version, binding string, getenv func(string) string) ([]string, error) {
-	repo := firstNonEmpty(image, getenv(DockerImageEnv), DefaultDockerImage)
-	ver := firstNonEmpty(version, getenv(DockerVersionEnv))
+func imageCandidates(image, version, binding string, getenv func(string) string) ([]string, error) {
+	repo := firstNonEmpty(image, getenv(ImageEnv), DefaultImage)
+	ver := firstNonEmpty(version, getenv(VersionEnv))
 	if pinnedReference(repo) {
 		if ver != "" {
-			return nil, &OptionError{Message: fmt.Sprintf("image %q already pins a tag or digest; leave the version empty", repo)}
+			return nil, &pyrt.OptionError{Message: fmt.Sprintf("image %q already pins a tag or digest; leave the version empty", repo)}
 		}
 		return []string{repo}, nil
 	}
 	if ver != "" {
 		if !imageTagRE.MatchString(ver) {
-			return nil, &OptionError{Message: fmt.Sprintf("invalid monty-server image tag %q", ver)}
+			return nil, &pyrt.OptionError{Message: fmt.Sprintf("invalid monty-server image tag %q", ver)}
 		}
 		return []string{repo + ":" + ver}, nil
 	}
 	tags := candidateTags(binding)
 	if len(tags) == 0 {
-		return nil, &OptionError{Message: fmt.Sprintf(
-			"cannot derive a monty-server image tag from montygo version %q: set DockerOptions.Version or %s, "+
-				"pin DockerOptions.Image or %s, or stamp -ldflags \"-X %s.buildVersion=<version>\"",
-			binding, DockerVersionEnv, DockerImageEnv, modulePath)}
+		return nil, &pyrt.OptionError{Message: fmt.Sprintf(
+			"cannot derive a monty-server image tag from montygo version %q: set Options.Version or %s, "+
+				"pin Options.Image or %s, or stamp -ldflags \"-X %s.buildVersion=<version>\"",
+			binding, VersionEnv, ImageEnv, buildinfo.ModulePath)}
 	}
 	refs := make([]string, 0, len(tags))
 	for _, tag := range tags {
@@ -70,7 +72,7 @@ func pinnedReference(ref string) bool {
 // first, then the release it was built from. Only releases are published, so a
 // development tree falls back to its base release.
 func candidateTags(v string) []string {
-	if v == "" || v == "(devel)" || v == unknownVersion || pseudoUntaggedRE.MatchString(v) {
+	if v == "" || v == "(devel)" || v == buildinfo.UnknownVersion || pseudoUntaggedRE.MatchString(v) {
 		return nil
 	}
 	if m := pseudoPreRE.FindStringSubmatch(v); m != nil {

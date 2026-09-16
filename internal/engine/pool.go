@@ -248,6 +248,14 @@ func (s *poolWasmSpawner) Spawn(ctx context.Context) (worker.Worker, error) {
 	return s.SpawnWith(ctx, s.stderr, s.pending, s.observe)
 }
 
+// OwnSupervisor makes the pool responsible for closing c: Shutdown stops it
+// after closing the sessions, and Close stops it once the last session closes.
+// A supervisor the caller keeps is never closed by the pool.
+func (p *Pool) OwnSupervisor(c interface{ Close(context.Context) error }, stopTimeout time.Duration) {
+	p.owned = c
+	p.ownedStop = stopTimeout
+}
+
 // observe builds this pool's per-checkout telemetry observer.
 func (p *Pool) observe(parent context.Context) func(pid int, hasPID bool) pool.Observer {
 	rec, metered := p.rec, p.metered

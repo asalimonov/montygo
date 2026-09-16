@@ -1,4 +1,4 @@
-package engine
+package docker
 
 import (
 	"context"
@@ -6,6 +6,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/asalimonov/montygo/internal/buildinfo"
+	eng "github.com/asalimonov/montygo/internal/engine"
+	pyrt "github.com/asalimonov/montygo/runtime"
+	sup "github.com/asalimonov/montygo/supervisor"
+	mtel "github.com/asalimonov/montygo/telemetry"
 	"maps"
 	"os"
 	"runtime"
@@ -22,11 +27,11 @@ const (
 	dockerServerPort          = "8000"
 )
 
-// DockerOptions configure a monty-server container montygo runs through the
+// Options configure a monty-server container montygo runs through the
 // local Docker CLI, and the pool that dials it.
-type DockerOptions struct {
+type Options struct {
 	// Image is a repository, or a reference pinned with :tag or @digest;
-	// "" uses MONTYGO_DOCKER_IMAGE, then DefaultDockerImage.
+	// "" uses MONTYGO_DOCKER_IMAGE, then DefaultImage.
 	Image string
 	// Version is the image tag; "" uses MONTYGO_DOCKER_VERSION, then the tags
 	// derived from BindingVersion: the exact version, then its base release.
@@ -43,84 +48,84 @@ type DockerOptions struct {
 	// StopTimeout is docker stop's grace period: 0 means 10s.
 	StopTimeout time.Duration
 	// Reaper removes containers left by earlier processes; nil reaps nothing.
-	Reaper OrphanReaper
+	Reaper sup.OrphanReaper
 
 	MaxProcesses    int
 	CheckoutTimeout time.Duration
 	RequestTimeout  time.Duration
 	// Recovery bounds retries of a dial; RestartServer allows restarting the container.
-	Recovery RecoveryPolicy
+	Recovery sup.RecoveryPolicy
 	// RotationMargin is the lead time of a session rotation: 0 means 30s.
 	RotationMargin time.Duration
-	Telemetry      *TelemetryComponents
-	Stop           StopPolicy
+	Telemetry      *mtel.Components
+	Stop           eng.StopPolicy
 }
 
-func (o DockerOptions) validate() error {
+func (o Options) validate() error {
 	switch {
 	case o.StartTimeout < 0:
-		return &OptionError{Message: "startTimeout must not be negative"}
+		return &pyrt.OptionError{Message: "startTimeout must not be negative"}
 	case o.StopTimeout < 0:
-		return &OptionError{Message: "stopTimeout must not be negative"}
+		return &pyrt.OptionError{Message: "stopTimeout must not be negative"}
 	case o.MaxProcesses < 0:
-		return &OptionError{Message: "maxProcesses must not be negative"}
+		return &pyrt.OptionError{Message: "maxProcesses must not be negative"}
 	case o.Recovery.Attempts < 0:
-		return &OptionError{Message: "recovery.attempts must not be negative"}
+		return &pyrt.OptionError{Message: "recovery.attempts must not be negative"}
 	case o.Recovery.AttemptTimeout < 0:
-		return &OptionError{Message: "recovery.attemptTimeout must not be negative"}
+		return &pyrt.OptionError{Message: "recovery.attemptTimeout must not be negative"}
 	case o.RotationMargin < 0:
-		return &OptionError{Message: "rotationMargin must not be negative"}
+		return &pyrt.OptionError{Message: "rotationMargin must not be negative"}
 	}
 	return nil
 }
 
-func (o DockerOptions) startTimeout() time.Duration {
+func (o Options) startTimeout() time.Duration {
 	if o.StartTimeout == 0 {
 		return defaultDockerStartTimeout
 	}
 	return o.StartTimeout
 }
 
-func (o DockerOptions) stopTimeout() time.Duration {
+func (o Options) stopTimeout() time.Duration {
 	if o.StopTimeout == 0 {
 		return defaultDockerStopTimeout
 	}
 	return o.StopTimeout
 }
 
-func (o DockerOptions) maxProcesses() int {
+func (o Options) maxProcesses() int {
 	if o.MaxProcesses == 0 {
 		return runtime.NumCPU()
 	}
 	return o.MaxProcesses
 }
 
-// DockerSupervisor runs monty-server in a container on the local Docker daemon.
-// It is a ServerSupervisor: NewDocker owns one, and an application MAY pass it
+// Supervisor runs monty-server in a container on the local Docker daemon.
+// It is a ServerSupervisor: NewPool owns one, and an application MAY pass it
 // to NewWebSocket itself.
-type DockerSupervisor struct {
+type Supervisor struct {
 	cli    *dockerCLI
-	opts   DockerOptions
+	opts   Options
 	image  string
 	labels map[string]string
 	env    map[string]string
 
 	mu       sync.Mutex
 	id       string
-	endpoint ServerEndpoint
-	info     *ServerInfo
+	endpoint sup.ServerEndpoint
+	info     *eng.ServerInfo
 	closed   bool
 }
 
-// NewDockerSupervisor resolves the image, starts a container and waits until the
+// New resolves the image, starts a container and waits until the
 // server is healthy and speaks this parent's protocol version.
-func NewDockerSupervisor(ctx context.Context, opts DockerOptions) (*DockerSupervisor, error) {
+func New(ctx context.Context, opts Options) (*Supervisor, error) {
 	if err := opts.validate(); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, opts.startTimeout())
 	defer cancel()
-	d := &DockerSupervisor{opts: opts}
+	d := &Supervisor{opts: opts}
 	d.env = d.serverEnv()
 	cli, err := newDockerCLI(opts.Command, d.env)
 	if err != nil {
@@ -129,12 +134,12 @@ func NewDockerSupervisor(ctx context.Context, opts DockerOptions) (*DockerSuperv
 	d.cli = cli
 	reaper := opts.Reaper
 	if reaper == nil {
-		reaper = noopReaper{}
+		reaper = sup.NoopReaper{}
 	}
 	if err := reaper.Reap(ctx); err != nil {
 		return nil, fmt.Errorf("reap orphaned monty-server containers: %w", err)
 	}
-	candidates, err := dockerImageCandidates(opts.Image, opts.Version, bindingVersion(), os.Getenv)
+	candidates, err := imageCandidates(opts.Image, opts.Version, buildinfo.Version(), os.Getenv)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +150,7 @@ func NewDockerSupervisor(ctx context.Context, opts DockerOptions) (*DockerSuperv
 	d.image = ref
 	d.labels = map[string]string{
 		"io.montygo.supervisor": randomHex(16),
-		"io.montygo.version":    bindingVersion(),
+		"io.montygo.version":    buildinfo.Version(),
 		"io.montygo.pid":        strconv.Itoa(os.Getpid()),
 	}
 	if err := d.start(ctx); err != nil {
@@ -154,15 +159,15 @@ func NewDockerSupervisor(ctx context.Context, opts DockerOptions) (*DockerSuperv
 	return d, nil
 }
 
-// NewDocker starts a monty-server container and returns a pool whose sessions
+// NewPool starts a monty-server container and returns a pool whose sessions
 // dial it. The pool owns the supervisor: Close and Shutdown stop the container.
-func NewDocker(ctx context.Context, opts DockerOptions) (*Pool, error) {
-	sup, err := NewDockerSupervisor(ctx, opts)
+func NewPool(ctx context.Context, opts Options) (*eng.Pool, error) {
+	s, err := New(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
-	p, err := newWebSocketPool(ctx, WebSocketOptions{
-		Supervisor:      sup,
+	p, err := eng.NewWebSocketPool(ctx, eng.WebSocketOptions{
+		Supervisor:      s,
 		Recovery:        opts.Recovery,
 		RotateSessions:  true,
 		RotationMargin:  opts.RotationMargin,
@@ -171,33 +176,32 @@ func NewDocker(ctx context.Context, opts DockerOptions) (*Pool, error) {
 		RequestTimeout:  opts.RequestTimeout,
 		Telemetry:       opts.Telemetry,
 		Stop:            opts.Stop,
-	}, BackendDocker, sup.ServerInfo())
+	}, eng.BackendDocker, s.ServerInfo())
 	if err != nil {
-		_ = sup.Close(context.WithoutCancel(ctx))
+		_ = s.Close(context.WithoutCancel(ctx))
 		return nil, err
 	}
-	p.owned = sup
-	p.ownedStop = opts.stopTimeout()
+	p.OwnSupervisor(s, opts.stopTimeout())
 	return p, nil
 }
 
 // Endpoint reports where sessions dial now.
-func (d *DockerSupervisor) Endpoint(ctx context.Context) (ServerEndpoint, error) {
+func (d *Supervisor) Endpoint(ctx context.Context) (sup.ServerEndpoint, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.closed {
-		return ServerEndpoint{}, ErrSupervisorClosed
+		return sup.ServerEndpoint{}, sup.ErrSupervisorClosed
 	}
 	return d.endpoint, nil
 }
 
 // Restart replaces the container behind failed. A restart that already happened
 // is reported as success, so concurrent callers restart once.
-func (d *DockerSupervisor) Restart(ctx context.Context, failed ServerEndpoint) error {
+func (d *Supervisor) Restart(ctx context.Context, failed sup.ServerEndpoint) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.closed {
-		return ErrSupervisorClosed
+		return sup.ErrSupervisorClosed
 	}
 	if failed.URL != "" && failed.URL != d.endpoint.URL {
 		return nil
@@ -214,7 +218,7 @@ func (d *DockerSupervisor) Restart(ctx context.Context, failed ServerEndpoint) e
 }
 
 // Close stops and removes the container; it is idempotent.
-func (d *DockerSupervisor) Close(ctx context.Context) error {
+func (d *Supervisor) Close(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.closed {
@@ -228,29 +232,29 @@ func (d *DockerSupervisor) Close(ctx context.Context) error {
 }
 
 // Image is the reference the container runs.
-func (d *DockerSupervisor) Image() string { return d.image }
+func (d *Supervisor) Image() string { return d.image }
 
 // ContainerID is the current container, or "" before the first start.
-func (d *DockerSupervisor) ContainerID() string {
+func (d *Supervisor) ContainerID() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.id
 }
 
 // ServerInfo is what the server reported at GET /info after its last start.
-func (d *DockerSupervisor) ServerInfo() *ServerInfo {
+func (d *Supervisor) ServerInfo() *eng.ServerInfo {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.info
 }
 
-func (d *DockerSupervisor) start(ctx context.Context) error {
+func (d *Supervisor) start(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.startLocked(ctx)
 }
 
-func (d *DockerSupervisor) startLocked(ctx context.Context) error {
+func (d *Supervisor) startLocked(ctx context.Context) error {
 	id, err := d.cli.runContainer(ctx, d.runArgs())
 	if err != nil {
 		return err
@@ -262,18 +266,18 @@ func (d *DockerSupervisor) startLocked(ctx context.Context) error {
 }
 
 // bind reads the published port of id and waits until its server is usable.
-func (d *DockerSupervisor) bind(ctx context.Context, id string) error {
+func (d *Supervisor) bind(ctx context.Context, id string) error {
 	port, err := d.cli.hostPort(ctx, id)
 	if err != nil {
 		d.discard(id)
 		return err
 	}
-	ep := ServerEndpoint{URL: "ws://127.0.0.1:" + port + "/"}
+	ep := sup.ServerEndpoint{URL: "ws://127.0.0.1:" + port + "/"}
 	info, err := d.waitReady(ctx, ep)
 	if err != nil {
 		logs := d.cli.logsTail(context.WithoutCancel(ctx), id, 20)
 		d.discard(id)
-		msg := fmt.Sprintf("monty-server container %s did not become usable (DockerSupervisor supports local Docker daemons only): %v", shortContainerID(id), err)
+		msg := fmt.Sprintf("monty-server container %s did not become usable (Supervisor supports local Docker daemons only): %v", shortContainerID(id), err)
 		if logs != "" {
 			msg += "\n" + logs
 		}
@@ -283,12 +287,12 @@ func (d *DockerSupervisor) bind(ctx context.Context, id string) error {
 	return nil
 }
 
-func (d *DockerSupervisor) waitReady(ctx context.Context, ep ServerEndpoint) (*ServerInfo, error) {
-	opts := WebSocketOptions{URL: ep.URL, RequestTimeout: 2 * time.Second}
+func (d *Supervisor) waitReady(ctx context.Context, ep sup.ServerEndpoint) (*eng.ServerInfo, error) {
+	opts := eng.WebSocketOptions{URL: ep.URL, RequestTimeout: 2 * time.Second}
 	ticker := time.NewTicker(dockerHealthInterval)
 	defer ticker.Stop()
 	for {
-		err := CheckWebSocketHealth(ctx, opts)
+		err := eng.CheckWebSocketHealth(ctx, opts)
 		if err == nil {
 			break
 		}
@@ -301,18 +305,18 @@ func (d *DockerSupervisor) waitReady(ctx context.Context, ep ServerEndpoint) (*S
 		case <-ticker.C:
 		}
 	}
-	info, err := FetchServerInfo(ctx, opts)
+	info, err := eng.FetchServerInfo(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
-	if info.ProtocolVersion != protocolVersion {
-		return nil, fmt.Errorf("monty-server speaks protocol version %d, this montygo speaks %d", info.ProtocolVersion, protocolVersion)
+	if info.ProtocolVersion != buildinfo.ProtocolVersion {
+		return nil, fmt.Errorf("monty-server speaks protocol version %d, this montygo speaks %d", info.ProtocolVersion, buildinfo.ProtocolVersion)
 	}
 	return info, nil
 }
 
 // discard removes a container that never became usable.
-func (d *DockerSupervisor) discard(id string) {
+func (d *Supervisor) discard(id string) {
 	ctx, cancel := context.WithTimeout(context.Background(), d.opts.stopTimeout()+5*time.Second)
 	defer cancel()
 	_, _ = d.cli.run(ctx, "rm", "-f", id)
@@ -323,7 +327,7 @@ func (d *DockerSupervisor) discard(id string) {
 // per-client quota cannot count this process's connections against itself. The
 // session and turn timeouts stay at the image defaults, because rotation relies
 // on the turn timeout bounding every execution.
-func (d *DockerSupervisor) serverEnv() map[string]string {
+func (d *Supervisor) serverEnv() map[string]string {
 	env := map[string]string{
 		"MONTY_SERVER_DUMP_KEY":                randomHex(32),
 		"MONTY_SERVER_MAX_SESSIONS":            strconv.Itoa(2 * d.opts.maxProcesses()),
@@ -336,7 +340,7 @@ func (d *DockerSupervisor) serverEnv() map[string]string {
 	return env
 }
 
-func (d *DockerSupervisor) runArgs() []string {
+func (d *Supervisor) runArgs() []string {
 	args := []string{
 		"run", "-d",
 		"--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
