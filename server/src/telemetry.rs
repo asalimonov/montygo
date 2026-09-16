@@ -20,7 +20,7 @@ use opentelemetry_sdk::{
     trace::{BatchSpanProcessor, SdkTracer, SdkTracerProvider, SpanData, SpanProcessor},
 };
 
-use crate::{config::OtlpConfig, logline, metrics::Outcome};
+use crate::{config::OtlpConfig, logline, metrics::Outcome, otlp_retry::Retrying};
 
 const METRICS_QUEUE: usize = 16;
 const EXPORT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -100,8 +100,8 @@ fn blocking_client() -> Result<reqwest::blocking::Client, String> {
         .map_err(|err| format!("OTLP HTTP client: {err}"))
 }
 
-fn span_exporter(endpoint: &str, headers: &HashMap<String, String>) -> Result<SpanExporter, String> {
-    SpanExporter::builder()
+fn span_exporter(endpoint: &str, headers: &HashMap<String, String>) -> Result<Retrying<SpanExporter>, String> {
+    let exporter = SpanExporter::builder()
         .with_http()
         .with_http_client(blocking_client()?)
         .with_protocol(Protocol::HttpBinary)
@@ -109,7 +109,8 @@ fn span_exporter(endpoint: &str, headers: &HashMap<String, String>) -> Result<Sp
         .with_timeout(EXPORT_TIMEOUT)
         .with_headers(headers.clone())
         .build()
-        .map_err(|err| format!("OTLP span exporter: {err}"))
+        .map_err(|err| format!("OTLP span exporter: {err}"))?;
+    Ok(Retrying::new(exporter, "traces"))
 }
 
 fn metrics_thread(endpoint: &str, headers: HashMap<String, String>) -> Result<mpsc::SyncSender<Vec<u8>>, String> {
@@ -167,7 +168,7 @@ impl Telemetry {
             .with_headers(headers.clone())
             .build()
             .map_err(|err| format!("OTLP log exporter: {err}"))?;
-        let mut logs = BatchLogProcessor::builder(log_exporter).build();
+        let mut logs = BatchLogProcessor::builder(Retrying::new(log_exporter, "logs")).build();
         logs.set_resource(&resource);
         let adapter = Arc::new(OtlpAdapter {
             spans,
