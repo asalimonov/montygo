@@ -1,7 +1,9 @@
 package network
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +59,24 @@ func (c *fileLogConsumer) Path() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.path
+}
+
+// containerLogTail returns the last n lines of the container's log as docker holds it.
+func containerLogTail(c testcontainers.Container, n int) string {
+	rc, err := c.Logs(context.Background())
+	if err != nil {
+		return err.Error()
+	}
+	defer func() { _ = rc.Close() }()
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		return err.Error()
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (c *fileLogConsumer) Close() {

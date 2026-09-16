@@ -80,8 +80,9 @@ func SetupServer(t *testing.T, opts ...SetupOption) *TestServer {
 	s := &TestServer{Unit: u, t: t, pool: pool, dirty: !cfg.isDefault()}
 	if u != nil {
 		t.Cleanup(func() {
-			if t.Failed() && u.logs != nil {
-				t.Logf("server log: %s", u.logs.Path())
+			if t.Failed() && u.container != nil {
+				// The streamed file can lag; docker's own log is the source of truth.
+				t.Logf("server %s log:\n%s", u.ContainerID(), containerLogTail(u.container, 40))
 			}
 			pool.Release(t, u, s.dirty)
 		})

@@ -10,6 +10,7 @@ pub mod inbound;
 pub mod info;
 pub mod limits;
 pub mod logline;
+pub mod otlp_retry;
 pub mod metrics;
 pub mod outbound;
 pub mod probe;

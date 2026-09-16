@@ -399,7 +399,10 @@ func (p *ContainerPool) startContainer(ctx context.Context, u *Unit, cfg ServerC
 	if os.Getenv(EnvDumpContainerLogs) != "0" {
 		if consumer := newFileLogConsumer(u.ID); consumer != nil {
 			u.logs = consumer
-			req.LogConsumerCfg = &testcontainers.LogConsumerConfig{Consumers: []testcontainers.LogConsumer{consumer}}
+			req.LogConsumerCfg = &testcontainers.LogConsumerConfig{
+				Opts:      []testcontainers.LogProductionOption{testcontainers.WithLogProductionTimeout(60 * time.Second)},
+				Consumers: []testcontainers.LogConsumer{consumer},
+			}
 		}
 	}
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{ContainerRequest: req, Started: true})

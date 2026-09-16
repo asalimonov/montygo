@@ -74,4 +74,6 @@ do not validate changed call signatures.
 - `setup.go` builds pools through a test-local `wsOptions` over `StaticServer` and `RemoteOptions`; `TestServer.Checkout` uses `defaultRuntime`, `CheckoutRT` a chosen runtime. `TestDockerSupervisor_*` use `docker.New` and `Remote`.
 - REPL tests cover sessions through montygo, and the `examples/repl` binary built once and driven with `-ws` over pipes.
 - Python interop tests run the `monty-pyclient` image as one-shot containers that dial the server's container IP. The client built at the pin exercises feeds, host functions, dumps and drain. The PyPI `0.0.23` client asserts the protocol 2 refusal text.
-- Container logs stream to `tests/network/output/containers/`. See `tests/network/README.md`.
+- The OTLP receiver of the telemetry tests answers `GET /requests` with every export it accepted; assertions read that, never `docker logs`, which lost the receiver's stdout on the arm64 runner. On failure a test prints the server's docker log and the receiver's view.
+- Container logs stream to `tests/network/output/containers/`, and the `docker` jobs upload the directory as an artifact when they fail. See `tests/network/README.md`.
+- The `network-loop` workflow (`workflow_dispatch`) builds the arm64 image once and runs `make test-network` N times, for flake hunting.

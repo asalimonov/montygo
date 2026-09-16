@@ -5,7 +5,11 @@ import (
 	"context"
 	_ "embed"
 	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -31,6 +35,8 @@ var otlpReceiverScript string
 type otlpReceiver struct {
 	container testcontainers.Container
 	ip        string
+	// hostURL reaches the receiver from the test process, for GET /requests.
+	hostURL string
 }
 
 func startOTLPReceiver(t *testing.T) *otlpReceiver {
@@ -42,9 +48,10 @@ func startOTLPReceiver(t *testing.T) *otlpReceiver {
 	ctx := testCtx(t)
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			Image:  image,
-			Cmd:    []string{"python", "-u", "/receiver.py"},
-			Labels: map[string]string{testLabelKey: testLabelValue},
+			Image:        image,
+			Cmd:          []string{"python", "-u", "/receiver.py"},
+			ExposedPorts: []string{"4318/tcp"},
+			Labels:       map[string]string{testLabelKey: testLabelValue},
 			Files: []testcontainers.ContainerFile{{
 				Reader:            strings.NewReader(otlpReceiverScript),
 				ContainerFilePath: "/receiver.py",
@@ -60,7 +67,11 @@ func startOTLPReceiver(t *testing.T) *otlpReceiver {
 	require.NoError(t, err)
 	ip, err := c.ContainerIP(ctx)
 	require.NoError(t, err)
-	return &otlpReceiver{container: c, ip: ip}
+	host, err := c.Host(ctx)
+	require.NoError(t, err)
+	port, err := c.MappedPort(ctx, "4318/tcp")
+	require.NoError(t, err)
+	return &otlpReceiver{container: c, ip: ip, hostURL: "http://" + net.JoinHostPort(host, port.Port())}
 }
 
 // Endpoint is the collector base URL as seen from another container.
@@ -68,22 +79,36 @@ func (r *otlpReceiver) Endpoint() string {
 	return "http://" + r.ip + ":4318"
 }
 
+// receivedRequest is one POST the receiver accepted, as GET /requests reports it.
+type receivedRequest struct {
+	Path  string `json:"path"`
+	Bytes int    `json:"bytes"`
+	Body  string `json:"body"`
+}
+
+// received asks the receiver what it accepted so far.
+func (r *otlpReceiver) received(t *testing.T) []receivedRequest {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.hostURL+"/requests", nil)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	var out []receivedRequest
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	return out
+}
+
 func (r *otlpReceiver) spans(t *testing.T) []*tracepb.Span {
 	t.Helper()
-	rc, err := r.container.Logs(context.Background())
-	require.NoError(t, err)
-	defer func() { _ = rc.Close() }()
-	out, err := io.ReadAll(rc)
-	require.NoError(t, err)
 	var spans []*tracepb.Span
-	scanner := bufio.NewScanner(strings.NewReader(string(out)))
-	scanner.Buffer(make([]byte, 1024*1024), 64*1024*1024)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) != 3 || fields[0] != "OTLP" || fields[1] != "/v1/traces" {
+	for _, req := range r.received(t) {
+		if req.Path != "/v1/traces" {
 			continue
 		}
-		body, err := base64.StdEncoding.DecodeString(fields[2])
+		body, err := base64.StdEncoding.DecodeString(req.Body)
 		require.NoError(t, err)
 		// ExportTraceServiceRequest and TracesData share one wire encoding.
 		data := &tracepb.TracesData{}
@@ -111,8 +136,57 @@ func (r *otlpReceiver) WaitSpan(t *testing.T, name string, timeout time.Duration
 			names = append(names, span.GetName())
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("span %q not exported within %s; got %v", name, timeout, names)
+			t.Fatalf("span %q not exported within %s; got %v\nreceiver %s at %s (%s)\nrequests in its docker log: %s\nrequests it reports: %s",
+				name, timeout, names, r.container.GetContainerID()[:12], r.ip, r.hostURL, r.requests(t), r.requestsOverHTTP())
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+}
+
+// requests summarises what the receiver has been sent: one "<path> <bytes>" per
+// request, so a missing span can be told apart from an unreachable receiver.
+func (r *otlpReceiver) requests(t *testing.T) string {
+	t.Helper()
+	rc, err := r.container.Logs(context.Background())
+	if err != nil {
+		return err.Error()
+	}
+	defer func() { _ = rc.Close() }()
+	out, err := io.ReadAll(rc)
+	if err != nil {
+		return err.Error()
+	}
+	var seen []string
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	scanner.Buffer(make([]byte, 1024*1024), 64*1024*1024)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) == 3 && fields[0] == "OTLP" {
+			seen = append(seen, fmt.Sprintf("%s %dB", fields[1], len(fields[2])*3/4))
+		}
+	}
+	if len(seen) == 0 {
+		return "none"
+	}
+	return strings.Join(seen, ", ")
+}
+
+// requestsOverHTTP asks the receiver itself what it received.
+func (r *otlpReceiver) requestsOverHTTP() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.hostURL+"/requests", nil)
+	if err != nil {
+		return err.Error()
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err.Error()
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err.Error()
+	}
+	return string(body)
 }
