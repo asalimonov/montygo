@@ -5,6 +5,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/asalimonov/montygo/sandbox"
+	"github.com/asalimonov/montygo/sandbox/host"
 	"io"
 	"os"
 
@@ -20,10 +22,10 @@ func (w *Wallet) Pay(amount int) *Wallet {
 	return &Wallet{Balance: w.Balance - amount}
 }
 
-func walletWrapper(w *Wallet) (*montygo.ClassInstance, error) {
-	return montygo.NewClassInstance(w, montygo.ClassInstanceOptions{
-		EagerAttrs:     montygo.All(),
-		AllowedMethods: montygo.Names("pay"),
+func walletWrapper(w *Wallet) (*host.ClassInstance, error) {
+	return host.NewClassInstance(w, host.ClassInstanceOptions{
+		EagerAttrs:     host.All(),
+		AllowedMethods: host.Names("pay"),
 		ConvertValue:   convertValue,
 	})
 }
@@ -43,14 +45,18 @@ func main() {
 }
 
 func run(ctx context.Context, out io.Writer) error {
-	pool, err := montygo.New(ctx, montyenv.PoolOptions())
+	pool, err := montygo.NewPool(ctx, montyenv.PoolOptions())
 	if err != nil {
 		return err
 	}
 	defer pool.Close(ctx)
 
 	result, err := func() (any, error) {
-		session, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
+		rt, err := montygo.NewRuntime(montygo.RuntimeOptions{})
+		if err != nil {
+			return nil, err
+		}
+		session, err := pool.Checkout(ctx, rt, montygo.CheckoutOptions{})
 		if err != nil {
 			return nil, err
 		}
@@ -65,9 +71,9 @@ func run(ctx context.Context, out io.Writer) error {
 		return err
 	}
 
-	if !montygo.Equal(result, 50) {
-		return fmt.Errorf("assertion failed: result == %s", montygo.Repr(result))
+	if !sandbox.Equal(result, 50) {
+		return fmt.Errorf("assertion failed: result == %s", sandbox.Repr(result))
 	}
-	fmt.Fprintf(out, "balance after two payments: %s\n", montygo.Repr(result))
+	fmt.Fprintf(out, "balance after two payments: %s\n", sandbox.Repr(result))
 	return nil
 }

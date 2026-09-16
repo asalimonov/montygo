@@ -6,6 +6,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/asalimonov/montygo/sandbox"
+	"github.com/asalimonov/montygo/sandbox/host"
 	"io"
 	"os"
 	"os/signal"
@@ -64,16 +66,20 @@ func service(ctx context.Context, out io.Writer, args []string) error {
 	if err != nil {
 		return err
 	}
-	host := montygo.NewHost()
-	if err := host.Func("sleep", sleep); err != nil {
+	h := host.NewHost()
+	if err := h.Func("sleep", sleep); err != nil {
 		return err
 	}
-	if err := host.Object("counter", &Counter{}, montygo.ClassInstanceOptions{AllowedMethods: montygo.Expose[counterAPI]()}); err != nil {
+	if err := h.Object("counter", &Counter{}, host.ClassInstanceOptions{AllowedMethods: host.Expose[counterAPI]()}); err != nil {
+		return err
+	}
+	rt, err := montygo.NewRuntime(montygo.RuntimeOptions{Host: h})
+	if err != nil {
 		return err
 	}
 
-	slot := pool.Slot(montygo.CheckoutOptions{Host: host})
-	lines := montygo.Lines(func(_ montygo.Stream, line string) error {
+	slot := pool.Slot(rt, montygo.CheckoutOptions{})
+	lines := sandbox.Lines(func(_ sandbox.Stream, line string) error {
 		_, err := fmt.Fprintln(out, line)
 		return err
 	})
@@ -110,7 +116,10 @@ func service(ctx context.Context, out io.Writer, args []string) error {
 // openPool dials a remote Monty server when wsURL is set, else starts local workers.
 func openPool(ctx context.Context, wsURL string) (*montygo.Pool, error) {
 	if wsURL == "" {
-		return montygo.New(ctx, montyenv.PoolOptions())
+		return montygo.NewPool(ctx, montyenv.PoolOptions())
 	}
-	return montygo.NewWebSocket(ctx, montygo.WebSocketOptions{URL: wsURL, RequestTimeout: montygo.NoRequestTimeout})
+	return montygo.NewPool(ctx, montygo.PoolOptions{
+		Workers:        montygo.Remote(montygo.StaticServer(wsURL, nil, nil), montygo.RemoteOptions{}),
+		RequestTimeout: montygo.NoRequestTimeout,
+	})
 }

@@ -28,7 +28,7 @@
 
 ### Stop policy
 
-`StopPolicy{Drain, Timeout, Join, Reason, Catchable}` describes how an execution ends. Zero fields inherit: call → `CheckoutOptions.Stop` → `Options.Stop` / `WebSocketOptions.Stop` → `DefaultStopPolicy` (`Timeout` 3 s, `Join` 3 s). The pool resolves its policy at `New`/`NewWebSocket`, the session at `Checkout`, and each call over the session's. A nil `Reason` is `KeyboardInterrupt`. `Drain` and `Join` MUST be non-negative; a negative `Timeout` (`KillNow`) kills at the request instant. `Catchable` and `Drain` inherit like every other field, so a call cannot switch them off.
+`StopPolicy{Drain, Timeout, Join, Reason, Catchable}` describes how an execution ends. Zero fields inherit: call → `CheckoutOptions.Stop` → `PoolOptions.Stop` → the built-in policy (`Timeout` 3 s, `Join` 3 s), a constant rather than a variable. The pool resolves its policy at `NewPool`, the session at `Checkout`, and each call over the session's. A nil `Reason` is `KeyboardInterrupt`. `Drain` and `Join` MUST be non-negative; a negative `Timeout` (`KillNow`) kills at the request instant. `Catchable` and `Drain` inherit like every other field, so a call cannot switch them off.
 
 One timeline serves `Run.Stop`, `Session.Stop`, `Session.Close`, `Pool.Shutdown` and feed-context cancellation:
 
@@ -67,7 +67,7 @@ Catchable delivery: at the boundary the answerer marks the reason delivered, rep
 
 ## Rotation
 
-A session of a rotating pool (`NewDocker`, or `NewWebSocket` with `RotateSessions`) moves to a fresh connection before the server's session timeout closes it. `FeedRun`, `FeedStart`, `Go`, `LoadSession`, `LoadSnapshot`, `Dump` and `InstallDependencies` call `rotateIfDue` first; an idle session is rotated by a timer. The rotation takes a dump, hands off the capacity slot, dials again, loads the dump, and keeps the same `*Session`, its host registry and its stop policy. An operation that arrives while a rotation runs waits for it instead of reporting `ErrSessionBusy`. A failed rotation ends the session with `*RotationError`, whose `Dump` restores the state on a new session. See `supervisor.md`.
+A session of a rotating pool (`Remote` with `RotateSessions`) moves to a fresh connection before the server's session timeout closes it. `FeedRun`, `FeedStart`, `Go`, `LoadSession`, `LoadSnapshot`, `Dump` and `InstallDependencies` call `rotateIfDue` first; an idle session is rotated by a timer. The rotation takes a dump, hands off the capacity slot, dials again, loads the dump, and keeps the same `*Session`, its runtime and its stop policy. An operation that arrives while a rotation runs waits for it instead of reporting `ErrSessionBusy`. A failed rotation ends the session with `*RotationError`, whose `Dump` restores the state on a new session. See `supervisor.md`.
 
 ## Slots
 
@@ -76,7 +76,7 @@ A session of a rotating pool (`NewDocker`, or `NewWebSocket` with `RotateSession
 ## Host registry
 
 - `NewHost()` builds a `Host`. `Func(name, fn, ...HostFuncOptions)` and `Object(name, v, opts)` validate at registration: identifiers MUST be unique and not hard Python keywords; an object class and exposed method names are validated too. Configure the host before checkout. Runtime resolution performs one O(1) lookup, not a registry copy.
-- `CheckoutOptions.Host` exposes the registry to every feed of the session. Its objects are put into the instance store at checkout. `FeedOptions.ExternalLookup` is consulted first, so its entries override host names.
+- `RuntimeOptions.Host` exposes the registry to every session of the runtime. Its objects are put into the instance store at checkout. `FeedOptions.ExternalLookup` is consulted first, so its entries override host names.
 - `Stubs()` renders Python stubs for `TypeCheckStubs`: one `def` per function from its Go signature (a leading `context.Context` and a trailing `Kwargs` are mapped, unknown types are `Any`), one class per object with its allowed methods, and one typed name per object.
 - Fixed reflected arguments, including method self, are positional-only. The `/` marker is written only after at least one fixed parameter; `self` does not count. Optional labels are copied, exclude context/Kwargs and include variadic arguments: `HostFuncOptions.ParameterNames` for functions, `ClassInstanceOptions.ParameterNames` and `ClassTypeOptions.ParameterNames` by sandbox method name for instance methods and statics. Every key MUST name an exposed method and every list MUST match its signature, checked at `NewClassInstance`, `NewClassType` and `Host.Object`; instance names override class names. Direct Function implementations retain generic args/kwargs stubs. Labels MUST NOT imply keyword binding that runtime does not support.
 - `Restorable()` reports the first object registered without a pinned `ClassInstanceOptions.ID` as `ErrHostObjectNotRestorable`. Pinned ids are what let a dump reference the same objects after `LoadSession` on another checkout with the same `Host`; `LoadSession` on a session with a `Host` returns that error before sending `Load`.

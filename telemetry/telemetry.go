@@ -1,8 +1,9 @@
+// Package telemetry builds the OpenTelemetry components a montygo Pool records
+// into. Nothing here is global: an application creates an Instrumentation,
+// points it at its providers and passes Components to PoolOptions.
 package telemetry
 
 import (
-	"context"
-	"errors"
 	"sync"
 
 	"go.opentelemetry.io/otel"
@@ -12,45 +13,18 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/asalimonov/montygo/internal/buildinfo"
-	itel "github.com/asalimonov/montygo/internal/telemetry"
-	pyrt "github.com/asalimonov/montygo/runtime"
 )
 
 const instrumentationName = "github.com/asalimonov/montygo"
 
-var errNoTelemetryComponents = errors.New("at least one OpenTelemetry component is required")
-
 // Components are the OpenTelemetry components Monty records into.
-// Installing them opts in to recording fed code, inputs, call arguments,
-// results, exceptions and print output.
+// Passing them to a pool opts in to recording fed code, inputs, call
+// arguments, results, exceptions and print output. Each signal is optional.
 type Components struct {
 	Tracer trace.Tracer
 	Meter  metric.Meter
 	Logger log.Logger
 }
-
-var (
-	teleMu          sync.Mutex
-	teleDirectOwner = new(byte)
-)
-
-// Instrument installs components process-wide; pools created afterwards
-// record into them. Each signal is optional.
-func Instrument(c Components) error {
-	teleMu.Lock()
-	defer teleMu.Unlock()
-	if itel.Installed() {
-		return pyrt.ErrTelemetryPresent
-	}
-	if c.Tracer == nil && c.Meter == nil && c.Logger == nil {
-		return errNoTelemetryComponents
-	}
-	itel.Install(teleDirectOwner, itel.Components(c), false)
-	return nil
-}
-
-// Flush returns once recorded telemetry has reached the installed components.
-func Flush(context.Context) error { return nil }
 
 // InstrumentationConfig selects what an Instrumentation records; nil means true.
 type InstrumentationConfig struct {
@@ -70,31 +44,24 @@ func teleCopy(b *bool) *bool {
 	return &v
 }
 
-// Instrumentation installs Monty telemetry built from OpenTelemetry providers,
-// the global providers unless replaced.
+// Instrumentation builds Monty telemetry components from OpenTelemetry
+// providers, the global providers unless replaced.
 type Instrumentation struct {
 	mu             sync.Mutex
 	cfg            InstrumentationConfig
 	tracerProvider trace.TracerProvider
 	meterProvider  metric.MeterProvider
 	loggerProvider log.LoggerProvider
-	active         bool
 }
 
-// NewInstrumentation creates an instrumentation and enables it unless cfg.Enabled is false.
+// NewInstrumentation creates an instrumentation over the global providers.
 func NewInstrumentation(cfg InstrumentationConfig) (*Instrumentation, error) {
-	i := &Instrumentation{
+	return &Instrumentation{
 		cfg:            cfg,
 		tracerProvider: otel.GetTracerProvider(),
 		meterProvider:  otel.GetMeterProvider(),
 		loggerProvider: global.GetLoggerProvider(),
-	}
-	if teleOn(cfg.Enabled) {
-		if err := i.Enable(); err != nil {
-			return nil, err
-		}
-	}
-	return i, nil
+	}, nil
 }
 
 // Name is the instrumentation scope name.
@@ -103,34 +70,11 @@ func (i *Instrumentation) Name() string { return instrumentationName }
 // Version is the instrumentation scope version.
 func (i *Instrumentation) Version() string { return buildinfo.Version() }
 
-// Enable installs the instrumentation; it fails when other telemetry is installed.
-func (i *Instrumentation) Enable() error {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	i.active = true
-	if err := i.refreshLocked(); err != nil {
-		i.active = false
-		return err
-	}
-	return nil
-}
-
-// Disable uninstalls the instrumentation; open sessions stop recording.
-func (i *Instrumentation) Disable() {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	i.active = false
-	teleMu.Lock()
-	defer teleMu.Unlock()
-	itel.Uninstall(i)
-}
-
 // SetTracerProvider replaces the tracer provider; nil records no spans.
 func (i *Instrumentation) SetTracerProvider(p trace.TracerProvider) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.tracerProvider = p
-	_ = i.refreshLocked()
 }
 
 // SetMeterProvider replaces the meter provider; nil records no metrics.
@@ -138,7 +82,6 @@ func (i *Instrumentation) SetMeterProvider(p metric.MeterProvider) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.meterProvider = p
-	_ = i.refreshLocked()
 }
 
 // SetLoggerProvider replaces the logger provider; nil records no logs.
@@ -146,7 +89,6 @@ func (i *Instrumentation) SetLoggerProvider(p log.LoggerProvider) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.loggerProvider = p
-	_ = i.refreshLocked()
 }
 
 // Config returns a copy of the configuration with Enabled filled in.
@@ -161,46 +103,24 @@ func (i *Instrumentation) Config() InstrumentationConfig {
 	return cfg
 }
 
-// SetConfig replaces the configuration, enabling or disabling as it changes.
+// SetConfig replaces the configuration. Pools built from earlier Components
+// keep recording; call Components again for the new selection.
 func (i *Instrumentation) SetConfig(cfg InstrumentationConfig) {
 	i.mu.Lock()
-	was := teleOn(i.cfg.Enabled)
+	defer i.mu.Unlock()
 	i.cfg = cfg
-	now := teleOn(cfg.Enabled)
-	if was == now {
-		_ = i.refreshLocked()
-	}
-	i.mu.Unlock()
-	switch {
-	case was && !now:
-		i.Disable()
-	case !was && now:
-		_ = i.Enable()
-	}
 }
 
-// ForceFlush flushes Monty telemetry, then every provider that supports flushing.
-func (i *Instrumentation) ForceFlush(ctx context.Context) error {
-	if err := Flush(ctx); err != nil {
-		return err
-	}
+// Components builds the components from the providers and configuration set
+// so far. It returns nil when the instrumentation is disabled or no signal
+// has a provider.
+func (i *Instrumentation) Components() *Components {
 	i.mu.Lock()
-	providers := []any{i.tracerProvider, i.meterProvider, i.loggerProvider}
-	i.mu.Unlock()
-	var errs []error
-	for _, p := range providers {
-		if f, ok := p.(interface{ ForceFlush(context.Context) error }); ok {
-			errs = append(errs, f.ForceFlush(ctx))
-		}
-	}
-	return errors.Join(errs...)
-}
-
-func (i *Instrumentation) refreshLocked() error {
-	if !i.active {
+	defer i.mu.Unlock()
+	if !teleOn(i.cfg.Enabled) {
 		return nil
 	}
-	var c itel.Components
+	var c Components
 	version := buildinfo.Version()
 	if teleOn(i.cfg.Traces) && i.tracerProvider != nil {
 		c.Tracer = i.tracerProvider.Tracer(instrumentationName, trace.WithInstrumentationVersion(version))
@@ -211,10 +131,8 @@ func (i *Instrumentation) refreshLocked() error {
 	if teleOn(i.cfg.Logs) && i.loggerProvider != nil {
 		c.Logger = i.loggerProvider.Logger(instrumentationName, log.WithInstrumentationVersion(version))
 	}
-	teleMu.Lock()
-	defer teleMu.Unlock()
-	if !itel.Install(i, c, true) {
-		return pyrt.ErrTelemetryPresent
+	if c.Tracer == nil && c.Meter == nil && c.Logger == nil {
+		return nil
 	}
-	return nil
+	return &c
 }

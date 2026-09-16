@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"github.com/asalimonov/montygo/monterr"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 
 	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/supervisor/docker"
 )
 
 // Limits short enough for a test, and still long enough for the rotation policy,
@@ -23,27 +25,28 @@ const (
 
 // newSupervisor starts a container from the image under test and closes it at
 // test end. The image reference is pinned, so no tag is derived or pulled.
-func newSupervisor(t *testing.T, env map[string]string) *montygo.DockerSupervisor {
+func newSupervisor(t *testing.T, env map[string]string) *docker.Supervisor {
 	t.Helper()
-	sup, err := montygo.NewDockerSupervisor(testCtx(t), montygo.DockerOptions{
-		Image:        GetPool().Image(),
-		Env:          env,
-		MaxProcesses: 4,
-		StopTimeout:  2 * time.Second,
+	sup, err := docker.New(testCtx(t), docker.Options{
+		Image:       GetPool().Image(),
+		Env:         env,
+		MaxSessions: 8,
+		StopTimeout: 2 * time.Second,
 	})
 	require.NoError(t, err, "start a monty-server container")
 	t.Cleanup(func() { _ = sup.Close(context.Background()) })
 	return sup
 }
 
-func supervisorPool(t *testing.T, sup *montygo.DockerSupervisor, recovery montygo.RecoveryPolicy) *montygo.Pool {
+func supervisorPool(t *testing.T, sup *docker.Supervisor, recovery montygo.RecoveryPolicy) *montygo.Pool {
 	t.Helper()
-	p, err := montygo.NewWebSocket(testCtx(t), montygo.WebSocketOptions{
-		Supervisor:     sup,
-		Recovery:       recovery,
-		RotateSessions: true,
-		RotationMargin: supervisorMargin,
-		MaxProcesses:   2,
+	p, err := montygo.NewPool(testCtx(t), montygo.PoolOptions{
+		Workers: montygo.Remote(sup, montygo.RemoteOptions{
+			Recovery:       recovery,
+			RotateSessions: true,
+			RotationMargin: supervisorMargin,
+		}),
+		MaxWorkers:     2,
 		RequestTimeout: 30 * time.Second,
 	})
 	require.NoError(t, err)
@@ -52,7 +55,7 @@ func supervisorPool(t *testing.T, sup *montygo.DockerSupervisor, recovery montyg
 }
 
 // supervisorURL is where the supervisor's server currently listens.
-func supervisorURL(t *testing.T, sup *montygo.DockerSupervisor) string {
+func supervisorURL(t *testing.T, sup *docker.Supervisor) string {
 	t.Helper()
 	ep, err := sup.Endpoint(context.Background())
 	require.NoError(t, err)
@@ -85,7 +88,7 @@ func TestDockerSupervisor_RunsSessions(t *testing.T) {
 	ctx := testCtx(t)
 	pool := supervisorPool(t, sup, montygo.RecoveryPolicy{})
 
-	session, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
+	session, err := pool.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 	require.NoError(t, err)
 	defer func() { _ = session.Close(context.Background()) }()
 
@@ -99,7 +102,7 @@ func TestDockerSupervisor_RunsSessions(t *testing.T) {
 	require.Zero(t, info.Limits.MaxMemory, "the caller's limits govern")
 	require.Zero(t, info.Limits.MaxDuration)
 	require.Zero(t, info.Limits.MaxSessionsPerClient)
-	require.Equal(t, 8, info.Limits.MaxSessions, "twice MaxProcesses")
+	require.Equal(t, 8, info.Limits.MaxSessions, "MaxSessions")
 	require.True(t, strings.HasPrefix(supervisorURL(t, sup), "ws://127.0.0.1:"))
 }
 
@@ -120,7 +123,7 @@ func TestDockerSupervisor_RotationKeepsStateAcrossTheSessionTimeout(t *testing.T
 	ctx := testCtx(t)
 	pool := supervisorPool(t, sup, montygo.RecoveryPolicy{})
 
-	session, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
+	session, err := pool.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 	require.NoError(t, err)
 	defer func() { _ = session.Close(context.Background()) }()
 
@@ -144,8 +147,8 @@ func TestDockerSupervisor_KilledContainerFailsWithoutRestart(t *testing.T) {
 
 	killContainer(t, sup.ContainerID())
 
-	_, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
-	require.ErrorAs(t, err, new(*montygo.SpawnError))
+	_, err := pool.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
+	require.ErrorAs(t, err, new(*monterr.SpawnError))
 }
 
 func TestDockerSupervisor_KilledContainerRestartsWhenEnabled(t *testing.T) {
@@ -158,7 +161,7 @@ func TestDockerSupervisor_KilledContainerRestartsWhenEnabled(t *testing.T) {
 	before := supervisorURL(t, sup)
 	killContainer(t, sup.ContainerID())
 
-	session, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
+	session, err := pool.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 	require.NoError(t, err, "the supervisor restarted the container")
 	defer func() { _ = session.Close(context.Background()) }()
 

@@ -4,6 +4,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/asalimonov/montygo/sandbox"
+	"github.com/asalimonov/montygo/sandbox/host"
 	"io"
 	"os"
 
@@ -103,18 +105,18 @@ func main() {
 }
 
 func run(ctx context.Context, out io.Writer) error {
-	pool, err := montygo.New(ctx, montyenv.PoolOptions())
+	pool, err := montygo.NewPool(ctx, montyenv.PoolOptions())
 	if err != nil {
 		return err
 	}
 	defer pool.Close(ctx)
 
 	output, err := func() (any, error) {
-		session, err := pool.Checkout(ctx, montygo.CheckoutOptions{
-			ScriptName:     "expense.py",
-			TypeCheck:      true,
-			TypeCheckStubs: typeDefinitions,
-		})
+		rt, err := montygo.NewRuntime(montygo.RuntimeOptions{TypeCheck: true, TypeCheckStubs: typeDefinitions})
+		if err != nil {
+			return nil, err
+		}
+		session, err := pool.Checkout(ctx, rt, montygo.CheckoutOptions{ScriptName: "expense.py"})
 		if err != nil {
 			return nil, err
 		}
@@ -122,15 +124,15 @@ func run(ctx context.Context, out io.Writer) error {
 		return session.FeedRun(ctx, code, &montygo.FeedOptions{
 			Inputs: map[string]any{"prompt": "testing"},
 			ExternalLookup: map[string]any{
-				"get_team_members":  montygo.FunctionFunc(getTeamMembers),
-				"get_expenses":      montygo.FunctionFunc(getExpenses),
-				"get_custom_budget": montygo.FunctionFunc(getCustomBudget),
+				"get_team_members":  host.FunctionFunc(getTeamMembers),
+				"get_expenses":      host.FunctionFunc(getExpenses),
+				"get_custom_budget": host.FunctionFunc(getCustomBudget),
 			},
 		})
 	}()
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(out, montygo.Repr(output))
+	fmt.Fprintln(out, sandbox.Repr(output))
 	return nil
 }

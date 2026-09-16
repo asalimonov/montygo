@@ -2,8 +2,10 @@ package network
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
 	"maps"
+	"net"
 	"net/http"
 	"os"
 	"testing"
@@ -13,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/telemetry"
 )
 
 type setupOptions struct {
@@ -92,13 +95,63 @@ func SetupServer(t *testing.T, opts ...SetupOption) *TestServer {
 
 func (s *TestServer) URL() string { return s.Unit.URL() }
 
-// WSOptions returns client options for this server with a 30s request timeout.
-func (s *TestServer) WSOptions() montygo.WebSocketOptions {
-	return montygo.WebSocketOptions{URL: s.URL(), RequestTimeout: 30 * time.Second}
+// wsOptions describe a pool of one server URL: the StaticServer behind it, the
+// RemoteOptions of its dials and the PoolOptions around them.
+type wsOptions struct {
+	URL            string
+	ConnectHeaders func(ctx context.Context) (map[string]string, error)
+	TLSConfig      *tls.Config
+	DialContext    func(ctx context.Context, network, addr string) (net.Conn, error)
+	RequestTimeout time.Duration
+	MaxWorkers     int
+	Telemetry      *telemetry.Components
 }
 
-// NewPool builds a WebSocket pool for this server, closed at test end.
-func (s *TestServer) NewPool(opts montygo.WebSocketOptions) *montygo.Pool {
+func (o wsOptions) server() montygo.ServerSupervisor {
+	return montygo.StaticServer(o.URL, o.TLSConfig, o.ConnectHeaders)
+}
+
+func (o wsOptions) remote() montygo.RemoteOptions {
+	return montygo.RemoteOptions{DialContext: o.DialContext}
+}
+
+func (o wsOptions) pool() montygo.PoolOptions {
+	return montygo.PoolOptions{
+		Workers:        montygo.Remote(o.server(), o.remote()),
+		MaxWorkers:     o.MaxWorkers,
+		RequestTimeout: o.RequestTimeout,
+		Telemetry:      o.Telemetry,
+	}
+}
+
+// checkHealth probes GET /health of the server behind opts.
+func checkHealth(ctx context.Context, opts wsOptions) error {
+	return montygo.CheckServerHealth(ctx, opts.server(), opts.remote())
+}
+
+// fetchInfo reads GET /info of the server behind opts.
+func fetchInfo(ctx context.Context, opts wsOptions) (*montygo.ServerInfo, error) {
+	return montygo.FetchServerInfo(ctx, opts.server(), opts.remote())
+}
+
+// defaultRuntime is the runtime of every session without host extensions.
+var defaultRuntime = mustRuntime(montygo.RuntimeOptions{})
+
+func mustRuntime(opts montygo.RuntimeOptions) *montygo.Runtime {
+	rt, err := montygo.NewRuntime(opts)
+	if err != nil {
+		panic(err)
+	}
+	return rt
+}
+
+// WSOptions returns client options for this server with a 30s request timeout.
+func (s *TestServer) WSOptions() wsOptions {
+	return wsOptions{URL: s.URL(), RequestTimeout: 30 * time.Second}
+}
+
+// NewPool builds a pool of remote workers on this server, closed at test end.
+func (s *TestServer) NewPool(opts wsOptions) *montygo.Pool {
 	s.t.Helper()
 	if opts.URL == "" {
 		opts.URL = s.URL()
@@ -106,16 +159,22 @@ func (s *TestServer) NewPool(opts montygo.WebSocketOptions) *montygo.Pool {
 	if opts.RequestTimeout == 0 {
 		opts.RequestTimeout = 30 * time.Second
 	}
-	p, err := montygo.NewWebSocket(testCtx(s.t), opts)
+	p, err := montygo.NewPool(testCtx(s.t), opts.pool())
 	require.NoError(s.t, err)
 	s.t.Cleanup(func() { _ = p.Close(context.Background()) })
 	return p
 }
 
-// Checkout checks out a session closed at test end.
+// Checkout checks out a session of defaultRuntime, closed at test end.
 func (s *TestServer) Checkout(ctx context.Context, p *montygo.Pool, opts montygo.CheckoutOptions) *montygo.Session {
 	s.t.Helper()
-	session, err := p.Checkout(ctx, opts)
+	return s.CheckoutRT(ctx, p, defaultRuntime, opts)
+}
+
+// CheckoutRT checks out a session of rt, closed at test end.
+func (s *TestServer) CheckoutRT(ctx context.Context, p *montygo.Pool, rt *montygo.Runtime, opts montygo.CheckoutOptions) *montygo.Session {
+	s.t.Helper()
+	session, err := p.Checkout(ctx, rt, opts)
 	require.NoError(s.t, err)
 	s.t.Cleanup(func() { _ = session.Close(context.Background()) })
 	return session

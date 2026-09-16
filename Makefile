@@ -129,7 +129,7 @@ server-check: ## Clippy and tests for the Rust server
 .PHONY: test-docker
 test-docker: ## Run the root suite on the docker backend against the image
 	MONTY_TEST_BACKENDS=docker MONTYGO_DOCKER_IMAGE=$(IMAGE):$(IMAGE_TAG) \
-		$(GO) test -count=1 -timeout 30m -ldflags '$(GO_LDFLAGS)' ./conformance/
+		$(GO) test -count=1 -timeout 30m -ldflags '$(GO_LDFLAGS)' .
 
 .PHONY: test-network
 test-network: ## Run tests/network against the images

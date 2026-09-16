@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/asalimonov/montygo/monterr"
+	"github.com/asalimonov/montygo/sandbox/host"
 	"sync"
 	"time"
 
@@ -11,7 +13,6 @@ import (
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 
-	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/examples/internal/pyargs"
 )
 
@@ -62,7 +63,7 @@ func (b *Browser) Close() {
 }
 
 // openPage opens a URL in a new tab and returns a Page snapshot.
-func (b *Browser) openPage(_ context.Context, args []any, kwargs montygo.Kwargs) (any, error) {
+func (b *Browser) openPage(_ context.Context, args []any, kwargs host.Kwargs) (any, error) {
 	bound, err := pyargs.Bind("open_page", args, kwargs, pyargs.Required("url"), pyargs.Optional("wait_until", "networkidle"))
 	if err != nil {
 		return nil, err
@@ -75,7 +76,7 @@ func (b *Browser) openPage(_ context.Context, args []any, kwargs montygo.Kwargs)
 	if err != nil {
 		return nil, err
 	}
-	return montygo.Async(func() (any, error) {
+	return host.Async(func() (any, error) {
 		p, err := b.newPage()
 		if err != nil {
 			return nil, err
@@ -117,12 +118,12 @@ func parseWaitUntil(v any) (string, error) {
 			return s, nil
 		}
 	}
-	return "", montygo.Raise("ValueError", fmt.Sprintf("wait_until: expected one of (load|domcontentloaded|networkidle|commit), got %q", s))
+	return "", monterr.Raise("ValueError", fmt.Sprintf("wait_until: expected one of (load|domcontentloaded|networkidle|commit), got %q", s))
 }
 
 func browserError(err error) error {
 	if errors.Is(err, context.DeadlineExceeded) {
-		return montygo.Raise("TimeoutError", "Timeout exceeded: "+err.Error())
+		return monterr.Raise("TimeoutError", "Timeout exceeded: "+err.Error())
 	}
 	return err
 }

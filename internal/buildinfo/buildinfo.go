@@ -8,21 +8,10 @@ package buildinfo
 
 import "sync/atomic"
 
-// Upstream pins. The root package re-exports them; scripts/check-pins.sh keeps
-// every copy of these values in step.
 const (
-	// MontyVersion is the Monty release this binding tracks.
-	MontyVersion = "0.0.23"
-	// UpstreamRev is the upstream commit the protocol and tests were taken from.
-	UpstreamRev = "f8acf4fa"
-	// ProtocolVersion is the wire protocol version this parent speaks.
-	ProtocolVersion uint32 = 3
-	// MaxValueDepth is the deepest list-like nesting a value may have on the wire.
-	MaxValueDepth = 48
-
-	// ModulePath is this module's import path, as recorded in build info.
+	// ModulePath is the module path this binding is published under.
 	ModulePath = "github.com/asalimonov/montygo"
-	// UnknownVersion is reported when no release version can be resolved.
+	// UnknownVersion is reported until the version is resolved.
 	UnknownVersion = "0.0.0-unknown"
 )
 

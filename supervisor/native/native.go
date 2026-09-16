@@ -20,11 +20,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/asalimonov/montygo/internal/buildinfo"
-	eng "github.com/asalimonov/montygo/internal/engine"
-	pyrt "github.com/asalimonov/montygo/runtime"
-	sup "github.com/asalimonov/montygo/supervisor"
-	mtel "github.com/asalimonov/montygo/telemetry"
+	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/monterr"
 )
 
 const (
@@ -38,7 +35,7 @@ const (
 	DefaultBinary = "monty-server"
 )
 
-// Options configure the monty-server process and the pool that dials it.
+// Options configure the monty-server process.
 type Options struct {
 	// Binary is the monty-server executable; "" uses MONTYGO_SERVER_BIN, then
 	// monty-server on PATH.
@@ -57,28 +54,19 @@ type Options struct {
 	// StopTimeout is how long a drain may take before the process is killed:
 	// 0 means 10s.
 	StopTimeout time.Duration
-
-	MaxProcesses    int
-	CheckoutTimeout time.Duration
-	RequestTimeout  time.Duration
-	// Recovery bounds retries of a dial; RestartServer allows respawning the server.
-	Recovery sup.RecoveryPolicy
-	// RotationMargin is the lead time of a session rotation: 0 means 30s.
-	RotationMargin time.Duration
-	Telemetry      *mtel.Components
-	Stop           eng.StopPolicy
+	// MaxSessions sizes the server: 0 means 2 × runtime.NumCPU(). Pass twice
+	// the PoolOptions.MaxWorkers of the pools that dial it.
+	MaxSessions int
 }
 
 func (o Options) validate() error {
 	switch {
 	case o.StartTimeout < 0:
-		return &pyrt.OptionError{Message: "startTimeout must not be negative"}
+		return &monterr.OptionError{Message: "startTimeout must not be negative"}
 	case o.StopTimeout < 0:
-		return &pyrt.OptionError{Message: "stopTimeout must not be negative"}
-	case o.MaxProcesses < 0:
-		return &pyrt.OptionError{Message: "maxProcesses must not be negative"}
-	case o.RotationMargin < 0:
-		return &pyrt.OptionError{Message: "rotationMargin must not be negative"}
+		return &monterr.OptionError{Message: "stopTimeout must not be negative"}
+	case o.MaxSessions < 0:
+		return &monterr.OptionError{Message: "maxSessions must not be negative"}
 	}
 	return nil
 }
@@ -97,14 +85,16 @@ func (o Options) stopTimeout() time.Duration {
 	return o.StopTimeout
 }
 
-func (o Options) maxProcesses() int {
-	if o.MaxProcesses == 0 {
-		return runtime.NumCPU()
+func (o Options) maxSessions() int {
+	if o.MaxSessions == 0 {
+		return 2 * runtime.NumCPU()
 	}
-	return o.MaxProcesses
+	return o.MaxSessions
 }
 
-// Supervisor runs one monty-server process and reports where it listens.
+// Supervisor runs one monty-server process and reports where it listens. It
+// is a montygo.ServerSupervisor for montygo.Remote; the application closes it
+// after the pools that dial it.
 type Supervisor struct {
 	path string
 	opts Options
@@ -112,8 +102,8 @@ type Supervisor struct {
 
 	mu       sync.Mutex
 	cmd      *exec.Cmd
-	endpoint sup.ServerEndpoint
-	info     *eng.ServerInfo
+	endpoint montygo.ServerEndpoint
+	info     *montygo.ServerInfo
 	closed   bool
 }
 
@@ -136,32 +126,6 @@ func New(ctx context.Context, opts Options) (*Supervisor, error) {
 	return s, nil
 }
 
-// NewPool starts a monty-server process and returns a pool whose sessions dial
-// it. The pool owns the supervisor: Close and Shutdown stop the process.
-func NewPool(ctx context.Context, opts Options) (*eng.Pool, error) {
-	s, err := New(ctx, opts)
-	if err != nil {
-		return nil, err
-	}
-	p, err := eng.NewWebSocketPool(ctx, eng.WebSocketOptions{
-		Supervisor:      s,
-		Recovery:        opts.Recovery,
-		RotateSessions:  true,
-		RotationMargin:  opts.RotationMargin,
-		MaxProcesses:    opts.MaxProcesses,
-		CheckoutTimeout: opts.CheckoutTimeout,
-		RequestTimeout:  opts.RequestTimeout,
-		Telemetry:       opts.Telemetry,
-		Stop:            opts.Stop,
-	}, eng.BackendWebSocket, s.ServerInfo())
-	if err != nil {
-		_ = s.Close(context.WithoutCancel(ctx))
-		return nil, err
-	}
-	p.OwnSupervisor(s, opts.stopTimeout())
-	return p, nil
-}
-
 // resolveBinary locates the server: the explicit path, MONTYGO_SERVER_BIN, then PATH.
 func resolveBinary(explicit string) (string, error) {
 	candidates := []string{explicit, os.Getenv(BinaryEnv)}
@@ -172,11 +136,11 @@ func resolveBinary(explicit string) (string, error) {
 		if info, err := os.Stat(c); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
 			return c, nil
 		}
-		return "", &pyrt.OptionError{Message: "monty-server not found at " + c}
+		return "", &monterr.OptionError{Message: "monty-server not found at " + c}
 	}
 	path, err := exec.LookPath(DefaultBinary)
 	if err != nil {
-		return "", &pyrt.OptionError{Message: fmt.Sprintf(
+		return "", &monterr.OptionError{Message: fmt.Sprintf(
 			"could not locate %s (tried Options.Binary, %s, PATH); build it with `cargo build -p monty-server` or set %s",
 			DefaultBinary, BinaryEnv, BinaryEnv)}
 	}
@@ -184,22 +148,22 @@ func resolveBinary(explicit string) (string, error) {
 }
 
 // Endpoint reports where sessions dial now.
-func (s *Supervisor) Endpoint(context.Context) (sup.ServerEndpoint, error) {
+func (s *Supervisor) Endpoint(context.Context) (montygo.ServerEndpoint, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return sup.ServerEndpoint{}, sup.ErrSupervisorClosed
+		return montygo.ServerEndpoint{}, monterr.ErrSupervisorClosed
 	}
 	return s.endpoint, nil
 }
 
 // Restart replaces the process behind failed. A restart that already happened
 // is reported as success, so concurrent callers restart once.
-func (s *Supervisor) Restart(ctx context.Context, failed sup.ServerEndpoint) error {
+func (s *Supervisor) Restart(ctx context.Context, failed montygo.ServerEndpoint) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return sup.ErrSupervisorClosed
+		return monterr.ErrSupervisorClosed
 	}
 	if failed.URL != "" && failed.URL != s.endpoint.URL {
 		return nil
@@ -224,7 +188,7 @@ func (s *Supervisor) Close(context.Context) error {
 }
 
 // ServerInfo is what the server reported at GET /info after its last start.
-func (s *Supervisor) ServerInfo() *eng.ServerInfo {
+func (s *Supervisor) ServerInfo() *montygo.ServerInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.info
@@ -267,7 +231,7 @@ func (s *Supervisor) startLocked(ctx context.Context) error {
 		s.stopLocked()
 		return fmt.Errorf("monty-server did not report a bound address: %w", err)
 	}
-	ep := sup.ServerEndpoint{URL: url}
+	ep := montygo.ServerEndpoint{URL: url}
 	info, err := waitReady(ctx, ep)
 	if err != nil {
 		s.stopLocked()
@@ -310,12 +274,13 @@ func readBoundURL(ctx context.Context, stdout io.ReadCloser) (string, error) {
 }
 
 // waitReady polls /health and then checks that the server speaks this protocol.
-func waitReady(ctx context.Context, ep sup.ServerEndpoint) (*eng.ServerInfo, error) {
-	opts := eng.WebSocketOptions{URL: ep.URL, RequestTimeout: 2 * time.Second}
+func waitReady(ctx context.Context, ep montygo.ServerEndpoint) (*montygo.ServerInfo, error) {
+	sup := montygo.StaticServer(ep.URL, nil, nil)
+	opts := montygo.RemoteOptions{DialTimeout: 2 * time.Second}
 	ticker := time.NewTicker(healthInterval)
 	defer ticker.Stop()
 	for {
-		err := eng.CheckWebSocketHealth(ctx, opts)
+		err := montygo.CheckServerHealth(ctx, sup, opts)
 		if err == nil {
 			break
 		}
@@ -328,13 +293,13 @@ func waitReady(ctx context.Context, ep sup.ServerEndpoint) (*eng.ServerInfo, err
 		case <-ticker.C:
 		}
 	}
-	info, err := eng.FetchServerInfo(ctx, opts)
+	info, err := montygo.FetchServerInfo(ctx, sup, opts)
 	if err != nil {
 		return nil, err
 	}
-	if info.ProtocolVersion != buildinfo.ProtocolVersion {
+	if info.ProtocolVersion != montygo.ProtocolVersion {
 		return nil, fmt.Errorf("monty-server speaks protocol version %d, this montygo speaks %d",
-			info.ProtocolVersion, buildinfo.ProtocolVersion)
+			info.ProtocolVersion, montygo.ProtocolVersion)
 	}
 	return info, nil
 }
@@ -357,15 +322,15 @@ func (s *Supervisor) stopLocked() {
 	}
 }
 
-// serverEnv sets the limits a pool of local sessions needs, mirroring the
-// Docker supervisor: the caller's CheckoutOptions govern memory and duration,
-// sessions never idle out, and the per-client quota cannot count this process
-// against itself. The session and turn timeouts stay at their defaults, because
-// rotation relies on the turn timeout bounding every execution.
+// serverEnv sets the limits local pools need, mirroring the Docker supervisor:
+// the runtime's limits govern memory and duration, sessions never idle out, and
+// the per-client quota cannot count this process against itself. The session
+// and turn timeouts stay at their defaults, because rotation relies on the turn
+// timeout bounding every execution.
 func (s *Supervisor) serverEnv() map[string]string {
 	env := map[string]string{
 		"MONTY_SERVER_DUMP_KEY":                randomHex(32),
-		"MONTY_SERVER_MAX_SESSIONS":            strconv.Itoa(2 * s.opts.maxProcesses()),
+		"MONTY_SERVER_MAX_SESSIONS":            strconv.Itoa(s.opts.maxSessions()),
 		"MONTY_SERVER_MAX_SESSIONS_PER_CLIENT": "0",
 		"MONTY_SERVER_IDLE_TIMEOUT":            "0",
 		"MONTY_SERVER_MAX_MEMORY_MIB":          "0",

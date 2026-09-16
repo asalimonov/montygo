@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	pyrt "github.com/asalimonov/montygo/runtime"
+	"github.com/asalimonov/montygo/monterr"
 	"os"
 	"os/exec"
 	"regexp"
@@ -29,7 +29,7 @@ func newDockerCLI(command string, serverEnv map[string]string) (*dockerCLI, erro
 	}
 	path, err := exec.LookPath(command)
 	if err != nil {
-		return nil, &pyrt.OptionError{Message: fmt.Sprintf("docker CLI not found: %s", command)}
+		return nil, &monterr.OptionError{Message: fmt.Sprintf("docker CLI not found: %s", command)}
 	}
 	return &dockerCLI{path: path, env: appendEnv(os.Environ(), serverEnv)}, nil
 }

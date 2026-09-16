@@ -12,18 +12,15 @@ montygo is a Go binding for [Monty](https://github.com/pydantic/monty), a sandbo
 
 | Path | Contents |
 |---|---|
-| `*.go` (package `montygo`) | public facade: aliases over the packages below, the upstream pins, and `BindingVersion`. It holds no tests |
-| `conformance/` | the ported upstream suites and the API tests, run against the facade |
-| `runtime/` | Python value model, conversion, print targets, mounts, exception types |
-| `runtime/host/` | host objects, class wrappers, host functions, futures |
-| `runtime/osaccess/` | in-memory OS helpers, a port of `pydantic_monty/os_access.py` |
-| `supervisor/` | `ServerSupervisor` contract, endpoints, recovery policy |
-| `supervisor/docker/` | supervisor that runs `monty-server` in a container |
-| `supervisor/native/` | supervisor that runs `monty-server` as a child process |
-| `telemetry/` | OpenTelemetry components and instrumentation |
-| `internal/engine` | pool, session, transports, rotation: the implementation behind the facade |
-| `internal/buildinfo` | upstream pins and the binding version, for packages that cannot import the root |
-| `internal/telemetryhooks` | recorder plumbing shared by the engine and the supervisors |
+| `*.go` (package `montygo`) | the API and its engine: `Runtime`, `Pool`, worker sources, sessions, snapshots, stop policy, the supervisor contract, the upstream pins, `BindingVersion`; the ported upstream suites as `*_test.go` |
+| `sandbox/` | Python value model, conversion, print targets, mounts |
+| `sandbox/host/` | host registry, host functions, futures, class wrappers, the OS handler |
+| `sandbox/osaccess/` | in-memory OS helpers, a port of `pydantic_monty/os_access.py` |
+| `monterr/` | every error the library returns: sandbox exceptions, infrastructure failures, sentinels, `OptionError` |
+| `supervisor/docker/` | supervisor that runs `monty-server` in a container; imports the root |
+| `supervisor/native/` | supervisor that runs `monty-server` as a child process; imports the root |
+| `telemetry/` | OpenTelemetry components and the instrumentation that builds them; nothing global |
+| `internal/buildinfo` | the binding version for packages that cannot import the root |
 | `internal/wire` | framing and the hand-written `monty.v1` protobuf codec |
 | `internal/value` | Go model of Python values |
 | `internal/pool` | worker pool and per-checkout turn engine |
@@ -106,6 +103,7 @@ make test-network-clean      # remove leaked test containers
 - Ported tests MUST keep upstream titles as subtest names and run on every backend through `eachBackend`. A test Go cannot express stays as a subtest that calls `t.Skip` with the reason.
 - The worker is untrusted. Code that reads worker output MUST validate it and MUST NOT let a reported limit loosen a configured one.
 - Backends MUST only implement `worker.Worker`. Pool, session, mount and telemetry code MUST NOT branch on the transport, except to classify how a worker ended.
+- The root package MUST NOT alias another package's types. Value types are named through `sandbox`, host objects through `sandbox/host`, errors through `monterr`. Nothing in the library MAY rely on a process-wide variable; configuration travels through `RuntimeOptions`, `PoolOptions` and contexts.
 - The root module MUST build without cgo. New dependencies MUST support Go 1.25.
 - Server texts (close reasons, HTTP bodies, the info page) MUST be defined in `server/src/texts.rs` and listed in `docs/architecture/server.md`. The protocol version refusal and `PoolError` texts MUST come from upstream verbatim.
 - Deviations of `monty-server` from Full Monty (upstream `docs/server.md`) MUST be listed in `docs/parity/server.md`.
@@ -130,10 +128,10 @@ make test-network-clean      # remove leaked test containers
 | `internal/mountfs` and its tests | `crates/monty-fs/src`, `crates/monty-fs/tests` |
 | package `montygo` API | `crates/monty-js/ts/` |
 | root `*_test.go` | `crates/monty-js/__test__/*.spec.ts` |
-| `websocket.go`, `internal/pool/websocket_test.go` | `crates/monty-python` WebSocket client and tests, `crates/monty-pool/tests/websocket.rs` |
+| `workers.go`, `serverinfo.go`, `websocket_test.go`, `internal/pool/websocket_test.go` | `crates/monty-python` WebSocket client and tests, `crates/monty-pool/tests/websocket.rs` |
 | `server/` | `docs/server.md` (Full Monty behaviour, flags, defaults), `Checkout::turn_raw` in `crates/monty-pool/src/checkout.rs` |
 | `docker/pyclient.Dockerfile`, `tests/network/pyclient/` | `crates/monty-python` (`pydantic-monty-client` wheel, `AsyncMontyWebsocket`) |
-| `osaccess/` | `crates/monty-python/python/pydantic_monty/os_access.py`, `crates/monty-python/tests/test_os_access*.py` |
+| `sandbox/osaccess/` | `crates/monty-python/python/pydantic_monty/os_access.py`, `crates/monty-python/tests/test_os_access*.py` |
 | `examples/` | `examples/` |
 | `examples/repl` | REPL loop in `crates/monty-runtime/src/run.rs`, continuation in `crates/monty/src/repl.rs` |
 

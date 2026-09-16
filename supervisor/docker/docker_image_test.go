@@ -4,7 +4,7 @@ import (
 	"github.com/asalimonov/montygo/internal/buildinfo"
 	"testing"
 
-	pyrt "github.com/asalimonov/montygo/runtime"
+	"github.com/asalimonov/montygo/monterr"
 	"github.com/stretchr/testify/require"
 )
 
@@ -64,7 +64,7 @@ func TestDockerImageCandidatesWithoutADerivableTag(t *testing.T) {
 	} {
 		t.Run(binding, func(t *testing.T) {
 			_, err := imageCandidates("", "", binding, noEnv)
-			require.ErrorAs(t, err, new(*pyrt.OptionError))
+			require.ErrorAs(t, err, new(*monterr.OptionError))
 			require.Contains(t, err.Error(), VersionEnv)
 			require.Contains(t, err.Error(), ImageEnv)
 		})
@@ -116,15 +116,15 @@ func TestDockerImageCandidatesOverrides(t *testing.T) {
 	})
 	t.Run("a pinned reference rejects a version", func(t *testing.T) {
 		_, err := imageCandidates("registry.local/monty-server:pinned", "0.3.0", "0.3.0", noEnv)
-		require.ErrorAs(t, err, new(*pyrt.OptionError))
+		require.ErrorAs(t, err, new(*monterr.OptionError))
 	})
 	t.Run("a pinned reference rejects a version from the variable", func(t *testing.T) {
 		_, err := imageCandidates("registry.local/monty-server:pinned", "", "0.3.0",
 			envFrom(map[string]string{VersionEnv: "0.3.0"}))
-		require.ErrorAs(t, err, new(*pyrt.OptionError))
+		require.ErrorAs(t, err, new(*monterr.OptionError))
 	})
 	t.Run("an invalid tag is rejected", func(t *testing.T) {
 		_, err := imageCandidates("", "not a tag", "0.3.0", noEnv)
-		require.ErrorAs(t, err, new(*pyrt.OptionError))
+		require.ErrorAs(t, err, new(*monterr.OptionError))
 	})
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/asalimonov/montygo/sandbox/host"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -59,9 +60,9 @@ func examplePrintOutput(models ...string) string {
 
 func newTestPool(t *testing.T) *montygo.Pool {
 	t.Helper()
-	pool, err := montygo.New(t.Context(), montyenv.PoolOptions())
+	pool, err := montygo.NewPool(t.Context(), montyenv.PoolOptions())
 	require.NoError(t, err)
-	t.Logf("monty backend: %s", pool.Backend())
+	t.Logf("monty backend: %s", pool.Workers())
 	t.Cleanup(func() { _ = pool.Close(context.Background()) })
 	return pool
 }
@@ -167,13 +168,14 @@ func TestAgentLoopWithFakeLLM(t *testing.T) {
 	records := newRecordModels(nil)
 	var out bytes.Buffer
 	s := &scraper{
-		llm:   llm,
-		model: "test-model",
-		pool:  newTestPool(t),
-		out:   &out,
+		llm:     llm,
+		model:   "test-model",
+		pool:    newTestPool(t),
+		runtime: newTestRuntime(t),
+		out:     &out,
 		externals: map[string]any{
-			"beautiful_soup":    montygo.FunctionFunc(beautifulSoup),
-			"record_model_info": montygo.FunctionFunc(records.recordModelInfo),
+			"beautiful_soup":    host.FunctionFunc(beautifulSoup),
+			"record_model_info": host.FunctionFunc(records.recordModelInfo),
 		},
 	}
 
@@ -213,16 +215,17 @@ func TestAgentLoopReportsAPIErrors(t *testing.T) {
 
 func TestExampleCodeOnStaticPage(t *testing.T) {
 	page := &Page{URL: "http://fixture.test/", Title: "Pricing", HTML: pricingPage, ID: 1}
-	openPage := func(_ context.Context, args []any, kwargs montygo.Kwargs) (any, error) {
-		return montygo.Async(func() (any, error) { return page.instance() }), nil
+	openPage := func(_ context.Context, args []any, kwargs host.Kwargs) (any, error) {
+		return host.Async(func() (any, error) { return page.instance() }), nil
 	}
 	s := &scraper{
-		pool: newTestPool(t),
-		out:  io.Discard,
+		pool:    newTestPool(t),
+		runtime: newTestRuntime(t),
+		out:     io.Discard,
 		externals: map[string]any{
-			"open_page":         montygo.FunctionFunc(openPage),
-			"beautiful_soup":    montygo.FunctionFunc(beautifulSoup),
-			"record_model_info": montygo.FunctionFunc(newRecordModels(nil).recordModelInfo),
+			"open_page":         host.FunctionFunc(openPage),
+			"beautiful_soup":    host.FunctionFunc(beautifulSoup),
+			"record_model_info": host.FunctionFunc(newRecordModels(nil).recordModelInfo),
 		},
 	}
 	msg, err := s.runCode(t.Context(), exampleCode, map[string]any{"url": page.URL}, false)
@@ -268,4 +271,11 @@ func TestRunCodeFile(t *testing.T) {
 	var out bytes.Buffer
 	require.NoError(t, run(t.Context(), &out, []string{"-code", file, "-url", srv.URL}))
 	require.Equal(t, `"Model information recorded successfully for Tiny"`+"\nmodels=1\n"+`{"unique_id":"Tiny","name":"hello","description":null,"input_mtok":1,"output_mtok":2,"attributes":null}`+"\n", out.String())
+}
+
+func newTestRuntime(t *testing.T) *montygo.Runtime {
+	t.Helper()
+	rt, err := montygo.NewRuntime(montygo.RuntimeOptions{TypeCheck: true, TypeCheckStubs: stubs})
+	require.NoError(t, err)
+	return rt
 }

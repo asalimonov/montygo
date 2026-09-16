@@ -2,9 +2,8 @@ package main
 
 import (
 	"errors"
+	"github.com/asalimonov/montygo/monterr"
 	"strings"
-
-	"github.com/asalimonov/montygo"
 )
 
 // mode mirrors upstream ReplContinuationMode.
@@ -22,7 +21,7 @@ const decoratorWithoutDefinition = "Expected class, function definition or async
 // detect_repl_continuation_mode classifies a parse. A parse error runs nothing,
 // so an incomplete snippet can be fed again once more input arrives.
 func continuationMode(source string, err error) mode {
-	var syntax *montygo.SyntaxError
+	var syntax *monterr.SyntaxError
 	if !errors.As(err, &syntax) {
 		return complete
 	}

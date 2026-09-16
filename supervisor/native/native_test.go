@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/monterr"
 	"github.com/asalimonov/montygo/supervisor/native"
 )
 
@@ -42,7 +43,7 @@ func serverOptions(t *testing.T) native.Options {
 	return native.Options{
 		Binary:       server,
 		Env:          map[string]string{"MONTY_BIN": worker},
-		MaxProcesses: 2,
+		MaxSessions:  4,
 		StartTimeout: 30 * time.Second,
 		StopTimeout:  5 * time.Second,
 	}
@@ -56,11 +57,19 @@ func testCtx(t *testing.T) context.Context {
 
 func TestNativeSupervisorRunsSessions(t *testing.T) {
 	ctx := testCtx(t)
-	pool, err := native.NewPool(ctx, serverOptions(t))
+	sup, err := native.New(ctx, serverOptions(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sup.Close(context.Background()) })
+	pool, err := montygo.NewPool(ctx, montygo.PoolOptions{
+		Workers:    montygo.Remote(sup, montygo.RemoteOptions{RotateSessions: true}),
+		MaxWorkers: 2,
+	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pool.Shutdown(context.Background()) })
+	rt, err := montygo.NewRuntime(montygo.RuntimeOptions{})
+	require.NoError(t, err)
 
-	session, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
+	session, err := pool.Checkout(ctx, rt, montygo.CheckoutOptions{})
 	require.NoError(t, err)
 	defer func() { _ = session.Close(context.Background()) }()
 
@@ -95,7 +104,7 @@ func TestNativeSupervisorReportsItsEndpointAndLimits(t *testing.T) {
 	require.Zero(t, info.Limits.MaxMemory, "the caller's limits govern")
 	require.Zero(t, info.Limits.MaxDuration)
 	require.Zero(t, info.Limits.MaxSessionsPerClient)
-	require.Equal(t, 4, info.Limits.MaxSessions, "twice MaxProcesses")
+	require.Equal(t, 4, info.Limits.MaxSessions, "MaxSessions")
 }
 
 func TestNativeSupervisorRestartMovesTheEndpoint(t *testing.T) {
@@ -123,11 +132,11 @@ func TestNativeSupervisorCloseIsIdempotent(t *testing.T) {
 	require.NoError(t, sup.Close(ctx))
 	require.NoError(t, sup.Close(ctx))
 	_, err = sup.Endpoint(ctx)
-	require.ErrorIs(t, err, montygo.ErrSupervisorClosed)
+	require.ErrorIs(t, err, monterr.ErrSupervisorClosed)
 }
 
 func TestNativeSupervisorRejectsAMissingBinary(t *testing.T) {
 	_, err := native.New(context.Background(), native.Options{Binary: filepath.Join(t.TempDir(), "absent")})
-	require.ErrorAs(t, err, new(*montygo.OptionError))
+	require.ErrorAs(t, err, new(*monterr.OptionError))
 	require.ErrorContains(t, err, "monty-server not found at")
 }

@@ -5,7 +5,6 @@ package docker
 import (
 	"context"
 	"fmt"
-	"github.com/asalimonov/montygo/internal/buildinfo"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,9 +14,10 @@ import (
 	"testing"
 	"time"
 
-	pyrt "github.com/asalimonov/montygo/runtime"
-	msup "github.com/asalimonov/montygo/supervisor"
 	"github.com/stretchr/testify/require"
+
+	"github.com/asalimonov/montygo"
+	"github.com/asalimonov/montygo/monterr"
 )
 
 // fakeDockerScript answers the CLI calls Supervisor makes and appends every
@@ -114,7 +114,7 @@ func fakeServer(t *testing.T, protocol uint32, healthy *bool) *httptest.Server {
 		fmt.Fprintf(w, `{"version":"0.3.0","monty_rev":%q,"protocol_version":%d,
 			"limits":{"idle_timeout_s":0,"keepalive_s":5,"session_timeout_s":3600,"turn_timeout_s":300,
 			"max_duration_s":0,"max_memory_bytes":0,"max_recursion_depth":1000,
-			"max_sessions":8,"max_sessions_per_client":0}}`, buildinfo.UpstreamRev, protocol)
+			"max_sessions":8,"max_sessions_per_client":0}}`, montygo.UpstreamRev, protocol)
 	})
 	s := httptest.NewServer(mux)
 	t.Cleanup(s.Close)
@@ -128,12 +128,12 @@ func testDockerOptions(f *fakeDocker) Options {
 		Command:      f.command,
 		StartTimeout: 5 * time.Second,
 		StopTimeout:  time.Second,
-		MaxProcesses: 4,
+		MaxSessions:  8,
 	}
 }
 
 func TestDockerSupervisorStartsAContainer(t *testing.T) {
-	server := fakeServer(t, buildinfo.ProtocolVersion, nil)
+	server := fakeServer(t, montygo.ProtocolVersion, nil)
 	f := newFakeDocker(t, server)
 	t.Setenv("FAKE_DOCKER_LOCAL", "example.test/monty-server:test")
 
@@ -146,7 +146,7 @@ func TestDockerSupervisorStartsAContainer(t *testing.T) {
 	require.Equal(t, "ws://127.0.0.1:"+serverPort(t, server)+"/", ep.URL)
 	require.Equal(t, "example.test/monty-server:test", sup.Image())
 	require.NotEmpty(t, sup.ContainerID())
-	require.Equal(t, buildinfo.ProtocolVersion, sup.ServerInfo().ProtocolVersion)
+	require.Equal(t, montygo.ProtocolVersion, sup.ServerInfo().ProtocolVersion)
 
 	calls := f.calls(t)
 	require.Contains(t, calls, "--read-only")
@@ -158,11 +158,11 @@ func TestDockerSupervisorStartsAContainer(t *testing.T) {
 	require.Contains(t, calls, "-e MONTY_SERVER_DUMP_KEY")
 	require.NotContains(t, calls, "MONTY_SERVER_DUMP_KEY=", "the key travels in the environment, not in argv")
 	require.Contains(t, calls, "-e MONTY_SERVER_MAX_SESSIONS_PER_CLIENT")
-	require.Regexp(t, `env dump_key=[0-9a-f]{64} sessions=8`, calls, "max sessions is twice MaxProcesses")
+	require.Regexp(t, `env dump_key=[0-9a-f]{64} sessions=8`, calls, "max sessions is MaxSessions")
 }
 
 func TestDockerSupervisorPullsWhenTheImageIsAbsent(t *testing.T) {
-	server := fakeServer(t, buildinfo.ProtocolVersion, nil)
+	server := fakeServer(t, montygo.ProtocolVersion, nil)
 	f := newFakeDocker(t, server)
 	t.Setenv("FAKE_DOCKER_PULLABLE", "example.test/monty-server:test")
 
@@ -173,7 +173,7 @@ func TestDockerSupervisorPullsWhenTheImageIsAbsent(t *testing.T) {
 }
 
 func TestDockerSupervisorTriesEveryCandidate(t *testing.T) {
-	server := fakeServer(t, buildinfo.ProtocolVersion, nil)
+	server := fakeServer(t, montygo.ProtocolVersion, nil)
 	f := newFakeDocker(t, server)
 	// Neither candidate exists locally; only the base release can be pulled.
 	t.Setenv("FAKE_DOCKER_PULLABLE", "example.test/monty-server:0.3.0")
@@ -189,7 +189,7 @@ func TestDockerSupervisorTriesEveryCandidate(t *testing.T) {
 }
 
 func TestDockerSupervisorReportsEveryFailedCandidate(t *testing.T) {
-	server := fakeServer(t, buildinfo.ProtocolVersion, nil)
+	server := fakeServer(t, montygo.ProtocolVersion, nil)
 	f := newFakeDocker(t, server)
 	cli, err := newDockerCLI(f.command, nil)
 	require.NoError(t, err)
@@ -201,7 +201,7 @@ func TestDockerSupervisorReportsEveryFailedCandidate(t *testing.T) {
 
 func TestDockerSupervisorRemovesAContainerThatNeverGetsHealthy(t *testing.T) {
 	healthy := false
-	server := fakeServer(t, buildinfo.ProtocolVersion, &healthy)
+	server := fakeServer(t, montygo.ProtocolVersion, &healthy)
 	f := newFakeDocker(t, server)
 	t.Setenv("FAKE_DOCKER_LOCAL", "example.test/monty-server:test")
 	opts := testDockerOptions(f)
@@ -214,7 +214,7 @@ func TestDockerSupervisorRemovesAContainerThatNeverGetsHealthy(t *testing.T) {
 }
 
 func TestDockerSupervisorRefusesAnotherProtocolVersion(t *testing.T) {
-	server := fakeServer(t, buildinfo.ProtocolVersion+1, nil)
+	server := fakeServer(t, montygo.ProtocolVersion+1, nil)
 	f := newFakeDocker(t, server)
 	t.Setenv("FAKE_DOCKER_LOCAL", "example.test/monty-server:test")
 
@@ -224,7 +224,7 @@ func TestDockerSupervisorRefusesAnotherProtocolVersion(t *testing.T) {
 }
 
 func TestDockerSupervisorEnvOverridesTheDefaults(t *testing.T) {
-	server := fakeServer(t, buildinfo.ProtocolVersion, nil)
+	server := fakeServer(t, montygo.ProtocolVersion, nil)
 	f := newFakeDocker(t, server)
 	t.Setenv("FAKE_DOCKER_LOCAL", "example.test/monty-server:test")
 	opts := testDockerOptions(f)
@@ -242,7 +242,7 @@ func TestDockerSupervisorEnvOverridesTheDefaults(t *testing.T) {
 }
 
 func TestDockerSupervisorRestartRebindsTheEndpoint(t *testing.T) {
-	first := fakeServer(t, buildinfo.ProtocolVersion, nil)
+	first := fakeServer(t, montygo.ProtocolVersion, nil)
 	f := newFakeDocker(t, first)
 	t.Setenv("FAKE_DOCKER_LOCAL", "example.test/monty-server:test")
 
@@ -253,7 +253,7 @@ func TestDockerSupervisorRestartRebindsTheEndpoint(t *testing.T) {
 	require.NoError(t, err)
 
 	// A restart publishes a new port, as Docker does.
-	second := fakeServer(t, buildinfo.ProtocolVersion, nil)
+	second := fakeServer(t, montygo.ProtocolVersion, nil)
 	f.setPort(t, second)
 	require.NoError(t, sup.Restart(context.Background(), before))
 
@@ -264,7 +264,7 @@ func TestDockerSupervisorRestartRebindsTheEndpoint(t *testing.T) {
 }
 
 func TestDockerSupervisorIgnoresARestartOfAStaleEndpoint(t *testing.T) {
-	server := fakeServer(t, buildinfo.ProtocolVersion, nil)
+	server := fakeServer(t, montygo.ProtocolVersion, nil)
 	f := newFakeDocker(t, server)
 	t.Setenv("FAKE_DOCKER_LOCAL", "example.test/monty-server:test")
 
@@ -272,12 +272,12 @@ func TestDockerSupervisorIgnoresARestartOfAStaleEndpoint(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sup.Close(context.Background()) })
 
-	require.NoError(t, sup.Restart(context.Background(), msup.ServerEndpoint{URL: "ws://127.0.0.1:1/"}))
+	require.NoError(t, sup.Restart(context.Background(), montygo.ServerEndpoint{URL: "ws://127.0.0.1:1/"}))
 	require.NotContains(t, f.calls(t), "restart")
 }
 
 func TestDockerSupervisorCloseStopsAndRemoves(t *testing.T) {
-	server := fakeServer(t, buildinfo.ProtocolVersion, nil)
+	server := fakeServer(t, montygo.ProtocolVersion, nil)
 	f := newFakeDocker(t, server)
 	t.Setenv("FAKE_DOCKER_LOCAL", "example.test/monty-server:test")
 
@@ -292,12 +292,12 @@ func TestDockerSupervisorCloseStopsAndRemoves(t *testing.T) {
 	require.Equal(t, 1, strings.Count(calls, "stop -t 1"))
 
 	_, err = sup.Endpoint(context.Background())
-	require.ErrorIs(t, err, msup.ErrSupervisorClosed)
+	require.ErrorIs(t, err, monterr.ErrSupervisorClosed)
 }
 
 func TestDockerSupervisorRejectsAMissingCLI(t *testing.T) {
 	opts := Options{Command: filepath.Join(t.TempDir(), "no-such-docker"), Version: "test"}
 	_, err := New(context.Background(), opts)
-	require.ErrorAs(t, err, new(*pyrt.OptionError))
+	require.ErrorAs(t, err, new(*monterr.OptionError))
 	require.ErrorContains(t, err, "docker CLI not found")
 }

@@ -6,6 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/asalimonov/montygo/monterr"
+	"github.com/asalimonov/montygo/sandbox"
+	"github.com/asalimonov/montygo/sandbox/host"
 	"io"
 	"os"
 
@@ -28,7 +31,11 @@ func main() {
 }
 
 func withSession(ctx context.Context, pool *montygo.Pool, fn func(*montygo.Session) error) error {
-	session, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
+	rt, err := montygo.NewRuntime(montygo.RuntimeOptions{})
+	if err != nil {
+		return err
+	}
+	session, err := pool.Checkout(ctx, rt, montygo.CheckoutOptions{})
 	if err != nil {
 		return err
 	}
@@ -37,14 +44,14 @@ func withSession(ctx context.Context, pool *montygo.Pool, fn func(*montygo.Sessi
 }
 
 func run(ctx context.Context, out io.Writer) error {
-	pool, err := montygo.New(ctx, montyenv.PoolOptions())
+	pool, err := montygo.NewPool(ctx, montyenv.PoolOptions())
 	if err != nil {
 		return err
 	}
 	defer pool.Close(ctx)
 
 	err = withSession(ctx, pool, func(session *montygo.Session) error {
-		wrapper, err := montygo.NewClassType[Person](montygo.ClassTypeOptions{Init: true, InstanceEagerAttrs: montygo.All(), InstanceAllowedMethods: montygo.All()})
+		wrapper, err := host.NewClassType[Person](host.ClassTypeOptions{Init: true, InstanceEagerAttrs: host.All(), InstanceAllowedMethods: host.All()})
 		if err != nil {
 			return err
 		}
@@ -53,9 +60,9 @@ func run(ctx context.Context, out io.Writer) error {
 			return err
 		}
 		if result != "hi Samuel" {
-			return fmt.Errorf("assertion failed: result == %s", montygo.Repr(result))
+			return fmt.Errorf("assertion failed: result == %s", sandbox.Repr(result))
 		}
-		fmt.Fprintf(out, "constructed in the sandbox: %s\n", montygo.Repr(result))
+		fmt.Fprintf(out, "constructed in the sandbox: %s\n", sandbox.Repr(result))
 		return nil
 	})
 	if err != nil {
@@ -63,12 +70,12 @@ func run(ctx context.Context, out io.Writer) error {
 	}
 
 	return withSession(ctx, pool, func(session *montygo.Session) error {
-		wrapper, err := montygo.NewClassType[Person](montygo.ClassTypeOptions{})
+		wrapper, err := host.NewClassType[Person](host.ClassTypeOptions{})
 		if err != nil {
 			return err
 		}
 		_, err = session.FeedRun(ctx, "Person(\"Samuel\", 4)", &montygo.FeedOptions{Inputs: map[string]any{"Person": wrapper}})
-		var exc *montygo.RuntimeError
+		var exc *monterr.RuntimeError
 		switch {
 		case errors.As(err, &exc):
 			fmt.Fprintf(out, "construction denied: %v\n", exc)

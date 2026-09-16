@@ -5,6 +5,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/asalimonov/montygo/sandbox"
+	"github.com/asalimonov/montygo/sandbox/host"
 	"io"
 	"os"
 
@@ -35,14 +37,18 @@ func main() {
 }
 
 func run(ctx context.Context, out io.Writer) error {
-	pool, err := montygo.New(ctx, montyenv.PoolOptions())
+	pool, err := montygo.NewPool(ctx, montyenv.PoolOptions())
 	if err != nil {
 		return err
 	}
 	defer pool.Close(ctx)
 
 	result, err := func() (any, error) {
-		session, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
+		rt, err := montygo.NewRuntime(montygo.RuntimeOptions{})
+		if err != nil {
+			return nil, err
+		}
+		session, err := pool.Checkout(ctx, rt, montygo.CheckoutOptions{})
 		if err != nil {
 			return nil, err
 		}
@@ -53,7 +59,7 @@ func run(ctx context.Context, out io.Writer) error {
 		return err
 	}
 
-	proxy, ok := result.(*montygo.ClassProxy)
+	proxy, ok := result.(*host.ClassProxy)
 	if !ok {
 		return fmt.Errorf("assertion failed: expected a ClassProxy, got %T", result)
 	}
@@ -63,9 +69,9 @@ func run(ctx context.Context, out io.Writer) error {
 	if !proxy.IsDataclass {
 		return fmt.Errorf("assertion failed: is_dataclass is false")
 	}
-	want := montygo.NewDict(montygo.Pair{Key: "x", Value: 3}, montygo.Pair{Key: "y", Value: 4})
-	if !montygo.Equal(proxy.Attributes, want) {
-		return fmt.Errorf("assertion failed: attributes == %s", montygo.Repr(proxy.Attributes))
+	want := sandbox.NewDict(sandbox.Pair{Key: "x", Value: 3}, sandbox.Pair{Key: "y", Value: 4})
+	if !sandbox.Equal(proxy.Attributes, want) {
+		return fmt.Errorf("assertion failed: attributes == %s", sandbox.Repr(proxy.Attributes))
 	}
 	fmt.Fprintf(out, "host received: %v\n", proxy)
 	return nil

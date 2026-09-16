@@ -11,6 +11,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/asalimonov/montygo/monterr"
+	"github.com/asalimonov/montygo/sandbox"
 	"io"
 	"math"
 	"os"
@@ -108,7 +110,7 @@ func run(ctx context.Context, c console, args []string) error {
 type options struct {
 	scriptName string
 	initial    string
-	mounts     []*montygo.MountDir
+	mounts     []*sandbox.MountDir
 	cwd        string
 	limits     montygo.ResourceLimits
 	ws         wsOptions
@@ -123,18 +125,17 @@ type wsOptions struct {
 // openPool dials a remote Monty server when -ws is set, else starts local workers.
 func openPool(ctx context.Context, o *options) (*montygo.Pool, error) {
 	if o.ws.url == "" {
-		return montygo.New(ctx, montyenv.PoolOptions())
+		return montygo.NewPool(ctx, montyenv.PoolOptions())
 	}
 	tlsConfig, err := o.ws.tlsConfig()
 	if err != nil {
 		return nil, err
 	}
-	return montygo.NewWebSocket(ctx, montygo.WebSocketOptions{
-		URL: o.ws.url,
+	return montygo.NewPool(ctx, montygo.PoolOptions{
+		Workers: montygo.Remote(montygo.StaticServer(o.ws.url, tlsConfig, nil), montygo.RemoteOptions{}),
 		// A killed session is replaced before the lost one is released.
-		MaxProcesses:   2,
+		MaxWorkers:     2,
 		RequestTimeout: montygo.NoRequestTimeout,
-		TLSConfig:      tlsConfig,
 	})
 }
 
@@ -269,7 +270,7 @@ func parseMemorySize(s string) (uint64, error) {
 }
 
 // openMount parses host_path::virtual_path[::mode[::write_limit_bytes]].
-func openMount(spec string) (*montygo.MountDir, error) {
+func openMount(spec string) (*sandbox.MountDir, error) {
 	parts := strings.Split(spec, "::")
 	if len(parts) < 2 || len(parts) > 4 {
 		return nil, fmt.Errorf("invalid mount spec '%s': expected host_path::virtual_path[::mode[::write_limit_bytes]]", spec)
@@ -281,15 +282,15 @@ func openMount(spec string) (*montygo.MountDir, error) {
 	if len(parts) >= 3 {
 		modeName = parts[2]
 	}
-	mode, ok := map[string]montygo.MountMode{
-		"ro":      montygo.MountReadOnly,
-		"rw":      montygo.MountReadWrite,
-		"overlay": montygo.MountOverlay,
+	mode, ok := map[string]sandbox.MountMode{
+		"ro":      sandbox.MountReadOnly,
+		"rw":      sandbox.MountReadWrite,
+		"overlay": sandbox.MountOverlay,
 	}[modeName]
 	if !ok {
 		return nil, fmt.Errorf("invalid mount mode '%s' in '%s': expected 'ro', 'rw', or 'overlay'", modeName, spec)
 	}
-	dirOpts := montygo.MountDirOptions{HostPath: parts[0], VirtualPath: parts[1], Mode: mode}
+	dirOpts := sandbox.MountDirOptions{HostPath: parts[0], VirtualPath: parts[1], Mode: mode}
 	if len(parts) == 4 {
 		if parts[3] == "" {
 			return nil, fmt.Errorf("invalid write limit in '%s': value must not be empty", spec)
@@ -300,7 +301,7 @@ func openMount(spec string) (*montygo.MountDir, error) {
 		}
 		dirOpts.WriteBytesLimit = &limit
 	}
-	dir, err := montygo.NewMountDir(dirOpts)
+	dir, err := sandbox.NewMountDir(dirOpts)
 	if err != nil {
 		return nil, fmt.Errorf("mount %s: %w", spec, err)
 	}
@@ -315,7 +316,11 @@ type repl struct {
 }
 
 func (r *repl) checkout(ctx context.Context) error {
-	session, err := r.pool.Checkout(ctx, montygo.CheckoutOptions{ScriptName: r.opts.scriptName, Limits: &r.opts.limits})
+	rt, err := montygo.NewRuntime(montygo.RuntimeOptions{})
+	if err != nil {
+		return err
+	}
+	session, err := r.pool.Checkout(ctx, rt, montygo.CheckoutOptions{ScriptName: r.opts.scriptName, Limits: &r.opts.limits})
 	if err != nil {
 		return err
 	}
@@ -327,9 +332,9 @@ func (r *repl) feedOptions() *montygo.FeedOptions {
 	return &montygo.FeedOptions{
 		Mount: r.opts.mounts,
 		Cwd:   r.opts.cwd,
-		Print: montygo.PrintFunc(func(stream montygo.Stream, text string) error {
+		Print: sandbox.PrintFunc(func(stream sandbox.Stream, text string) error {
 			w := r.out
-			if stream == montygo.Stderr {
+			if stream == sandbox.Stderr {
 				w = r.errOut
 			}
 			_, err := io.WriteString(w, text)
@@ -473,7 +478,7 @@ func (r *repl) report(ctx context.Context, value any, err error) error {
 		if _, werr := fmt.Fprintf(r.errOut, "error: %s\n", describe(err)); werr != nil {
 			return werr
 		}
-		if !errors.Is(err, montygo.ErrSessionLost) {
+		if !errors.Is(err, monterr.ErrSessionLost) {
 			return nil
 		}
 	}
@@ -490,16 +495,16 @@ func display(value any) string {
 	switch v := value.(type) {
 	case string:
 		return v
-	case montygo.Type:
+	case sandbox.Type:
 		return "<class '" + v.Name + "'>"
 	}
-	return montygo.Repr(value)
+	return sandbox.Repr(value)
 }
 
 func describe(err error) string {
-	var montyErr montygo.Error
+	var montyErr monterr.Error
 	if errors.As(err, &montyErr) {
-		return montyErr.Display(montygo.DisplayTraceback)
+		return montyErr.Display(monterr.DisplayTraceback)
 	}
 	return err.Error()
 }

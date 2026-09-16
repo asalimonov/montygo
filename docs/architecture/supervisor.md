@@ -1,6 +1,6 @@
 # Server supervisors, recovery and rotation
 
-A WebSocket pool reaches workers through a `monty-server`. This document covers who owns that server, how a pool survives losing it, and how a session outlives the server's session timeout.
+A remote pool reaches workers through a `monty-server`. This document covers who owns that server, how a pool survives losing it, and how a session outlives the server's session timeout.
 
 `websocket.md` covers the transport, `server.md` the server itself, `docker.md` its image.
 
@@ -17,13 +17,16 @@ type ServerSupervisor interface {
 	Endpoint(ctx context.Context) (ServerEndpoint, error)
 	Restart(ctx context.Context, failed ServerEndpoint) error
 }
+
+func Remote(sup ServerSupervisor, opts RemoteOptions) WorkerSource
+func StaticServer(url string, tlsConfig *tls.Config, headers func(ctx context.Context) (map[string]string, error)) ServerSupervisor
 ```
 
-- `WebSocketOptions.Supervisor` replaces `URL` and `ConnectHeaders`; setting either with it is an `OptionError`. A pool with neither is an `OptionError`.
-- `Endpoint` is called before every dial attempt, so an endpoint MAY move between attempts. It MUST be safe for concurrent use and SHOULD be cheap.
+- The contract is declared in the root package, so an application implements it without importing anything else. `Remote(sup, opts)` is the worker source of a pool; a nil supervisor is an `OptionError`.
+- `Endpoint` is called before every dial attempt, so an endpoint MAY move between attempts. It MUST be safe for concurrent use and SHOULD be cheap. An endpoint's `Headers` are sent with every upgrade and HTTP request; its `TLSConfig` overrides `RemoteOptions.TLSConfig`.
 - `Restart` receives the endpoint that failed. A supervisor that has already replaced that server MUST return nil.
 - A supervisor that replaces a server MUST keep its dump key. A rotated session's dump is signed, and another key rejects it with `ValueError: invalid session dump signature`.
-- A pool with a fixed `URL` uses an internal static supervisor. Its `Restart` always fails, so `RecoveryPolicy.RestartServer` has no effect there.
+- `StaticServer` is the supervisor of a fixed URL. Its endpoint never moves, its headers callback runs once per checkout and its error fails that checkout unchanged, and `Restart` always fails, so `RecoveryPolicy.RestartServer` has no effect there. A pool with a static server dials once per checkout, without the recovery loop; rotation still uses it, because state is at stake.
 - montygo ships two implementations, and an application MAY add its own for servers on other hosts:
 
 | Package | Server | Endpoint | Restart |
@@ -31,9 +34,9 @@ type ServerSupervisor interface {
 | `montygo/supervisor/docker` | a container on the local Docker daemon | `ws://127.0.0.1:<published port>/` | `docker restart`, or a new container when it is gone; the dump key survives |
 | `montygo/supervisor/native` | a `monty-server` child process | `ws://127.0.0.1:<ephemeral port>/`, read from the line the server prints once bound | the process is drained with SIGTERM and respawned; the dump key survives |
 
-- Both disable the server's idle timeout and its memory and duration ceilings, so `CheckoutOptions.Limits` governs as on the local backends, and both size the server at `2 × MaxProcesses` sessions with the per-client quota off.
-- `docker.NewPool` and `native.NewPool` return a pool that owns its supervisor; `docker.New` and `native.New` return the supervisor alone, for a caller that wants to share it.
-- The root package re-exports the Docker spellings (`montygo.NewDocker`, `montygo.DockerOptions`) for compatibility; the native supervisor is reached through its own package.
+- Both disable the server's idle timeout and its memory and duration ceilings, so the runtime's limits govern as on the local workers, and both size the server at `Options.MaxSessions` sessions (0 means `2 × runtime.NumCPU()`) with the per-client quota off. Pass twice the `MaxWorkers` of the pools that dial the server.
+- Both probe readiness with `CheckServerHealth` and `FetchServerInfo` over a `StaticServer` of the published address, and refuse a server of another protocol version.
+- Both import the root package. Neither builds a pool: the application creates the supervisor, passes it to `Remote`, and closes it after the pools.
 
 ## Recovery
 
@@ -45,7 +48,7 @@ type RecoveryPolicy struct {
 }
 ```
 
-The pool reserves capacity first, then dials under the policy. Capacity waiting is bounded by `CheckoutTimeout`, never by `AttemptTimeout`.
+`RemoteOptions.Recovery` holds it. The pool reserves capacity first, then dials under the policy. Capacity waiting is bounded by `CheckoutTimeout`, never by `AttemptTimeout`.
 
 ```
 Reserve capacity (CheckoutTimeout)
@@ -61,7 +64,7 @@ Reserve capacity (CheckoutTimeout)
 - Not retryable: a closed pool, exhausted capacity, a runtime error such as a rejected dump, a protocol violation, and the caller's context ending. A caller that gave up gets `ctx.Err()`.
 - Restarts are single-flight per endpoint URL. A caller whose failure happened before a completed restart of that URL joins it instead of starting another; a failure observed afterwards is a new incident.
 - A restart runs under `context.WithoutCancel`, so the caller that started it can give up without abandoning the other waiters.
-- `Checkout` uses the policy only for supervised pools. Rotation always uses it, because state is at stake.
+- `Checkout` uses the policy for every supervisor except `StaticServer`. Rotation always uses it.
 
 ## Rotation
 
@@ -69,9 +72,9 @@ A `monty-server` closes a session at `--session-timeout`, 3600 s by default, wit
 
 ### Policy
 
-`newRotationPolicy` reads `GET /info` once, at pool creation. Rotation stays off, without failing, when the server reports no `/info`, a disabled session or turn timeout, or a session timeout shorter than `2 × (turn timeout + margin)`. A hostile or misconfigured server can therefore cause no rotation, never a rotation storm.
+`newRotationPolicy` reads `GET /info` once, at `NewPool`, when `RemoteOptions.RotateSessions` is set. Rotation stays off, without failing, when the server reports no `/info`, a disabled session or turn timeout, or a session timeout shorter than `2 × (turn timeout + margin)`. A hostile or misconfigured server can therefore cause no rotation, never a rotation storm.
 
-`WebSocketOptions.RotationMargin` is the lead time; 0 means 30 s. `NewDocker` enables rotation; `NewWebSocket` needs `RotateSessions`.
+`RemoteOptions.RotationMargin` is the lead time; 0 means 30 s. Rotation is off unless `RotateSessions` asks for it, for every supervisor alike.
 
 ### Invariant
 
@@ -93,13 +96,13 @@ attach                  → new watcher, new deadline, new timer
 
 - Rotation runs under a control reservation, so no execution is in flight and no suspension is pending.
 - `Handoff` and `Bind` keep the suspension count, the duration budget and the working-directory flag. Upstream carries the execution clock and the limits inside the dump, so a rotated session neither gains budget nor loses it.
-- The host registry, host objects, the stop policy and `Session` identity are the parent's; they are unaffected.
+- The runtime, its host objects, the stop policy and `Session` identity are the parent's; they are unaffected.
 - Telemetry keeps upstream names: the rotation appears as a `dump` span, a `load` span and a new `session` span.
-- During a rotation the pool MAY hold one worker more than `MaxProcesses` while the old connection closes. `NewDocker` sizes the server at `2 × MaxProcesses` sessions for this reason.
+- During a rotation the pool MAY hold one worker more than `MaxWorkers` while the old connection closes. This is why a supervisor's `MaxSessions` SHOULD be twice the pool's `MaxWorkers`.
 
 ### Failure
 
-A failed rotation ends the session with `*RotationError`, which matches `errors.Is(err, ErrSessionLost)`.
+A failed rotation ends the session with `*monterr.RotationError`, which matches `errors.Is(err, monterr.ErrSessionLost)`.
 
 | Failure | `Dump` | Recovery |
 |---|---|---|
@@ -112,5 +115,5 @@ A rotation before an operation returns the error from that call, and the operati
 
 ## Ownership
 
-- `NewDocker` owns its `DockerSupervisor`. `Pool.Shutdown` stops the container after closing the sessions; `Pool.Close` stops it once the last open session closes, because `Close` leaves checked-out sessions running.
-- A supervisor passed in `WebSocketOptions` belongs to the caller. The pool never closes it.
+- A pool never owns its supervisor. `Pool.Shutdown` and `Pool.Close` touch workers and sessions only. The application closes the supervisor after the pools that dial it; a supervisor closed first makes later checkouts fail with `monterr.ErrSupervisorClosed` from `Endpoint`.
+- `docker.Options.Reaper` is the hook for removing containers left by a process that died; nil reaps nothing.

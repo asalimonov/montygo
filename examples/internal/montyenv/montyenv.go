@@ -1,4 +1,4 @@
-// Package montyenv selects the pool backend for the example programs.
+// Package montyenv selects the pool workers for the example programs.
 package montyenv
 
 import (
@@ -12,12 +12,12 @@ import (
 const BackendEnv = "MONTY_EXAMPLES_BACKEND"
 
 // PoolOptions returns pool options honouring BackendEnv.
-func PoolOptions() montygo.Options {
+func PoolOptions() montygo.PoolOptions {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(BackendEnv))) {
 	case "native":
-		return montygo.Options{Backend: montygo.BackendNative}
+		return montygo.PoolOptions{Workers: montygo.Native(montygo.NativeOptions{})}
 	case "wasm":
-		return montygo.Options{Backend: montygo.BackendWasm}
+		return montygo.PoolOptions{Workers: montygo.Wasm(montygo.WasmOptions{})}
 	}
-	return montygo.Options{}
+	return montygo.PoolOptions{Workers: montygo.Auto()}
 }

@@ -1,6 +1,7 @@
 package network
 
 import (
+	"github.com/asalimonov/montygo/monterr"
 	"testing"
 	"time"
 
@@ -9,9 +10,9 @@ import (
 	"github.com/asalimonov/montygo"
 )
 
-func requireRuntimeError(t *testing.T, err error, typeName string) *montygo.RuntimeError {
+func requireRuntimeError(t *testing.T, err error, typeName string) *monterr.RuntimeError {
 	t.Helper()
-	var re *montygo.RuntimeError
+	var re *monterr.RuntimeError
 	require.ErrorAs(t, err, &re)
 	require.Equal(t, typeName, re.Exception().TypeName, re.Error())
 	return re
@@ -21,7 +22,7 @@ func TestLimits_MemoryClampedToCeiling(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--max-memory-mib", "16"))
 	ctx := testCtx(t)
-	p := s.NewPool(montygo.WebSocketOptions{})
+	p := s.NewPool(wsOptions{})
 	session := s.Checkout(ctx, p, montygo.CheckoutOptions{Limits: &montygo.ResourceLimits{MaxMemory: 1 << 30}})
 
 	_, err := session.FeedRun(ctx, "x = 'a' * (64 * 1024 * 1024)\nlen(x)", nil)
@@ -32,7 +33,7 @@ func TestLimits_DurationClampedToCeiling(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--max-duration", "1"))
 	ctx := testCtx(t)
-	p := s.NewPool(montygo.WebSocketOptions{})
+	p := s.NewPool(wsOptions{})
 	session := s.Checkout(ctx, p, montygo.CheckoutOptions{Limits: &montygo.ResourceLimits{MaxDuration: time.Hour}})
 
 	_, err := session.FeedRun(ctx, "while True:\n    pass", nil)
@@ -45,7 +46,7 @@ func TestLimits_RecursionClampedToCeiling(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--max-recursion-depth", "50"))
 	ctx := testCtx(t)
-	p := s.NewPool(montygo.WebSocketOptions{})
+	p := s.NewPool(wsOptions{})
 	session := s.Checkout(ctx, p, montygo.CheckoutOptions{Limits: &montygo.ResourceLimits{MaxRecursionDepth: 100000}})
 
 	_, err := session.FeedRun(ctx, "def f(n):\n    return f(n + 1) if n < 200 else n\nf(0)", nil)
@@ -61,7 +62,7 @@ func TestLimits_LowerClientLimitWins(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t)
 	ctx := testCtx(t)
-	p := s.NewPool(montygo.WebSocketOptions{})
+	p := s.NewPool(wsOptions{})
 	const allocate = "x = 'a' * (8 * 1024 * 1024)\nlen(x)"
 
 	unlimited := s.Checkout(ctx, p, montygo.CheckoutOptions{})
@@ -78,7 +79,7 @@ func TestLimits_DisabledCeilingPassesClientValue(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--max-memory-mib", "0"))
 	ctx := testCtx(t)
-	p := s.NewPool(montygo.WebSocketOptions{})
+	p := s.NewPool(wsOptions{})
 	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 
 	v, err := session.FeedRun(ctx, "x = 'a' * (128 * 1024 * 1024)\nlen(x)", nil)

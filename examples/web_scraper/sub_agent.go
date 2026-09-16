@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/asalimonov/montygo/monterr"
+	"github.com/asalimonov/montygo/sandbox"
+	"github.com/asalimonov/montygo/sandbox/host"
 	"math/big"
 	"sort"
 	"strconv"
@@ -14,7 +17,6 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
-	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/examples/internal/pyargs"
 )
 
@@ -72,14 +74,14 @@ func (r *RecordModels) put(info ModelInfo) string {
 
 // recordModelInfo records information about a model, asking the sub-agent to
 // coerce input that fails validation.
-func (r *RecordModels) recordModelInfo(ctx context.Context, args []any, kwargs montygo.Kwargs) (any, error) {
+func (r *RecordModels) recordModelInfo(ctx context.Context, args []any, kwargs host.Kwargs) (any, error) {
 	bound, err := pyargs.Bind("record_model_info", args, kwargs, pyargs.Required("model_information"))
 	if err != nil {
 		return nil, err
 	}
-	information, ok := bound[0].(*montygo.Dict)
+	information, ok := bound[0].(*sandbox.Dict)
 	if !ok {
-		return nil, montygo.Raise("TypeError", "record_model_info() argument 'model_information' must be dict, not "+montygo.Repr(bound[0]))
+		return nil, monterr.Raise("TypeError", "record_model_info() argument 'model_information' must be dict, not "+sandbox.Repr(bound[0]))
 	}
 	if info, err := modelInfoFromDict(information); err == nil {
 		return r.put(info), nil
@@ -143,7 +145,7 @@ func (e *validationErrors) add(loc, msg string) {
 	*e = append(*e, loc+"\n  "+msg)
 }
 
-func modelInfoFromDict(d *montygo.Dict) (ModelInfo, error) {
+func modelInfoFromDict(d *sandbox.Dict) (ModelInfo, error) {
 	var errs validationErrors
 	var info ModelInfo
 	str := func(key string) string {
@@ -182,7 +184,7 @@ func modelInfoFromDict(d *montygo.Dict) (ModelInfo, error) {
 	info.InputMtok = num("input_mtok")
 	info.OutputMtok = num("output_mtok")
 	if v, ok := d.Get("attributes"); ok && v != nil {
-		attrs, ok := v.(*montygo.Dict)
+		attrs, ok := v.(*sandbox.Dict)
 		if !ok {
 			errs.add("attributes", "Input should be a valid dictionary")
 		} else {
@@ -190,7 +192,7 @@ func modelInfoFromDict(d *montygo.Dict) (ModelInfo, error) {
 			for _, p := range attrs.Pairs() {
 				key, ok := p.Key.(string)
 				if !ok {
-					errs.add("attributes."+montygo.Repr(p.Key)+".[key]", "Input should be a valid string")
+					errs.add("attributes."+sandbox.Repr(p.Key)+".[key]", "Input should be a valid string")
 					continue
 				}
 				if s, ok := p.Value.(string); ok {
@@ -235,7 +237,7 @@ func parseModelInfoJSON(raw string) (ModelInfo, error) {
 	if err != nil {
 		return ModelInfo{}, err
 	}
-	d, ok := v.(*montygo.Dict)
+	d, ok := v.(*sandbox.Dict)
 	if !ok {
 		return ModelInfo{}, validationErrors{"\n  Input should be a valid dictionary"}
 	}
@@ -243,7 +245,7 @@ func parseModelInfoJSON(raw string) (ModelInfo, error) {
 }
 
 // formatAsXML renders a dict the way pydantic-ai's format_as_xml does.
-func formatAsXML(d *montygo.Dict) string {
+func formatAsXML(d *sandbox.Dict) string {
 	var lines []string
 	for _, p := range d.Pairs() {
 		appendXML(&lines, xmlKey(p.Key), p.Value, "")
@@ -255,7 +257,7 @@ func xmlKey(k any) string {
 	if s, ok := k.(string); ok {
 		return s
 	}
-	return montygo.Repr(k)
+	return sandbox.Repr(k)
 }
 
 var xmlEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
@@ -263,7 +265,7 @@ var xmlEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 func appendXML(lines *[]string, tag string, v any, prefix string) {
 	var items []any
 	switch x := v.(type) {
-	case *montygo.Dict:
+	case *sandbox.Dict:
 		*lines = append(*lines, prefix+"<"+tag+">")
 		for _, p := range x.Pairs() {
 			appendXML(lines, xmlKey(p.Key), p.Value, prefix+"  ")
@@ -272,7 +274,7 @@ func appendXML(lines *[]string, tag string, v any, prefix string) {
 		return
 	case []any:
 		items = x
-	case montygo.Tuple:
+	case sandbox.Tuple:
 		items = x
 	default:
 		text := "null"
@@ -281,7 +283,7 @@ func appendXML(lines *[]string, tag string, v any, prefix string) {
 		case string:
 			text = s
 		default:
-			text = montygo.Repr(v)
+			text = sandbox.Repr(v)
 		}
 		*lines = append(*lines, prefix+"<"+tag+">"+xmlEscaper.Replace(text)+"</"+tag+">")
 		return

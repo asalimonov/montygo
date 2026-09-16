@@ -4,13 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/asalimonov/montygo/monterr"
+	"github.com/asalimonov/montygo/sandbox"
+	"github.com/asalimonov/montygo/sandbox/host"
 	"math/big"
 	"strconv"
 	"strings"
 
-	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/examples/internal/pyargs"
-	"github.com/asalimonov/montygo/runtime/osaccess"
+	"github.com/asalimonov/montygo/sandbox/osaccess"
 )
 
 // ExternalFunctions read files through the same OSAccess the sandbox sees.
@@ -19,7 +21,7 @@ type ExternalFunctions struct {
 }
 
 // queryCSV executes SQL on a CSV file loaded as the table data.
-func (e *ExternalFunctions) queryCSV(_ context.Context, args []any, kwargs montygo.Kwargs) (any, error) {
+func (e *ExternalFunctions) queryCSV(_ context.Context, args []any, kwargs host.Kwargs) (any, error) {
 	bound, err := pyargs.Bind("query_csv", args, kwargs,
 		pyargs.Required("filepath"), pyargs.Required("sql"), pyargs.Optional("parameters", nil))
 	if err != nil {
@@ -35,16 +37,16 @@ func (e *ExternalFunctions) queryCSV(_ context.Context, args []any, kwargs monty
 	}
 	var parameters map[string]any
 	if bound[2] != nil {
-		d, ok := bound[2].(*montygo.Dict)
+		d, ok := bound[2].(*sandbox.Dict)
 		if !ok {
-			return nil, montygo.Raise("TypeError", "argument 'parameters' must be dict or None, not "+pyTypeName(bound[2]))
+			return nil, monterr.Raise("TypeError", "argument 'parameters' must be dict or None, not "+pyTypeName(bound[2]))
 		}
 		parameters, ok = d.StringMap()
 		if !ok {
-			return nil, montygo.Raise("TypeError", "parameters keys must be str")
+			return nil, monterr.Raise("TypeError", "parameters keys must be str")
 		}
 	}
-	return montygo.Async(func() (any, error) {
+	return host.Async(func() (any, error) {
 		content, err := e.fs.PathReadBytes(path)
 		if err != nil {
 			return nil, err
@@ -54,7 +56,7 @@ func (e *ExternalFunctions) queryCSV(_ context.Context, args []any, kwargs monty
 }
 
 // readJSON reads and parses a JSON file.
-func (e *ExternalFunctions) readJSON(_ context.Context, args []any, kwargs montygo.Kwargs) (any, error) {
+func (e *ExternalFunctions) readJSON(_ context.Context, args []any, kwargs host.Kwargs) (any, error) {
 	bound, err := pyargs.Bind("read_json", args, kwargs, pyargs.Required("filepath"))
 	if err != nil {
 		return nil, err
@@ -63,21 +65,21 @@ func (e *ExternalFunctions) readJSON(_ context.Context, args []any, kwargs monty
 	if err != nil {
 		return nil, err
 	}
-	return montygo.Async(func() (any, error) {
+	return host.Async(func() (any, error) {
 		content, err := e.fs.PathReadText(path)
 		if err != nil {
 			return nil, err
 		}
 		v, err := decodeJSON(content)
 		if err != nil {
-			return nil, montygo.Raise("json.JSONDecodeError", err.Error())
+			return nil, monterr.Raise("json.JSONDecodeError", err.Error())
 		}
 		return v, nil
 	}), nil
 }
 
 // analyzeSentiment scores text with keyword matching.
-func analyzeSentiment(_ context.Context, args []any, kwargs montygo.Kwargs) (any, error) {
+func analyzeSentiment(_ context.Context, args []any, kwargs host.Kwargs) (any, error) {
 	bound, err := pyargs.Bind("analyze_sentiment", args, kwargs, pyargs.Required("text"))
 	if err != nil {
 		return nil, err
@@ -86,7 +88,7 @@ func analyzeSentiment(_ context.Context, args []any, kwargs montygo.Kwargs) (any
 	if err != nil {
 		return nil, err
 	}
-	return montygo.Async(func() (any, error) { return sentimentScore(text), nil }), nil
+	return host.Async(func() (any, error) { return sentimentScore(text), nil }), nil
 }
 
 var positiveWords = []string{
@@ -138,14 +140,14 @@ func sentimentScore(text string) float64 {
 	return max(-1.0, min(1.0, score))
 }
 
-func pathArg(name string, v any) (montygo.Path, error) {
+func pathArg(name string, v any) (sandbox.Path, error) {
 	switch p := v.(type) {
-	case montygo.Path:
+	case sandbox.Path:
 		return p, nil
 	case string:
-		return montygo.Path(p), nil
+		return sandbox.Path(p), nil
 	}
-	return "", montygo.Raise("TypeError", fmt.Sprintf("argument '%s' must be Path or str, not %s", name, pyTypeName(v)))
+	return "", monterr.Raise("TypeError", fmt.Sprintf("argument '%s' must be Path or str, not %s", name, pyTypeName(v)))
 }
 
 func decodeJSON(text string) (any, error) {
@@ -180,7 +182,7 @@ func decodeJSONValue(dec *json.Decoder) (any, error) {
 			_, err := dec.Token()
 			return items, err
 		}
-		d := montygo.NewDict()
+		d := sandbox.NewDict()
 		for dec.More() {
 			key, err := dec.Token()
 			if err != nil {

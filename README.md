@@ -10,8 +10,8 @@ TypeScript package `@pydantic/monty`. Code runs in crash-isolated Monty workers:
   protobuf wire protocol, exactly like the Python and JavaScript bindings;
 - **wasm**: the same worker compiled to WebAssembly and embedded in the Go
   module, run in-process by [wazero](https://wazero.io) — nothing to install;
-- **websocket**: a remote worker behind a WebSocket relay, Full Monty, or the
-  bundled [`monty-server` image](#dockerized-server).
+- **remote**: a worker behind a WebSocket server, Full Monty or the bundled
+  [`monty-server` image](#dockerized-server), reached through a supervisor.
 
 It tracks Monty `0.0.23` plus upstream `main@f8acf4fa` (wire protocol version 3).
 
@@ -53,15 +53,22 @@ dependency's commit from the consumer's `vcs.revision`.
 
 ## Basic usage
 
+Two values shape every session: a `Runtime` is the sandbox configuration and
+its host extensions, a `Pool` manages the workers. `Pool.Checkout` joins them.
+
 ```go
 ctx := context.Background()
-pool, err := montygo.New(ctx, montygo.Options{})
+pool, err := montygo.NewPool(ctx, montygo.PoolOptions{})
 if err != nil {
 	return err
 }
 defer pool.Close(ctx)
 
-session, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
+rt, err := montygo.NewRuntime(montygo.RuntimeOptions{})
+if err != nil {
+	return err
+}
+session, err := pool.Checkout(ctx, rt, montygo.CheckoutOptions{})
 if err != nil {
 	return err
 }
@@ -77,7 +84,12 @@ session.FeedRun(ctx, "x = 21", nil)
 session.FeedRun(ctx, "x * 2", nil) // int64(42)
 ```
 
-`CheckoutOptions.ScriptName` names the script in tracebacks and type-checking diagnostics.
+A runtime is immutable and safe to share: one runtime serves any number of
+sessions of any number of pools. `RuntimeOptions` hold the host registry, the
+OS handler, mounts, the default print target, resource limits, type checking
+and the host-side bounds. `CheckoutOptions` hold what differs per session:
+`ScriptName` (the name in tracebacks and type-checking diagnostics), `Limits`
+(replacing the runtime's) and `Stop`.
 
 `Session.Close(ctx)` stops a running feed with the session's [stop policy](#stopping-a-run),
 invalidates a paused snapshot and returns the worker to the pool, so
@@ -97,7 +109,7 @@ feeds and incompatible control calls return `ErrSessionBusy`; they never queue.
 `Pool.Run` checks out a session, feeds once and closes it:
 
 ```go
-result, err := pool.Run(ctx, "sum(range(n))", &montygo.RunOptions{
+result, err := pool.Run(ctx, rt, "sum(range(n))", &montygo.RunOptions{
 	FeedOptions: montygo.FeedOptions{Inputs: map[string]any{"n": 10}},
 }) // int64(45)
 ```
@@ -120,7 +132,7 @@ lookup := map[string]any{"wait": func(ctx context.Context) error {
 run := session.Go(ctx, "wait()", &montygo.FeedOptions{ExternalLookup: lookup})
 stopped, err := run.Stop(ctx) // KeyboardInterrupt now, kill after 3 s, join the callback
 // err == nil, stopped.How == montygo.StopAborted, stopped.SessionKept() == true
-// stopped.Err is a *RuntimeError with TypeName KeyboardInterrupt
+// stopped.Err is a *monterr.RuntimeError with TypeName KeyboardInterrupt
 session.FeedRun(ctx, "1 + 1", nil) // the session is still usable
 ```
 
@@ -130,8 +142,8 @@ A stop follows one timeline, described by a `StopPolicy`:
 |---|---|---|
 | t0 | `Stop` called | with `Drain > 0`, the run may still end on its own |
 | t0 + `Drain` | request | `Reason` (default `KeyboardInterrupt`) is delivered at the next host call, await or suspension; the callback context is cancelled. By default the delivery is an uncatchable `AbortFeed`; with `Catchable` it is an ordinary exception |
-| + `Timeout` | kill | the run has not ended: the worker is killed and the session is lost (`*SessionKilledError`) |
-| + `Join` | join | a Go callback that still runs after the kill makes `Stop` return `ErrCallbackDetached` |
+| + `Timeout` | kill | the run has not ended: the worker is killed and the session is lost (`*monterr.SessionKilledError`) |
+| + `Join` | join | a Go callback that still runs after the kill makes `Stop` return `monterr.ErrCallbackDetached` |
 
 Python that never yields (`while True: pass`) is killed at `Timeout`. Python
 that yields, through a host call, an `await` or a paused snapshot, is aborted
@@ -157,21 +169,21 @@ the same run joins the first and can only shorten its deadlines; the first
 ### Policy levels
 
 ```go
-montygo.DefaultStopPolicy = montygo.StopPolicy{Timeout: 3 * time.Second, Join: 3 * time.Second} // process-wide; set before creating pools
-pool, _ := montygo.New(ctx, montygo.Options{Stop: montygo.StopPolicy{Timeout: time.Second}})        // per pool (also WebSocketOptions.Stop)
-session, _ := pool.Checkout(ctx, montygo.CheckoutOptions{Stop: montygo.StopPolicy{Catchable: true}}) // per session
-stopped, _ := run.Stop(ctx, montygo.StopPolicy{Reason: montygo.Raise("TimeoutError", "budget spent")}) // per call
+pool, _ := montygo.NewPool(ctx, montygo.PoolOptions{Stop: montygo.StopPolicy{Timeout: time.Second}})      // per pool
+session, _ := pool.Checkout(ctx, rt, montygo.CheckoutOptions{Stop: montygo.StopPolicy{Catchable: true}}) // per session
+stopped, _ := run.Stop(ctx, montygo.StopPolicy{Reason: monterr.Raise("TimeoutError", "budget spent")})    // per call
 ```
 
-Zero fields inherit from the level above, so a call only names what it changes.
-`Drain` and `Join` MUST be non-negative (`*OptionError` otherwise), and at most
-one policy may be passed per call. `montygo.KillNow` (`Timeout: -1`) kills at
-once, without a request phase. Because `false` is the zero value, `Catchable`
-cannot be switched off per call once a checkout set it; use `KillNow` or a
-short `Timeout` instead. The same policy ends a run whose feed context is
-cancelled (`Go`, `FeedRun` and `FeedStart` steps): `FeedRun` returns
-`KeyboardInterrupt` with the session kept when Python yields, or a
-`*SessionKilledError` after `Timeout`.
+Zero fields inherit from the level above, so a call only names what it changes;
+the last level is the built-in policy of `Timeout` 3 s and `Join` 3 s. There is
+no process-wide setting. `Drain` and `Join` MUST be non-negative
+(`*monterr.OptionError` otherwise), and at most one policy may be passed per
+call. `montygo.KillNow` (`Timeout: -1`) kills at once, without a request phase.
+Because `false` is the zero value, `Catchable` cannot be switched off per call
+once a checkout set it; use `KillNow` or a short `Timeout` instead. The same
+policy ends a run whose feed context is cancelled (`Go`, `FeedRun` and
+`FeedStart` steps): `FeedRun` returns `KeyboardInterrupt` with the session kept
+when Python yields, or a `*monterr.SessionKilledError` after `Timeout`.
 
 ### Catchable stops
 
@@ -195,19 +207,19 @@ result, _ := run.Wait() // "cleaned up"; stopped.How == montygo.StopFinished
 A catchable stop of a paused `FeedStart` snapshot falls back to the uncatchable
 `AbortFeed`, because the application owns the snapshot chain.
 
-`montygo.AsyncContext(ctx, fn)` starts asynchronous host work under the
-callback context, so it observes the same cancellation; `montygo.Async` cannot
-be cancelled.
+`host.AsyncContext(ctx, fn)` starts asynchronous host work under the callback
+context, so it observes the same cancellation; `host.Async` cannot be
+cancelled.
 
 ## Slots
 
-`Pool.Slot` returns a holder that owns at most one session checked out with
-fixed options. It checks out lazily, and again after the session is lost, so a
-long-lived service always has a usable session. Sandbox state is not restored
-after a loss; re-feed the setup.
+`Pool.Slot` returns a holder that owns at most one session of a runtime, checked
+out with fixed options. It checks out lazily, and again after the session is
+lost, so a long-lived service always has a usable session. Sandbox state is not
+restored after a loss; re-feed the setup.
 
 ```go
-slot := pool.Slot(montygo.CheckoutOptions{})
+slot := pool.Slot(rt, montygo.CheckoutOptions{})
 defer slot.Close(ctx)
 
 slot.State()                        // idle: no session yet
@@ -239,8 +251,8 @@ one, `SessionClosed` after `Close`), and `Slot.Stop` stops whatever it runs.
 | Keep one usable session | `Pool.Slot` | re-checks out after a loss; one execution at a time |
 | End pool admission | `Pool.Close` | checked-out sessions retain their lifecycle |
 | Stop everything | `Pool.Shutdown(ctx[, policy])` | every open session is closed with the policy; waits for every worker within ctx |
-| Stable host API | `Host` | validate registrations and stubs before checkout |
-| Per-feed override | `ExternalLookup` | an explicitly present entry overrides `Host` |
+| Stable host API | `RuntimeOptions.Host` | registrations and stubs are validated before any checkout |
+| Per-feed override | `ExternalLookup` | an explicitly present entry overrides the runtime's host |
 
 Successful host-side writes are not rolled back when a stop ends Python.
 Applications remain responsible for transaction and idempotency policy. To
@@ -251,45 +263,47 @@ handle a concurrent `ErrSessionBusy` admission result.
 
 | Import | Holds |
 |---|---|
-| `github.com/asalimonov/montygo` | the API: pools, sessions, snapshots, options, errors |
-| `montygo/runtime` | the Python value model, print targets, mounts, exception types |
-| `montygo/runtime/host` | host objects, class wrappers, host functions, futures |
-| `montygo/runtime/osaccess` | in-memory OS helpers |
-| `montygo/supervisor` | the `ServerSupervisor` contract an application implements |
+| `github.com/asalimonov/montygo` | runtimes, pools, worker sources, sessions, snapshots, stop policies, the supervisor contract |
+| `montygo/sandbox` | the Python value model, print targets, mounts |
+| `montygo/sandbox/host` | the host registry, host functions, futures, class wrappers, the OS handler |
+| `montygo/sandbox/osaccess` | in-memory OS helpers |
+| `montygo/monterr` | every error the library returns |
 | `montygo/supervisor/docker` | a supervisor that runs `monty-server` in a container |
 | `montygo/supervisor/native` | a supervisor that runs `monty-server` as a child process |
-| `montygo/telemetry` | the OpenTelemetry components and instrumentation |
+| `montygo/telemetry` | the OpenTelemetry components a pool records into |
 
-The root package re-exports the types most programs need, so a single import is
-usually enough; reach for a subpackage to implement a supervisor or to name a
-runtime type directly.
+The root package has no aliases: a program names value types through `sandbox`,
+host objects through `host` and errors through `monterr`.
 
-## Backends
+## Workers
 
-`Options.Backend` selects the transport:
+`PoolOptions.Workers` says where a pool's workers come from:
 
-| Backend | Workers | Notes |
+| Source | Workers | Notes |
 |---|---|---|
-| `BackendAuto` (default) | native when a `monty` binary resolves, else wasm | |
-| `BackendNative` | `monty subprocess` children | crash isolation by process; unix only |
-| `BackendWasm` | embedded wasip1 worker under wazero | in-process; compiled once per process and cached on disk (`Options.WasmCacheDir`) |
-| `NewWebSocket` | a remote worker per checkout | see [WebSocket workers](#websocket-workers) |
-| `NewDocker` | a `monty-server` container montygo starts and owns | image resolved from this package's version; see [Docker-managed server](#docker-managed-server) |
+| `montygo.Auto()` (default) | native when a `monty` binary resolves, else wasm | never dials |
+| `montygo.Native(NativeOptions{BinaryPath})` | `monty subprocess` children | crash isolation by process; unix only |
+| `montygo.Wasm(WasmOptions{CacheDir, DisableCache})` | embedded wasip1 worker under wazero | in-process; compiled once per process and cached on disk |
+| `montygo.Remote(supervisor, RemoteOptions{...})` | one WebSocket connection per session to a supervised `monty-server` | see [Remote workers](#remote-workers) |
 
-The native binary resolves from `Options.BinaryPath`, then `MONTY_BIN`, then
-`PATH`, then a cargo `target/` directory in an ancestor or a sibling `monty`
-checkout. Pin `BinaryPath` when the environment is not trusted.
+`Pool.Workers` reports the kind in use: `WorkerNative`, `WorkerWasm` or
+`WorkerRemote` (`String()` is `native`, `wasm` or `websocket`).
+
+The native binary resolves from `NativeOptions.BinaryPath`, then `MONTY_BIN`,
+then `PATH`, then a cargo `target/` directory in an ancestor or a sibling
+`monty` checkout. Pin `BinaryPath` when the environment is not trusted.
 
 ### Pool lifecycle
 
-`MinProcesses` (default 1) workers are prewarmed and `MaxProcesses` caps live
-workers. `Pool.Stats` counts them by state. `Pool.Shutdown` ends admission,
-closes every open session with the stop policy concurrently and waits for every
-worker to exit, where `Pool.Close` only retires idle workers:
+`MinWorkers` (default 1) workers are prewarmed and `MaxWorkers` (default
+`runtime.NumCPU()`) caps live workers. `Pool.Stats` counts them by state.
+`Pool.Shutdown` ends admission, closes every open session with the stop policy
+concurrently and waits for every worker to exit, where `Pool.Close` only retires
+idle workers:
 
 ```go
-pool, _ := montygo.New(ctx, montygo.Options{MaxProcesses: 2})
-session, _ := pool.Checkout(ctx, montygo.CheckoutOptions{})
+pool, _ := montygo.NewPool(ctx, montygo.PoolOptions{MaxWorkers: 2})
+session, _ := pool.Checkout(ctx, rt, montygo.CheckoutOptions{})
 fmt.Printf("%+v\n", pool.Stats()) // {Starting:0 Active:1 Idle:0 Retiring:0}
 
 run := session.Go(ctx, "sum(range(10))", nil)
@@ -300,7 +314,7 @@ run.Wait()                                                        // 45; session
 Without `Drain`, running feeds are stopped at once: `KeyboardInterrupt` where
 Python yields, a kill at `Timeout` where it does not. There is no separate
 force grace. A worker leaving a session is retired asynchronously and counts
-toward `MaxProcesses` until it has exited. The context bounds only the caller's
+toward `MaxWorkers` until it has exited. The context bounds only the caller's
 wait: `Shutdown` returns `ctx.Err()` when workers remain, and the stops continue.
 `Checkout` after `Shutdown` returns `ErrPoolClosed`.
 
@@ -319,8 +333,8 @@ read; an absent name raises `NameError`.
 ```go
 lookup := map[string]any{
 	"add": func(a, b int) int { return a + b },
-	"fetch_data": func(url string) *montygo.Future {
-		return montygo.Async(func() (any, error) { return download(url) })
+	"fetch_data": func(url string) *host.Future {
+		return host.Async(func() (any, error) { return download(url) })
 	},
 	"greeting": "hello ",
 }
@@ -330,47 +344,49 @@ session.FeedRun(ctx, "await fetch_data('https://example.com')", &montygo.FeedOpt
 
 Plain Go functions are adapted by reflection: arguments convert to the parameter
 types, an optional leading `context.Context` receives the callback context, a
-trailing `montygo.Kwargs` parameter receives keyword arguments, and results may be
-`(T)`, `(error)` or `(T, error)`. Return a `*montygo.Future` (`montygo.Async` or
-`montygo.NewFuture`) to let other sandbox tasks run while the call completes.
-`montygo.Function` and `montygo.FunctionFunc` give full control.
+trailing `host.Kwargs` parameter receives keyword arguments, and results may be
+`(T)`, `(error)` or `(T, error)`. Return a `*host.Future` (`host.Async` or
+`host.NewFuture`) to let other sandbox tasks run while the call completes.
+`host.Function` and `host.FunctionFunc` give full control.
 
-Errors cross into the sandbox as Python exceptions: `montygo.Raise("KeyError", "missing")`
-raises that type (`montygo.KnownExceptionNames()` lists them), any other error
+Errors cross into the sandbox as Python exceptions: `monterr.Raise("KeyError", "missing")`
+raises that type (`monterr.KnownExceptionNames()` lists them), any other error
 (or a panic) raises `RuntimeError`.
 
 ### Host registry
 
-`montygo.Host` validates functions and objects when they are registered
-instead of when the sandbox calls them, and `CheckoutOptions.Host` exposes
-them to every feed of the session. Names must be Python identifiers and unique;
+`host.Host` validates functions and objects when they are registered instead
+of when the sandbox calls them, and `RuntimeOptions.Host` exposes them to every
+session of the runtime. Names must be Python identifiers and unique;
 `FeedOptions.ExternalLookup` entries override them. `Host.Stubs` renders Python
 stubs for `TypeCheckStubs`.
 
 ```go
-host := montygo.NewHost()
-host.Func("add", func(a, b int) int { return a + b })
-host.Object("wallet", &Wallet{Balance: 100}, montygo.ClassInstanceOptions{
-	AllowedMethods: montygo.Expose[Payer](), // exactly the methods of interface Payer
+h := host.NewHost()
+h.Func("add", func(a, b int) int { return a + b })
+h.Object("wallet", &Wallet{Balance: 100}, host.ClassInstanceOptions{
+	AllowedMethods: host.Expose[Payer](), // exactly the methods of interface Payer
 })
-session, _ := pool.Checkout(ctx, montygo.CheckoutOptions{Host: host, TypeCheck: true, TypeCheckStubs: host.Stubs()})
+rt, _ := montygo.NewRuntime(montygo.RuntimeOptions{Host: h, TypeCheck: true, TypeCheckStubs: h.Stubs()})
+session, _ := pool.Checkout(ctx, rt, montygo.CheckoutOptions{})
 session.FeedRun(ctx, "add(1, wallet.pay(30).balance)", nil) // 71
 ```
 
 Stubs declare functions and allowed methods; attributes are not declared, so a
 type-checked feed reads them through a method or `Any`. Set
 `ClassInstanceOptions.ID` on every object that a dump must find again after
-`LoadSession` on another checkout with the same `Host`; `Host.Restorable`
-reports the first object without one as `ErrHostObjectNotRestorable`, and
-`LoadSession` returns that error before loading.
+`LoadSession` on another checkout of the same runtime; `Host.Restorable`
+reports the first object without one as `monterr.ErrHostObjectNotRestorable`,
+and `LoadSession` returns that error before loading.
 
-Configure the host before checkout. Fixed Go parameters are positional-only in
-stubs (`def add(arg0: int, arg1: int, /) -> int`), matching runtime binding.
-Optional labels improve readability without enabling keyword arguments:
+Configure the host before building the runtime. Fixed Go parameters are
+positional-only in stubs (`def add(arg0: int, arg1: int, /) -> int`), matching
+runtime binding. Optional labels improve readability without enabling keyword
+arguments:
 
 ```go
-host.Func("add", func(a, b int) int { return a + b },
-	montygo.HostFuncOptions{ParameterNames: []string{"left", "right"}})
+h.Func("add", func(a, b int) int { return a + b },
+	host.HostFuncOptions{ParameterNames: []string{"left", "right"}})
 ```
 
 Labels exclude `context.Context` and trailing `Kwargs`, but include a variadic
@@ -385,27 +401,27 @@ of a host class. Every key must name an exposed method, every list must match
 its signature, and instance names override class names:
 
 ```go
-host.Object("wallet", &Wallet{Balance: 100}, montygo.ClassInstanceOptions{
-	AllowedMethods: montygo.Expose[Payer](),
+h.Object("wallet", &Wallet{Balance: 100}, host.ClassInstanceOptions{
+	AllowedMethods: host.Expose[Payer](),
 	ParameterNames: map[string][]string{"pay": {"amount"}}, // def pay(self, amount: int, /) -> Any: ...
 })
 ```
 
 ## Class instances
 
-Wrap a host object in `ClassInstance` to expose it under a policy: attributes
-sent eagerly, attributes fetched lazily, and methods the sandbox may call.
-Returning the instance from the sandbox gives the host the original object.
+Wrap a host object in `host.ClassInstance` to expose it under a policy:
+attributes sent eagerly, attributes fetched lazily, and methods the sandbox may
+call. Returning the instance from the sandbox gives the host the original object.
 
 ```go
 type Wallet struct{ Balance int }
 
 func (w *Wallet) Pay(amount int) *Wallet { return &Wallet{Balance: w.Balance - amount} }
 
-func wrapWallet(w *Wallet) *montygo.ClassInstance {
-	return montygo.MustClassInstance(w, montygo.ClassInstanceOptions{
-		EagerAttrs:     montygo.All(),
-		AllowedMethods: montygo.All(),
+func wrapWallet(w *Wallet) *host.ClassInstance {
+	return host.MustClassInstance(w, host.ClassInstanceOptions{
+		EagerAttrs:     host.All(),
+		AllowedMethods: host.All(),
 		ConvertValue: func(_ string, v any) (any, error) {
 			if next, ok := v.(*Wallet); ok {
 				return wrapWallet(next), nil
@@ -421,23 +437,23 @@ session.FeedRun(ctx, "w.pay(30).balance", &montygo.FeedOptions{Inputs: map[strin
 Exported fields and methods are visible under snake_case names (`Balance` →
 `balance`, `GetText` → `get_text`), or under a `monty:"name"` field tag
 (`monty:"-"` hides a field). Unexported members are never reachable. A policy
-is `montygo.All()` (every public name), `montygo.Names("pay", "balance")`, or
-`montygo.Expose[Payer]()`, which exposes exactly the methods of an interface,
+is `host.All()` (every public name), `host.Names("pay", "balance")`, or
+`host.Expose[Payer]()`, which exposes exactly the methods of an interface,
 so a method added to the Go type later is not callable until the interface
 names it. `AttrProvider`, `AttrLister` and `MethodProvider` replace reflection
 for dynamic objects. Names outside the policy raise `AttributeError`; sandbox
 mutations stay on the sandbox copy. Every wrapper sent into a session is
-retained until the session closes, bounded by `CheckoutOptions.MaxHostObjects`
+retained until the session closes, bounded by `RuntimeOptions.MaxHostObjects`
 (default 10 000; instances and their class types both count). Past the bound
 the sandbox raises `RuntimeError: host object limit N exceeded`, and the host
-sees a `*montygo.ResourceError`. `Session.Stats` reports the counts.
+sees a `*monterr.ResourceError`. `Session.Stats` reports the counts.
 
-Plain structs cross as named tuples: `montygo.AsNamedTuple(value)` converts a
+Plain structs cross as named tuples: `host.AsNamedTuple(value)` converts a
 struct's exported fields in declaration order, and
-`montygo.NewNamedTuple("Point", montygo.Pair{Key: "x", Value: 1})` builds one
-by hand.
+`host.NewNamedTuple("Point", sandbox.Pair{Key: "x", Value: 1})` builds one by
+hand.
 
-Instances defined inside the sandbox come back as read-only `*montygo.ClassProxy`
+Instances defined inside the sandbox come back as read-only `*host.ClassProxy`
 values (`Name`, `ID`, `IsDataclass`, `Attributes`); passing a proxy back hands
 the sandbox its original object.
 
@@ -450,19 +466,19 @@ Use a per-object converter for your explicit transport type:
 func recordResult(_ string, v any) (any, error) {
 	switch r := v.(type) {
 	case Record:
-		return montygo.AsNamedTuple(r)
+		return host.AsNamedTuple(r)
 	case *Record:
 		if r == nil {
 			return nil, nil
 		}
-		return montygo.AsNamedTuple(*r)
+		return host.AsNamedTuple(*r)
 	default:
 		return v, nil
 	}
 }
-// Set this before checkout:
-host.Object("records", table, montygo.ClassInstanceOptions{
-	Name: "Records", AllowedMethods: montygo.Expose[RecordsAPI](),
+// Register this before building the runtime:
+h.Object("records", table, host.ClassInstanceOptions{
+	Name: "Records", AllowedMethods: host.Expose[RecordsAPI](),
 	ConvertValue: recordResult,
 })
 ```
@@ -475,16 +491,17 @@ application responsibilities. The executable example is in
 
 ### Host classes
 
-`ClassType` exposes a class: `Statics` hold class constants and static methods
-(governed by `EagerAttrs`, `LazyAttrs`, `AllowedMethods`), and `Init` lets the
-sandbox construct instances, which cross back under the `Instance*` policies.
-Without a `Constructor`, construction fills exported fields positionally or by keyword.
+`host.ClassType` exposes a class: `Statics` hold class constants and static
+methods (governed by `EagerAttrs`, `LazyAttrs`, `AllowedMethods`), and `Init`
+lets the sandbox construct instances, which cross back under the `Instance*`
+policies. Without a `Constructor`, construction fills exported fields
+positionally or by keyword.
 
 ```go
-walletClass := montygo.MustClassType[Wallet](montygo.ClassTypeOptions{
+walletClass := host.MustClassType[Wallet](host.ClassTypeOptions{
 	Init:                   true,
-	InstanceEagerAttrs:     montygo.All(),
-	InstanceAllowedMethods: montygo.All(),
+	InstanceEagerAttrs:     host.All(),
+	InstanceAllowedMethods: host.All(),
 })
 session.FeedRun(ctx, "w = Wallet(100)\nw.balance", &montygo.FeedOptions{Inputs: map[string]any{"Wallet": walletClass}}) // 100
 ```
@@ -507,8 +524,9 @@ if call, ok := snap.(*montygo.FunctionSnapshot); ok {
 Snapshots are single-use cursors: `*FunctionSnapshot` (`Resume`, `ResumeError`,
 `ResumeNotFound`, `ResumeFuture`, `ResumeNotHandled`), `*NameLookupSnapshot`
 (`ResumeUnresolved`, `ResumeFunction`, `ResumeValue`), `*FutureSnapshot`
-(`Resume` with `FutureResolution`s) and `*Complete`. Pass `ExternalLookup`/`OS`
-to `FeedStart` and call `ResumeAuto` to answer each step the way `FeedRun` would.
+(`Resume` with `FutureResolution`s) and `*Complete`. Pass `ExternalLookup` to
+`FeedStart`, give the runtime an `OS` handler, and call `ResumeAuto` to answer
+each step the way `FeedRun` would.
 
 Each cursor belongs to one execution and suspension. Replaying a used cursor
 returns `ErrSnapshotResumed`; an invalid generation returns `ErrSnapshotStale`.
@@ -520,29 +538,31 @@ ending one execution never settles a caller-owned Future shared elsewhere.
 
 `snapshot.Dump` serializes a paused worker and `session.LoadSnapshot` restores it
 into a fresh session; `session.Dump` and `session.LoadSession` do the same for an
-idle session. Mounts are not stored in dumps: re-supply them to `LoadSnapshot`.
+idle session. Mounts are not stored in dumps: the runtime's mounts apply again,
+and feed mounts are re-supplied to `LoadSnapshot`.
 
 ## Print output
 
-Output goes to the host process stdout/stderr unless `FeedOptions.Print` is set.
-The worker batches output (`CheckoutOptions.PrintFlushInterval`, default 5 ms;
-`0` delivers one callback per line). A print target returning an error fails the feed.
+Output goes to `FeedOptions.Print`, else `RuntimeOptions.Print`, else the host
+process stdout/stderr. The worker batches output (`RuntimeOptions.PrintFlushInterval`,
+default 5 ms; `0` delivers one callback per line). A print target returning an
+error fails the feed.
 
 ```go
-text, _ := montygo.NewCollectString(montygo.DefaultMaxPrintCollectBytes)
+text, _ := sandbox.NewCollectString(sandbox.DefaultMaxPrintCollectBytes)
 session.FeedRun(ctx, `print("hello")`, &montygo.FeedOptions{Print: text})
 text.Output() // "hello\n"
 ```
 
-`CollectStreams` keeps the stream of each chunk. Both collectors cap host memory
-at 10 MiB by default; exceeding the cap raises `MemoryError`.
+`sandbox.CollectStreams` keeps the stream of each chunk. Both collectors cap host
+memory at 10 MiB by default; exceeding the cap raises `MemoryError`.
 
-`montygo.Lines` delivers complete lines per stream without their newline. A
+`sandbox.Lines` delivers complete lines per stream without their newline. A
 trailing partial line is delivered when the feed ends, because a
 `FlushingPrintTarget` has its `Flush` called at every turn end:
 
 ```go
-lines := montygo.Lines(func(stream montygo.Stream, line string) error {
+lines := sandbox.Lines(func(stream sandbox.Stream, line string) error {
 	fmt.Printf("%s: %q\n", stream, line)
 	return nil
 })
@@ -555,12 +575,13 @@ session.FeedRun(ctx, "print('a\\nb')\nprint('c', end='')", &montygo.FeedOptions{
 ## Filesystem
 
 Mount host directories at virtual POSIX paths. Mount I/O is serviced host-side,
-so mounts work with every backend.
+so mounts work with every worker kind. `RuntimeOptions.Mounts` are visible to
+every feed; `FeedOptions.Mount` adds mounts for one feed.
 
 ```go
-mount, _ := montygo.NewMountDir(montygo.MountDirOptions{HostPath: "/path/on/host", VirtualPath: "/mnt/data", Mode: montygo.MountReadOnly})
+mount, _ := sandbox.NewMountDir(sandbox.MountDirOptions{HostPath: "/path/on/host", VirtualPath: "/mnt/data", Mode: sandbox.MountReadOnly})
 defer mount.Close()
-session.FeedRun(ctx, "open('/mnt/data/file.txt').read()", &montygo.FeedOptions{Mount: []*montygo.MountDir{mount}})
+session.FeedRun(ctx, "open('/mnt/data/file.txt').read()", &montygo.FeedOptions{Mount: []*sandbox.MountDir{mount}})
 ```
 
 Modes are `read-only`, `read-write` and `overlay` (default: writes stay in memory
@@ -569,48 +590,52 @@ and are discarded when the feed ends). Each mount has a 100 MB memory budget
 defaults to the first mount's virtual path and persists across feeds; `Cwd`
 switches it.
 
-OS calls no mount covers reach `FeedOptions.OS`; return `montygo.NotHandled` to decline:
+OS calls no mount covers reach `RuntimeOptions.OS`; return `host.NotHandled` to decline:
 
 ```go
-handler := func(ctx context.Context, name string, args []any, kwargs montygo.Kwargs) (any, error) {
+handler := func(ctx context.Context, name string, args []any, kwargs host.Kwargs) (any, error) {
 	if name == "os.getenv" && args[0] == "HOME" {
 		return "/home/user", nil
 	}
-	return montygo.NotHandled, nil
+	return host.NotHandled, nil
 }
+rt, _ := montygo.NewRuntime(montygo.RuntimeOptions{OS: handler})
 ```
 
-Package `osaccess` provides a ready-made in-memory filesystem (`OSAccess`,
-`MemoryFile`, `CallbackFile`, `StatResult`) and an `Ops` interface for custom handlers.
+Package `sandbox/osaccess` provides a ready-made in-memory filesystem (`OSAccess`,
+`MemoryFile`, `CallbackFile`, `StatResult`) and an `Ops` interface for custom
+handlers; `osaccess.New(files, environ).Handler()` is an OS handler.
 
 ## Resource limits
 
 ```go
-pool.Checkout(ctx, montygo.CheckoutOptions{Limits: &montygo.ResourceLimits{
+rt, _ := montygo.NewRuntime(montygo.RuntimeOptions{Limits: &montygo.ResourceLimits{
 	MaxMemory:         100 << 20,
 	MaxDuration:       5 * time.Second,
 	MaxRecursionDepth: 100,
 }})
+session, _ := pool.Checkout(ctx, rt, montygo.CheckoutOptions{Limits: &montygo.ResourceLimits{MaxDuration: time.Second}}) // replaces the runtime's limits for this session
 ```
 
 `MaxDuration` counts execution time only (not time suspended on the host) and is
-backstopped by killing the worker `Options.DurationLimitGrace` (default 1 s)
-after the budget expires. `Options.RequestTimeout` bounds every protocol turn.
-`MaxSuspensions` (default 1000) bounds host round trips per session; the count
-is reset by `LoadSession` and `LoadSnapshot`. `MaxMemory` is also enforced by
-the worker's allocator; a worker that breaches it is replaced and the feed
-fails with `MemoryError`.
+backstopped by killing the worker `PoolOptions.DurationLimitGrace` (default 1 s)
+after the budget expires. `PoolOptions.RequestTimeout` bounds every protocol
+turn (default none for local workers, 10 s for remote ones; `NoRequestTimeout`
+disables it). `MaxSuspensions` (default 1000) bounds host round trips per
+session; the count is reset by `LoadSession` and `LoadSnapshot`. `MaxMemory` is
+also enforced by the worker's allocator; a worker that breaches it is replaced
+and the feed fails with `MemoryError`.
 
 A zero limit keeps the default. `montygo.Unlimited` disables `MaxMemory`,
 `MaxSuspensions`, `MaxHostObjects` and `MaxPendingFutures`;
 `montygo.UnlimitedDuration` disables `MaxDuration`. `MaxRecursionDepth` cannot
 be unlimited.
 
-Host-side bounds keep a long session in check: `CheckoutOptions.MaxHostObjects`
+Host-side bounds keep a long session in check: `RuntimeOptions.MaxHostObjects`
 (default 10 000) bounds retained host objects and `MaxPendingFutures` (default
 1000) bounds unresolved futures per feed. Exceeding either raises
 `RuntimeError: <resource> limit N exceeded` in the sandbox; the host sees a
-`*montygo.ResourceError` and the session stays usable. `Options.MaxPendingBytes`
+`*monterr.ResourceError` and the session stays usable. `PoolOptions.MaxPendingBytes`
 (default 64 MiB, `montygo.UnlimitedPendingBytes` disables) bounds the worker
 output buffered by the parent for native and wasm workers; past it the reader
 blocks and the worker stalls on its write instead of growing host memory.
@@ -618,80 +643,98 @@ blocks and the worker stalls on its write instead of growing host memory.
 ## Type checking
 
 ```go
-session, _ := pool.Checkout(ctx, montygo.CheckoutOptions{TypeCheck: true, TypeCheckStubs: "def fetch(url: str) -> str: ..."})
+rt, _ := montygo.NewRuntime(montygo.RuntimeOptions{TypeCheck: true, TypeCheckStubs: "def fetch(url: str) -> str: ..."})
+session, _ := pool.Checkout(ctx, rt, montygo.CheckoutOptions{})
 _, err := session.FeedRun(ctx, "fetch(123)", nil)
-var typingErr *montygo.TypingError // errors.As(err, &typingErr); typingErr.Diagnostics
+var typingErr *monterr.TypingError // errors.As(err, &typingErr); typingErr.Diagnostics
 ```
 
 `TypeCheckFormat` picks ty's rendering (`full`, `concise`, `json`, ...) and
-`TypeCheckColor` adds ANSI colour. A snippet that fails type checking does not run.
+`TypeCheckColor` adds ANSI colour. A snippet that fails type checking does not
+run. `NewRuntime` rejects an unknown format with a `*monterr.OptionError`.
 
 `AssertMessageAnnotations` controls pytest-style `assert` messages
 (`montygo.Uint32(0)` restores CPython's bare `AssertionError`).
 
 ## Errors
 
+Every error the library returns is declared in `monterr`.
+
 | Type | Meaning |
 |---|---|
-| `*montygo.RuntimeError` | a Python exception (`TypeName`, `Message`, `Frames`, `Display(montygo.DisplayTraceback)`) |
-| `*montygo.SyntaxError` | the snippet did not parse |
-| `*montygo.TypingError` | type checking rejected the snippet |
-| `*montygo.CrashedError` | the worker died or timed out; the session is lost, the pool recovers |
-| `*montygo.DisconnectError`, `*montygo.ShutdownError` | WebSocket workers only; `DisconnectError` carries the close frame's `Code` and `Reason` |
-| `*montygo.ProtocolError` | a protocol violation; the session is lost |
-| `*montygo.ResourceError` | a host-side bound (`MaxHostObjects`, `MaxPendingFutures`) was reached; the session stays usable |
-| `*montygo.ConversionError` | a host value cannot cross into the sandbox |
-| `*montygo.SessionKilledError` | a stop killed the worker at `Timeout`; wraps the stop reason |
-| `montygo.ErrCallbackDetached` | `Stop` returned after a kill, but a Go callback still runs past `Join` |
-| `montygo.ErrSessionBusy` | another execution or incompatible control operation owns the session |
-| `montygo.ErrSessionClosed` | deliberate closure; not session loss |
+| `*monterr.RuntimeError` | a Python exception (`TypeName`, `Message`, `Frames`, `Display(monterr.DisplayTraceback)`) |
+| `*monterr.SyntaxError` | the snippet did not parse |
+| `*monterr.TypingError` | type checking rejected the snippet |
+| `*monterr.CrashedError` | the worker died or timed out; the session is lost, the pool recovers |
+| `*monterr.DisconnectError`, `*monterr.ShutdownError` | remote workers only; `DisconnectError` carries the close frame's `Code` and `Reason` |
+| `*monterr.RotationError` | a session could not move to a fresh connection; `Dump` restores it elsewhere |
+| `*monterr.SpawnError` | a worker could not be started or a server could not be dialed |
+| `*monterr.ProtocolError` | a protocol violation; the session is lost |
+| `*monterr.ResourceError` | a host-side bound (`MaxHostObjects`, `MaxPendingFutures`) was reached; the session stays usable |
+| `*monterr.ConversionError` | a host value cannot cross into the sandbox |
+| `*monterr.OptionError` | an option was rejected by `NewRuntime`, `NewPool`, `Checkout` or a supervisor |
+| `*monterr.SessionKilledError` | a stop killed the worker at `Timeout`; wraps the stop reason |
+| `monterr.ErrCallbackDetached` | `Stop` returned after a kill, but a Go callback still runs past `Join` |
+| `monterr.ErrSessionBusy` | another execution or incompatible control operation owns the session |
+| `monterr.ErrSessionClosed` | deliberate closure; not session loss |
 
-All sandbox errors implement `montygo.Error`. Unexpected session loss matches
-`montygo.ErrSessionLost`; deliberate `ErrSessionClosed` does not. A fatal worker
+All sandbox errors implement `monterr.Error`. Unexpected session loss matches
+`monterr.ErrSessionLost`; deliberate `ErrSessionClosed` does not. A fatal worker
 memory error preserves its `*RuntimeError` details and also matches session loss:
 
 ```go
-if _, err := session.FeedRun(ctx, code, nil); errors.Is(err, montygo.ErrSessionLost) {
-	session, err = pool.Checkout(ctx, montygo.CheckoutOptions{}) // check out a new one
+if _, err := session.FeedRun(ctx, code, nil); errors.Is(err, monterr.ErrSessionLost) {
+	session, err = pool.Checkout(ctx, rt, montygo.CheckoutOptions{}) // check out a new one
 }
 ```
 
-## WebSocket workers
+## Remote workers
+
+A remote pool dials one WebSocket connection per session to a `monty-server`
+that a `ServerSupervisor` names. `montygo.StaticServer` is the supervisor of a
+fixed URL:
 
 ```go
-opts := montygo.WebSocketOptions{
-	URL:       "wss://monty.example.com/",
-	TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
-	ConnectHeaders: func(ctx context.Context) (map[string]string, error) {
+server := montygo.StaticServer(
+	"wss://monty.example.com/",
+	&tls.Config{MinVersion: tls.VersionTLS12},
+	func(ctx context.Context) (map[string]string, error) {
 		return map[string]string{"authorization": "Bearer ..."}, nil
 	},
-}
-if err := montygo.CheckWebSocketHealth(ctx, opts); err != nil {
+)
+remote := montygo.RemoteOptions{DialTimeout: 5 * time.Second}
+if err := montygo.CheckServerHealth(ctx, server, remote); err != nil {
 	fmt.Println("server unavailable:", err)
 	return
 }
-pool, _ := montygo.NewWebSocket(ctx, opts)
+pool, _ := montygo.NewPool(ctx, montygo.PoolOptions{Workers: montygo.Remote(server, remote)})
 ```
 
-`Supervisor` replaces `URL` and `ConnectHeaders` when the server's address is not
-fixed: it resolves an endpoint before every dial, `Recovery` retries a failed
-dial, and `RotateSessions` moves a session to a fresh connection before the
-server's session timeout ends it. See
-[docs/architecture/supervisor.md](docs/architecture/supervisor.md).
+The headers callback runs once per checkout, before the dial, and its error
+fails that checkout unchanged. `RemoteOptions.TLSConfig` configures `wss://`
+dials (an endpoint's own `TLSConfig` overrides it), `DialContext` replaces the
+TCP dialer, and `DialTimeout` bounds each attempt. `CheckServerHealth` sends
+`GET <path>/health` through the same transport with the same headers. A dropped
+connection raises `*monterr.DisconnectError`; a draining server raises
+`*monterr.ShutdownError` whose `Dump` restores the session elsewhere.
 
-Each checkout dials a single-use worker. `TLSConfig` configures `wss://` dials
-and `DialContext` replaces the TCP dialer. `CheckWebSocketHealth` sends
-`GET <path>/health` through the same transport with the connect headers. A dropped connection raises
-`*montygo.DisconnectError`; a draining server raises `*montygo.ShutdownError` whose
-`Dump` restores the session elsewhere.
+A supervisor whose server can move, such as `supervisor/docker` and
+`supervisor/native`, resolves the endpoint before every dial attempt.
+`RemoteOptions.Recovery` retries a failed dial (3 attempts of 5 s by default)
+and, with `RestartServer`, asks the supervisor to restart the server once.
+`RotateSessions` moves a session to a fresh connection before the server's
+session timeout ends it, keeping the same `*Session`; a rotation that cannot
+complete returns `*monterr.RotationError`. Implement `ServerSupervisor` for
+servers on other hosts. The pool never owns a supervisor: close it after the
+pool. See [docs/architecture/supervisor.md](docs/architecture/supervisor.md).
 
 `montygo.FetchServerInfo` reads `GET <path>/info` from a `monty-server` and
 returns its version, upstream revision, protocol version and effective limits,
 so a client can size its pool and detect drift before dialing:
 
 ```go
-info, err := montygo.FetchServerInfo(ctx, opts)
-if errors.Is(err, montygo.ErrNoServerInfo) {
+info, err := montygo.FetchServerInfo(ctx, server, remote)
+if errors.Is(err, monterr.ErrNoServerInfo) {
 	// a server built before /info existed
 }
 fmt.Println(info.Version, info.MontyRev, info.ProtocolVersion, info.Limits.MaxSessions, info.Limits.SessionTimeout)
@@ -717,8 +760,8 @@ docker run --rm \
 ```
 
 The server prints `ws://0.0.0.0:8000/` when it is ready. Connect with
-`montygo.NewWebSocket(ctx, montygo.WebSocketOptions{URL: "ws://127.0.0.1:8000/"})`,
-and probe readiness first with `montygo.CheckWebSocketHealth`. The REPL example
+`montygo.Remote(montygo.StaticServer("ws://127.0.0.1:8000/", nil, nil), montygo.RemoteOptions{})`,
+and probe readiness first with `montygo.CheckServerHealth`. The REPL example
 connects with `go run ./repl -ws ws://127.0.0.1:8000/` from `examples/`.
 
 Each session runs in a fresh worker process. The server clamps client limits to
@@ -730,21 +773,29 @@ OTLP/HTTP.
 
 The listener has no authentication and speaks plain `ws://`. Terminate TLS at an
 ingress or reverse proxy and dial it with a `wss://` URL and `TLSConfig`, as in
-[WebSocket workers](#websocket-workers). See
+[Remote workers](#remote-workers). See
 [docs/architecture/server.md](docs/architecture/server.md) and
 [docs/architecture/docker.md](docs/architecture/docker.md).
 
 ### Docker-managed server
 
-`montygo.NewDocker` starts that image for you through the local `docker` CLI and
-returns a pool that dials it:
+`supervisor/docker` starts that image for you through the local `docker` CLI
+and serves its endpoint to a pool:
 
 ```go
-pool, err := montygo.NewDocker(ctx, montygo.DockerOptions{MaxProcesses: 8})
+sup, err := docker.New(ctx, docker.Options{MaxSessions: 16})
 if err != nil {
 	return err
 }
-defer pool.Shutdown(ctx) // stops and removes the container
+defer sup.Close(ctx) // stops and removes the container, after the pool
+pool, err := montygo.NewPool(ctx, montygo.PoolOptions{
+	Workers:    montygo.Remote(sup, montygo.RemoteOptions{RotateSessions: true}),
+	MaxWorkers: 8,
+})
+if err != nil {
+	return err
+}
+defer pool.Shutdown(ctx)
 ```
 
 The image tag comes from this package's own version, so a program built against
@@ -758,51 +809,53 @@ The image tag comes from this package's own version, so a program built against
 | `(devel)`, `0.0.0-unknown` | none; set an override or stamp `-ldflags "-X github.com/asalimonov/montygo.buildVersion=…"` |
 
 Each candidate is used from the local daemon when present, else pulled.
-`DockerOptions.Image` and `DockerOptions.Version`, or `MONTYGO_DOCKER_IMAGE` and
-`MONTYGO_DOCKER_VERSION`, override the repository and the tag; an option wins
-over a variable, and an explicit version or a pinned `repo:tag` reference is used
-verbatim.
+`docker.Options.Image` and `docker.Options.Version`, or `MONTYGO_DOCKER_IMAGE`
+and `MONTYGO_DOCKER_VERSION`, override the repository and the tag; an option
+wins over a variable, and an explicit version or a pinned `repo:tag` reference
+is used verbatim.
 
 The container runs read-only with no capabilities on an ephemeral loopback port,
 with a random dump key. montygo disables the server's idle timeout and its memory
-and duration ceilings, so `CheckoutOptions.Limits` governs as on the local
-backends; the session and turn timeouts stay at their defaults. `DockerOptions.Env`
-sets any `MONTY_SERVER_*` variable, and `DockerOptions.RunArgs` adds `docker run`
-flags such as `--memory 2g`.
+and duration ceilings, so the runtime's limits govern as on the local workers;
+the session and turn timeouts stay at their defaults. `MaxSessions` sizes the
+server (default `2 × runtime.NumCPU()`); give it twice the `MaxWorkers` of the
+pools that dial it, because a rotation briefly holds two connections.
+`docker.Options.Env` sets any `MONTY_SERVER_*` variable, and `RunArgs` adds
+`docker run` flags such as `--memory 2g`. `supervisor/native` runs the
+`monty-server` binary as a child process with the same options, less the
+container ones.
 
-Sessions rotate before the server's one-hour session timeout: montygo dumps the
-session, reconnects and restores it, keeping the same `*Session`. A rotation that
-cannot complete returns `*montygo.RotationError`, whose `Dump` restores the state
-on a new session. `DockerOptions.Recovery` retries a failed dial (3 attempts of
-5 s by default) and, with `RestartServer`, restarts the container once before
-retrying.
-
-`NewDocker` needs a local Docker daemon. For servers on other hosts, implement
-`montygo.ServerSupervisor` and pass it to `NewWebSocket`. A container left by a
-process that died carries the label `io.montygo.supervisor`; remove leftovers
-with `docker rm -f $(docker ps -aq --filter label=io.montygo.supervisor)`. See
-[docs/architecture/supervisor.md](docs/architecture/supervisor.md).
+`docker.New` needs a local Docker daemon. A container left by a process that
+died carries the label `io.montygo.supervisor`; `docker.Options.Reaper` is the
+hook for removing them, and `docker rm -f $(docker ps -aq --filter label=io.montygo.supervisor)`
+does it by hand. See [docs/architecture/supervisor.md](docs/architecture/supervisor.md).
 
 ## Observability
 
+Telemetry is a pool parameter. `telemetry.Components` name the OpenTelemetry
+tracer, meter and logger a pool records into; nil records nothing, and there is
+no process-wide installation:
+
 ```go
-montygo.Instrument(montygo.TelemetryComponents{Tracer: tracer, Meter: meter, Logger: logger})
+pool, _ := montygo.NewPool(ctx, montygo.PoolOptions{Telemetry: &telemetry.Components{Tracer: tracer, Meter: meter, Logger: logger}})
 ```
 
-Instrumentation is process-wide and must be installed before creating a pool.
-`Options.Telemetry` and `WebSocketOptions.Telemetry` give one pool its own
-components instead: nil uses the process-wide installation, and a value with
-no components records nothing for that pool.
+`telemetry.NewInstrumentation` builds components from providers, the global
+OpenTelemetry providers unless replaced, under an `InstrumentationConfig` that
+switches each signal:
 
 ```go
-pool, _ := montygo.New(ctx, montygo.Options{Telemetry: &montygo.TelemetryComponents{Tracer: tracer}})
+inst, _ := telemetry.NewInstrumentation(telemetry.InstrumentationConfig{Logs: telemetry.Bool(false)})
+inst.SetTracerProvider(tracerProvider)
+pool, _ := montygo.NewPool(ctx, montygo.PoolOptions{Telemetry: inst.Components()})
 ```
 
 Each checkout records a `session {script_name}` span, each run a `run code`
 span, each host round trip a child span, printed output as log records, and pool
 metrics such as `monty.pool.workers.live`, `monty.pool.workers.retiring`,
 `monty.pool.pending_frame_bytes` and `monty.run.duration`. Recorded values
-include source code, inputs, outputs and printed text.
+include source code, inputs, outputs and printed text. Flushing belongs to the
+providers the application owns.
 
 ## Values
 
@@ -813,31 +866,44 @@ include source code, inputs, outputs and printed text.
 | `int` | `int64` (`*big.Int` beyond int64) |
 | `float` | `float64` |
 | `str` / `bytes` | `string` / `[]byte` |
-| `list` / `tuple` | `[]any` / `montygo.Tuple` |
-| `dict` | `*montygo.Dict` (insertion-ordered) |
-| `set` / `frozenset` | `*montygo.Set` / `*montygo.FrozenSet` |
-| `date`, `datetime`, `time`, `timedelta`, `timezone` | `montygo.Date`, `montygo.DateTime`, `montygo.Time`, `montygo.TimeDelta`, `montygo.TimeZone` |
-| `pathlib.Path` | `montygo.Path` |
-| named tuple | `montygo.NamedTuple` |
-| file handle | `*montygo.FileHandle` |
-| class instance | the original host object, or `*montygo.ClassProxy` |
+| `list` / `tuple` | `[]any` / `sandbox.Tuple` |
+| `dict` | `*sandbox.Dict` (insertion-ordered) |
+| `set` / `frozenset` | `*sandbox.Set` / `*sandbox.FrozenSet` |
+| `date`, `datetime`, `time`, `timedelta`, `timezone` | `sandbox.Date`, `sandbox.DateTime`, `sandbox.Time`, `sandbox.TimeDelta`, `sandbox.TimeZone` |
+| `pathlib.Path` | `sandbox.Path` |
+| named tuple | `sandbox.NamedTuple` |
+| file handle | `*sandbox.FileHandle` |
+| class instance | the original host object, or `*host.ClassProxy` |
 
 Inputs also accept Go integer and float kinds, slices, arrays and maps (keys sorted).
 
 ## Migration from v0.2.0
 
-v0.3.0 replaces the interrupt mechanism with the stop policy. Removed names and
-their replacements:
+v0.3.0 replaces the interrupt mechanism with the stop policy and moves the
+sandbox configuration into a `Runtime`. Removed names and their replacements:
 
 | v0.2.0 | v0.3.0 |
 |---|---|
+| `montygo.New(ctx, Options{Backend: BackendWasm, MaxProcesses: n})` | `montygo.NewPool(ctx, PoolOptions{Workers: montygo.Wasm(WasmOptions{}), MaxWorkers: n})`; `Native`, `Auto` and `Remote` are the other sources |
+| `Options.BinaryPath`, `WasmCacheDir`, `DisableWasmCache` | `NativeOptions.BinaryPath`, `WasmOptions.CacheDir`, `WasmOptions.DisableCache` |
+| `Pool.Backend()` | `Pool.Workers()` (`WorkerKind`) |
+| `pool.Checkout(ctx, CheckoutOptions{Host, OS, TypeCheck, ...})` | `pool.Checkout(ctx, rt, CheckoutOptions{ScriptName, Limits, Stop})` with `rt` from `NewRuntime(RuntimeOptions{Host, OS, Mounts, Print, Limits, TypeCheck, ..., MaxHostObjects, MaxPendingFutures})` |
+| `FeedOptions.OS`, `LoadSnapshotOptions.OS` | `RuntimeOptions.OS` |
+| `pool.Run(ctx, code, opts)`, `pool.Slot(opts)` | `pool.Run(ctx, rt, code, opts)`, `pool.Slot(rt, opts)` |
+| `NewWebSocket(ctx, WebSocketOptions{URL, ConnectHeaders, TLSConfig, ...})` | `NewPool(ctx, PoolOptions{Workers: Remote(StaticServer(url, tls, headers), RemoteOptions{...})})` |
+| `WebSocketOptions.Supervisor` | `Remote(supervisor, RemoteOptions{Recovery, RotateSessions, RotationMargin})` |
+| `CheckWebSocketHealth(ctx, opts)`, `FetchServerInfo(ctx, opts)` | `CheckServerHealth(ctx, sup, RemoteOptions)`, `FetchServerInfo(ctx, sup, RemoteOptions)` |
+| `NewDocker`, `NewDockerSupervisor`, `DockerOptions` | `docker.New(ctx, docker.Options{...})` in `supervisor/docker`, dialed through `Remote`; the application closes the supervisor |
+| `Instrument`, `Flush`, `TelemetryComponents` | `PoolOptions.Telemetry *telemetry.Components`; providers flush themselves |
+| `DefaultStopPolicy` | the built-in policy (`Timeout` 3 s, `Join` 3 s), overridden by `PoolOptions.Stop` |
+| root value, host and error names (`montygo.Dict`, `montygo.NewHost`, `montygo.RuntimeError`, ...) | `sandbox.Dict`, `host.NewHost`, `monterr.RuntimeError`, ... |
 | `Run.Interrupt(ctx, InterruptOptions{...})` | `Run.Stop(ctx[, StopPolicy{...}])` |
 | `Session.Interrupt(ctx, InterruptOptions{...})` | `Session.Stop(ctx[, StopPolicy{...}])` |
 | `InterruptOptions.Reason` / `Grace` | `StopPolicy.Reason` / `Timeout` |
 | `InterruptResult{Outcome, RunDone, SessionErr}` | `Stopped{How, Err, SessionErr}`; `Stop` returns after the run ended |
 | `InterruptOutcome` and `InterruptAborted`, `InterruptKilled`, `InterruptFinished`, `InterruptNotRunning`, `InterruptPending` | `StopKind` and `StopAborted`, `StopKilled`, `StopFinished`, `StopNotRunning`, `StopPending` |
 | `InterruptBeforeStart`, `InterruptAlreadyFinished`, `InterruptUnknown` | `StopAborted`, `StopFinished`; no zero-value outcome |
-| `CheckoutOptions.InterruptGrace` | `CheckoutOptions.Stop.Timeout`; also `Options.Stop`, `WebSocketOptions.Stop`, `DefaultStopPolicy` |
+| `CheckoutOptions.InterruptGrace` | `CheckoutOptions.Stop.Timeout`; also `PoolOptions.Stop` |
 | `Session.CloseNow()` | `Session.Close(ctx, montygo.KillNow)` |
 | `Session.Close(ctx)` waiting for a running feed and leaving the session open on timeout | `Session.Close(ctx[, policy])` stops the feed first; on timeout it returns `ctx.Err()` and the close continues |
 | `Pool.Shutdown(ctx)` with a 5 s force grace | `Pool.Shutdown(ctx[, policy])` stops sessions with the policy; ctx bounds the wait only |
@@ -857,7 +923,7 @@ make bench          # wire codec benchmarks against the generated protobuf code
 make fuzz           # wire codec fuzz targets
 make server-check   # clippy and tests for server/
 make docker-build   # monty-server image
-make test-docker    # root suite on the websocket backend against the image
+make test-docker    # root suite on the docker backend against the image
 make test-network   # tests/network against the image
 ```
 

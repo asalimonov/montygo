@@ -1,6 +1,7 @@
 package network
 
 import (
+	"github.com/asalimonov/montygo/monterr"
 	"strings"
 	"testing"
 
@@ -13,7 +14,7 @@ func TestRepl_StatePersistsAcrossFeeds(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t)
 	ctx := testCtx(t)
-	session := s.Checkout(ctx, s.NewPool(montygo.WebSocketOptions{}), montygo.CheckoutOptions{})
+	session := s.Checkout(ctx, s.NewPool(wsOptions{}), montygo.CheckoutOptions{})
 
 	_, err := session.FeedRun(ctx, "counter = 0", nil)
 	require.NoError(t, err)
@@ -30,7 +31,7 @@ func TestRepl_ErrorKeepsSession(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t)
 	ctx := testCtx(t)
-	session := s.Checkout(ctx, s.NewPool(montygo.WebSocketOptions{}), montygo.CheckoutOptions{})
+	session := s.Checkout(ctx, s.NewPool(wsOptions{}), montygo.CheckoutOptions{})
 
 	_, err := session.FeedRun(ctx, "x = 1", nil)
 	require.NoError(t, err)
@@ -42,7 +43,7 @@ func TestRepl_ErrorKeepsSession(t *testing.T) {
 		"    1 / 0",
 		"    ~~~~~",
 		"ZeroDivisionError: division by zero",
-	}, "\n"), re.Display(montygo.DisplayTraceback))
+	}, "\n"), re.Display(monterr.DisplayTraceback))
 	v, err := session.FeedRun(ctx, "x", nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), v)
@@ -52,7 +53,7 @@ func TestRepl_DumpRestoreAcrossRecreate(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t)
 	ctx := testCtx(t)
-	session := s.Checkout(ctx, s.NewPool(montygo.WebSocketOptions{}), montygo.CheckoutOptions{})
+	session := s.Checkout(ctx, s.NewPool(wsOptions{}), montygo.CheckoutOptions{})
 	_, err := session.FeedRun(ctx, "x = 40", nil)
 	require.NoError(t, err)
 	_, err = session.FeedRun(ctx, "x = x + 1", nil)
@@ -72,7 +73,7 @@ func TestRepl_DrainRestoresSuspendedFeed(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--drain-grace", "20"))
 	ctx := testCtx(t)
-	session := s.Checkout(ctx, s.NewPool(montygo.WebSocketOptions{}), montygo.CheckoutOptions{})
+	session := s.Checkout(ctx, s.NewPool(wsOptions{}), montygo.CheckoutOptions{})
 
 	snap, err := session.FeedStart(ctx, "r = ext(7)\nr * 2", nil)
 	require.NoError(t, err)
@@ -91,7 +92,7 @@ func TestRepl_DrainRestoresSuspendedFeed(t *testing.T) {
 	require.NotEmpty(t, shutdown.Dump)
 
 	s.Recreate()
-	fresh := s.Checkout(ctx, s.NewPool(montygo.WebSocketOptions{}), montygo.CheckoutOptions{})
+	fresh := s.Checkout(ctx, s.NewPool(wsOptions{}), montygo.CheckoutOptions{})
 	restored, err := fresh.LoadSnapshot(ctx, shutdown.Dump, nil)
 	require.NoError(t, err)
 	again, ok := restored.(*montygo.FunctionSnapshot)
@@ -108,17 +109,17 @@ func TestRepl_TypeCheckStubsAcrossFeeds(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t)
 	ctx := testCtx(t)
-	session := s.Checkout(ctx, s.NewPool(montygo.WebSocketOptions{}), montygo.CheckoutOptions{
+	session := s.CheckoutRT(ctx, s.NewPool(wsOptions{}), mustRuntime(montygo.RuntimeOptions{
 		TypeCheck:      true,
 		TypeCheckStubs: "def ext(x: int) -> int: ...",
-	})
+	}), montygo.CheckoutOptions{})
 
 	_, err := session.FeedRun(ctx, "y: int = 1", &montygo.FeedOptions{
 		ExternalLookup: map[string]any{"ext": func(x int) int { return x }},
 	})
 	require.NoError(t, err)
 	_, err = session.FeedRun(ctx, "z: str = ext(y)", nil)
-	var typing *montygo.TypingError
+	var typing *monterr.TypingError
 	require.ErrorAs(t, err, &typing)
 	require.Contains(t, typing.Diagnostics, "str")
 }

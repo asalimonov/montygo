@@ -6,6 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/asalimonov/montygo/monterr"
+	"github.com/asalimonov/montygo/sandbox"
+	"github.com/asalimonov/montygo/sandbox/host"
 	"io"
 	"os"
 
@@ -30,7 +33,11 @@ func main() {
 }
 
 func withSession(ctx context.Context, pool *montygo.Pool, fn func(*montygo.Session) error) error {
-	session, err := pool.Checkout(ctx, montygo.CheckoutOptions{})
+	rt, err := montygo.NewRuntime(montygo.RuntimeOptions{})
+	if err != nil {
+		return err
+	}
+	session, err := pool.Checkout(ctx, rt, montygo.CheckoutOptions{})
 	if err != nil {
 		return err
 	}
@@ -39,14 +46,14 @@ func withSession(ctx context.Context, pool *montygo.Pool, fn func(*montygo.Sessi
 }
 
 func run(ctx context.Context, out io.Writer) error {
-	pool, err := montygo.New(ctx, montyenv.PoolOptions())
+	pool, err := montygo.NewPool(ctx, montyenv.PoolOptions())
 	if err != nil {
 		return err
 	}
 	defer pool.Close(ctx)
 
 	err = withSession(ctx, pool, func(session *montygo.Session) error {
-		wrapper, err := montygo.NewClassInstance(newConfig(), montygo.ClassInstanceOptions{LazyAttrs: montygo.Names("retries")})
+		wrapper, err := host.NewClassInstance(newConfig(), host.ClassInstanceOptions{LazyAttrs: host.Names("retries")})
 		if err != nil {
 			return err
 		}
@@ -54,8 +61,8 @@ func run(ctx context.Context, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if !montygo.Equal(result, 3) {
-			return fmt.Errorf("assertion failed: cfg.retries == %s", montygo.Repr(result))
+		if !sandbox.Equal(result, 3) {
+			return fmt.Errorf("assertion failed: cfg.retries == %s", sandbox.Repr(result))
 		}
 		return nil
 	})
@@ -64,12 +71,12 @@ func run(ctx context.Context, out io.Writer) error {
 	}
 
 	return withSession(ctx, pool, func(session *montygo.Session) error {
-		wrapper, err := montygo.NewClassInstance(newConfig(), montygo.ClassInstanceOptions{LazyAttrs: montygo.Names("retries")})
+		wrapper, err := host.NewClassInstance(newConfig(), host.ClassInstanceOptions{LazyAttrs: host.Names("retries")})
 		if err != nil {
 			return err
 		}
 		_, err = session.FeedRun(ctx, "cfg.api_key", &montygo.FeedOptions{Inputs: map[string]any{"cfg": wrapper}})
-		var exc *montygo.RuntimeError
+		var exc *monterr.RuntimeError
 		switch {
 		case errors.As(err, &exc):
 			fmt.Fprintf(out, "denied as expected: %v\n", exc)

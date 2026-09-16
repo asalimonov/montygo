@@ -16,12 +16,12 @@ func TestAdmission_CapacityReturns503(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--max-sessions", "1"))
 	ctx := testCtx(t)
-	p := s.NewPool(montygo.WebSocketOptions{MaxProcesses: 2})
+	p := s.NewPool(wsOptions{MaxWorkers: 2})
 	held := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	_, err := held.FeedRun(ctx, "1", nil)
 	require.NoError(t, err)
 
-	_, err = p.Checkout(ctx, montygo.CheckoutOptions{})
+	_, err = p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "503")
 	s.WaitMetric("monty_server_rejections_total", map[string]string{"reason": "capacity"}, 1, 5*time.Second)
@@ -31,12 +31,12 @@ func TestAdmission_ClientQuotaReturns429(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--max-sessions-per-client", "1"))
 	ctx := testCtx(t)
-	p := s.NewPool(montygo.WebSocketOptions{MaxProcesses: 2})
+	p := s.NewPool(wsOptions{MaxWorkers: 2})
 	held := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	_, err := held.FeedRun(ctx, "1", nil)
 	require.NoError(t, err)
 
-	_, err = p.Checkout(ctx, montygo.CheckoutOptions{})
+	_, err = p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "429")
 	s.WaitMetric("monty_server_rejections_total", map[string]string{"reason": "client_quota"}, 1, 5*time.Second)
@@ -47,8 +47,8 @@ func TestAdmission_TrustForwardedForKeysQuota(t *testing.T) {
 	s := SetupServer(t, WithArgs("--max-sessions-per-client", "1", "--trust-forwarded-for"))
 	ctx := testCtx(t)
 	forwarded := func(ip string) *montygo.Pool {
-		return s.NewPool(montygo.WebSocketOptions{
-			MaxProcesses: 2,
+		return s.NewPool(wsOptions{
+			MaxWorkers: 2,
 			ConnectHeaders: func(context.Context) (map[string]string, error) {
 				return map[string]string{"X-Forwarded-For": "198.51.100.9, " + ip}, nil
 			},
@@ -61,7 +61,7 @@ func TestAdmission_TrustForwardedForKeysQuota(t *testing.T) {
 	_, err = second.FeedRun(ctx, "1", nil)
 	require.NoError(t, err)
 
-	_, err = forwarded("10.0.0.1").Checkout(ctx, montygo.CheckoutOptions{})
+	_, err = forwarded("10.0.0.1").Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "429")
 }
@@ -71,7 +71,7 @@ func TestAdmission_InfoHealthMetricsPages(t *testing.T) {
 	s := SetupServer(t)
 	ctx := testCtx(t)
 
-	info, err := montygo.FetchServerInfo(ctx, s.WSOptions())
+	info, err := fetchInfo(ctx, s.WSOptions())
 	require.NoError(t, err)
 	require.NotEmpty(t, info.Version)
 
@@ -91,7 +91,7 @@ func TestAdmission_InfoHealthMetricsPages(t *testing.T) {
 	require.Contains(t, body, `monty_server_build_info{version="`+info.Version+`"`)
 	require.Contains(t, body, "monty_server_sessions_active 0")
 
-	require.NoError(t, montygo.CheckWebSocketHealth(ctx, s.WSOptions()))
+	require.NoError(t, checkHealth(ctx, s.WSOptions()))
 }
 
 func TestAdmission_InfoEndpoint(t *testing.T) {
@@ -103,7 +103,7 @@ func TestAdmission_InfoEndpoint(t *testing.T) {
 	))
 	ctx := testCtx(t)
 
-	info, err := montygo.FetchServerInfo(ctx, s.WSOptions())
+	info, err := fetchInfo(ctx, s.WSOptions())
 	require.NoError(t, err)
 	require.Equal(t, montygo.ProtocolVersion, info.ProtocolVersion)
 	require.Len(t, info.MontyRev, 40)
@@ -134,16 +134,16 @@ func TestAdmission_ListenerRefusesDuringDrain(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--drain-grace", "10"))
 	ctx := testCtx(t)
-	p := s.NewPool(montygo.WebSocketOptions{MaxProcesses: 2})
+	p := s.NewPool(wsOptions{MaxWorkers: 2})
 	held := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	_, err := held.FeedRun(ctx, "1", nil)
 	require.NoError(t, err)
 
 	s.Signal("TERM")
 	require.Eventually(t, func() bool {
-		return montygo.CheckWebSocketHealth(ctx, s.WSOptions()) != nil
+		return checkHealth(ctx, s.WSOptions()) != nil
 	}, 5*time.Second, 50*time.Millisecond)
-	_, err = p.Checkout(ctx, montygo.CheckoutOptions{})
+	_, err = p.Checkout(ctx, defaultRuntime, montygo.CheckoutOptions{})
 	require.Error(t, err)
 	require.False(t, strings.Contains(err.Error(), "429"), err.Error())
 }

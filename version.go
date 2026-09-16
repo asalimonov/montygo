@@ -4,6 +4,7 @@ import (
 	"runtime/debug"
 
 	"github.com/asalimonov/montygo/internal/buildinfo"
+	"github.com/asalimonov/montygo/internal/worker"
 )
 
 // buildVersion is stamped by -ldflags "-X github.com/asalimonov/montygo.buildVersion=<version>".
@@ -19,4 +20,9 @@ func init() { buildinfo.Set(BindingVersion()) }
 func BindingVersion() string {
 	bi, _ := debug.ReadBuildInfo()
 	return buildinfo.Resolve(buildVersion, bi)
+}
+
+// userAgent is the User-Agent of every WebSocket upgrade and HTTP request the pool sends.
+func userAgent() string {
+	return worker.DefaultUserAgent + " montygo/" + BindingVersion()
 }

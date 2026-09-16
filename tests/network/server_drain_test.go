@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"github.com/asalimonov/montygo/monterr"
 	"testing"
 	"time"
 
@@ -15,13 +16,13 @@ import (
 func waitListenerClosed(t *testing.T, s *TestServer) {
 	t.Helper()
 	require.Eventually(t, func() bool {
-		return montygo.CheckWebSocketHealth(context.Background(), montygo.WebSocketOptions{URL: s.URL(), RequestTimeout: time.Second}) != nil
+		return checkHealth(context.Background(), wsOptions{URL: s.URL(), RequestTimeout: time.Second}) != nil
 	}, 10*time.Second, 50*time.Millisecond)
 }
 
-func requireShutdown(t *testing.T, err error) *montygo.ShutdownError {
+func requireShutdown(t *testing.T, err error) *monterr.ShutdownError {
 	t.Helper()
-	var se *montygo.ShutdownError
+	var se *monterr.ShutdownError
 	require.ErrorAs(t, err, &se)
 	return se
 }
@@ -30,7 +31,7 @@ func TestDrain_IdleSessionGetsShutdownDump(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--drain-grace", "10"))
 	ctx := testCtx(t)
-	p := s.NewPool(montygo.WebSocketOptions{})
+	p := s.NewPool(wsOptions{})
 	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	_, err := session.FeedRun(ctx, "x = 41", nil)
 	require.NoError(t, err)
@@ -73,7 +74,7 @@ func TestDrain_InFlightTurnFinishesFirst(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--drain-grace", "20"))
 	ctx := testCtx(t)
-	p := s.NewPool(montygo.WebSocketOptions{})
+	p := s.NewPool(wsOptions{})
 	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 
 	type result struct {
@@ -106,7 +107,7 @@ func TestDrain_SilentSessionDroppedAfterGrace(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--drain-grace", "1"))
 	ctx := testCtx(t)
-	p := s.NewPool(montygo.WebSocketOptions{})
+	p := s.NewPool(wsOptions{})
 	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	_, err := session.FeedRun(ctx, "x = 1", nil)
 	require.NoError(t, err)
@@ -121,7 +122,7 @@ func TestDrain_SecondSignalDropsImmediately(t *testing.T) {
 	t.Parallel()
 	s := SetupServer(t, WithArgs("--drain-grace", "60"))
 	ctx := testCtx(t)
-	p := s.NewPool(montygo.WebSocketOptions{})
+	p := s.NewPool(wsOptions{})
 	session := s.Checkout(ctx, p, montygo.CheckoutOptions{})
 	_, err := session.FeedRun(ctx, "x = 1", nil)
 	require.NoError(t, err)

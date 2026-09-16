@@ -3,7 +3,7 @@ package docker
 import (
 	"fmt"
 	"github.com/asalimonov/montygo/internal/buildinfo"
-	pyrt "github.com/asalimonov/montygo/runtime"
+	"github.com/asalimonov/montygo/monterr"
 	"regexp"
 	"slices"
 	"strconv"
@@ -36,19 +36,19 @@ func imageCandidates(image, version, binding string, getenv func(string) string)
 	ver := firstNonEmpty(version, getenv(VersionEnv))
 	if pinnedReference(repo) {
 		if ver != "" {
-			return nil, &pyrt.OptionError{Message: fmt.Sprintf("image %q already pins a tag or digest; leave the version empty", repo)}
+			return nil, &monterr.OptionError{Message: fmt.Sprintf("image %q already pins a tag or digest; leave the version empty", repo)}
 		}
 		return []string{repo}, nil
 	}
 	if ver != "" {
 		if !imageTagRE.MatchString(ver) {
-			return nil, &pyrt.OptionError{Message: fmt.Sprintf("invalid monty-server image tag %q", ver)}
+			return nil, &monterr.OptionError{Message: fmt.Sprintf("invalid monty-server image tag %q", ver)}
 		}
 		return []string{repo + ":" + ver}, nil
 	}
 	tags := candidateTags(binding)
 	if len(tags) == 0 {
-		return nil, &pyrt.OptionError{Message: fmt.Sprintf(
+		return nil, &monterr.OptionError{Message: fmt.Sprintf(
 			"cannot derive a monty-server image tag from montygo version %q: set Options.Version or %s, "+
 				"pin Options.Image or %s, or stamp -ldflags \"-X %s.buildVersion=<version>\"",
 			binding, VersionEnv, ImageEnv, buildinfo.ModulePath)}

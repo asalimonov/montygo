@@ -1,6 +1,6 @@
 # Test parity
 
-Upstream tests are ported file by file. Subtest names keep the upstream titles, so `go test -run 'TestMount/native/overlay_write_does_not_modify_host'` finds a TS test by its title. The Go suites live in `conformance/` and run on the native and wasm backends, on the websocket backend against a configured server, and on the docker backend against the server image.
+Upstream tests are ported file by file. Subtest names keep the upstream titles, so `go test -run 'TestMount/native/overlay_write_does_not_modify_host'` finds a TS test by its title. The Go suites live in the root package as `*_test.go` and run on the native and wasm backends, on the websocket backend against a configured server, and on the docker backend against the server image.
 
 - **ported**: same scenario and assertions.
 - **adapted**: same intent, expressed with Go types or APIs.
@@ -55,7 +55,7 @@ Upstream tests are ported file by file. Subtest names keep the upstream titles, 
 - **External lookup**: prototype-inherited names become absent map keys; getter-counting tests count name-lookup snapshots.
 - **Mounts**: `Object.keys(MountDir)` becomes a reflection check of the exported fields; an empty `Cwd` means "not set" in Go.
 - **Worker environment**: on darwin the test inspects `ps eww` instead of `/proc`.
-- **Telemetry**: each scenario runs in a child process of the test binary, like `runTelemetryChild`. `AsyncLocalStorage` becomes `context.WithValue`, async callbacks return `*montygo.Future`, and spans are compared by span context. Broken components panic from `Start`, `Emit`, `Add` or `Record` instead of throwing. A broken context becomes a tracer that returns no span, because attaching a span to a Go context cannot fail. Name lookups run no host getter, so the concurrent callback test asserts the `name lookup {name}` span position instead.
+- **Telemetry**: telemetry is a pool parameter, so the scenarios run in-process with their own providers where upstream forks `runTelemetryChild`. `AsyncLocalStorage` becomes `context.WithValue`, async callbacks return `*host.Future`, and spans are compared by span context. Broken components panic from `Start`, `Emit`, `Add` or `Record` instead of throwing. A broken context becomes a tracer that returns no span, because attaching a span to a Go context cannot fail. Name lookups run no host getter, so the concurrent callback test asserts the `name lookup {name}` span position instead.
 
 ### Skipped
 
@@ -117,7 +117,7 @@ Tests of behaviour beyond `@pydantic/monty`. Root tests run on every backend thr
 
 `make test-docker` runs the root package with `MONTY_TEST_BACKENDS=websocket` against one `monty-server` container, with the test dump key and the per-client quota disabled. Every root test runs, and subtests carry the backend name `websocket`.
 
-- `openPool` maps `Options` onto `WebSocketOptions`. `RequestTimeout` 0 becomes `NoRequestTimeout`.
+- `openPool` maps `PoolOptions` onto `Remote(StaticServer(url, nil, nil), RemoteOptions{})`. `RequestTimeout` 0 becomes `NoRequestTimeout`.
 - `plRequireMemoryError` checks only the `MemoryError` type on websocket. The server's memory ceiling fires before the allocator abort, so the message is the interpreter's own.
 - Pool tests that observe worker identity through the worker pid skip through `plNativeOnly` with `websocket backend: <reason>`, as on wasm.
 - The crash recovery test forces a timeout with a 500 ms `RequestTimeout` instead of killing the worker pid, as on wasm.
@@ -167,11 +167,11 @@ Upstream has no equivalent: `@pydantic/monty` is subprocess-only, and the Python
 | File | Tests | Covers |
 |---|---|---|
 | `docker_image_test.go` | 3 | candidate tags derived from `BindingVersion()`, option and variable precedence, pinned references, versions that derive nothing |
-| `docker_supervisor_test.go` | 11 | `DockerSupervisor` against a fake `docker` CLI and an `httptest` server: start sequence, hardening flags, labels, the dump key passed by name only, image fallback, protocol refusal, restart with a new port, close; no daemon needed |
+| `supervisor/docker/docker_supervisor_test.go` | 11 | `docker.Supervisor` against a fake `docker` CLI and an `httptest` server: start sequence, hardening flags, labels, the dump key passed by name only, image fallback, protocol refusal, restart with a new port, close; no daemon needed |
 | `recovery_test.go` | 8 | the attempt loop, non-retryable errors, the opt-in restart, single-flight restarts, caller cancellation |
 | `rotation_test.go` | 5 | real sessions over `wsRelay`: state survives a rotation, an idle session rotates on its timer, a refused reconnect yields `RotationError` with a restorable dump, rotation stays off without `/info` or with unusable limits |
 
-`make test-docker` additionally runs the whole root suite through `NewDocker`, one container per test pool.
+`make test-docker` additionally runs the whole root suite through `docker.New` and `Remote`, one container per test pool, closed with it.
 
 ## Examples (`examples/`)
 
