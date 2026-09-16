@@ -5,6 +5,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -111,8 +112,36 @@ func (r *otlpReceiver) WaitSpan(t *testing.T, name string, timeout time.Duration
 			names = append(names, span.GetName())
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("span %q not exported within %s; got %v", name, timeout, names)
+			t.Fatalf("span %q not exported within %s; got %v\nreceiver requests: %s", name, timeout, names, r.requests(t))
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+}
+
+// requests summarises what the receiver has been sent: one "<path> <bytes>" per
+// request, so a missing span can be told apart from an unreachable receiver.
+func (r *otlpReceiver) requests(t *testing.T) string {
+	t.Helper()
+	rc, err := r.container.Logs(context.Background())
+	if err != nil {
+		return err.Error()
+	}
+	defer func() { _ = rc.Close() }()
+	out, err := io.ReadAll(rc)
+	if err != nil {
+		return err.Error()
+	}
+	var seen []string
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	scanner.Buffer(make([]byte, 1024*1024), 64*1024*1024)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) == 3 && fields[0] == "OTLP" {
+			seen = append(seen, fmt.Sprintf("%s %dB", fields[1], len(fields[2])*3/4))
+		}
+	}
+	if len(seen) == 0 {
+		return "none"
+	}
+	return strings.Join(seen, ", ")
 }

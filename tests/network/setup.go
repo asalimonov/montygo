@@ -81,7 +81,7 @@ func SetupServer(t *testing.T, opts ...SetupOption) *TestServer {
 	if u != nil {
 		t.Cleanup(func() {
 			if t.Failed() && u.logs != nil {
-				t.Logf("server log: %s", u.logs.Path())
+				t.Logf("server log: %s\n%s", u.logs.Path(), u.logs.Tail(40))
 			}
 			pool.Release(t, u, s.dirty)
 		})

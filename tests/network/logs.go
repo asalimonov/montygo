@@ -59,6 +59,21 @@ func (c *fileLogConsumer) Path() string {
 	return c.path
 }
 
+// Tail returns the last n lines written so far, for a failing test's log.
+func (c *fileLogConsumer) Tail(n int) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	data, err := os.ReadFile(c.path)
+	if err != nil {
+		return err.Error()
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (c *fileLogConsumer) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()

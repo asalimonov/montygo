@@ -145,6 +145,13 @@ jobs:
         run: go vet ./... && go mod tidy -diff
       - name: Network tests
         run: make test-network
+      - name: Upload container logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-logs-${{ github.job }}
+          path: tests/network/output/
+          if-no-files-found: ignore
 
   docker-arm64:
     runs-on: ubuntu-24.04-arm
@@ -169,6 +176,13 @@ jobs:
         run: make docker-build PLATFORMS=linux/arm64 MONTY_SRC=monty-src
       - name: Network tests
         run: make test-network
+      - name: Upload container logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-logs-${{ github.job }}
+          path: tests/network/output/
+          if-no-files-found: ignore
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

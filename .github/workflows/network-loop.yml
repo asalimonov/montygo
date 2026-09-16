@@ -1,0 +1,54 @@
+name: network-loop
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: how many times to run make test-network
+        default: "6"
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+  MONTY_REV: f8acf4fa8fff78dfd11dc5a2042e4fdf0ab36c28
+
+jobs:
+  arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check out upstream Monty
+        uses: actions/checkout@v7
+        with:
+          repository: pydantic/monty
+          ref: ${{ env.MONTY_REV }}
+          path: monty-src
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: |
+            go.sum
+            tests/network/go.sum
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        run: make docker-build PLATFORMS=linux/arm64 MONTY_SRC=monty-src
+      - name: Network tests in a loop
+        run: |
+          fails=0
+          for i in $(seq 1 ${{ github.event.inputs.iterations }}); do
+            echo "::group::iteration $i"
+            if ! make test-network 2>&1 | tee "tests/network/output/run-$i.log" | grep -E "^(ok|FAIL|---|\s+\S+_test.go:|\s+server log|\s+receiver)"; then :; fi
+            grep -q "^FAIL" "tests/network/output/run-$i.log" && fails=$((fails+1))
+            echo "::endgroup::"
+          done
+          echo "failed iterations: $fails"
+      - name: Upload container logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-loop-arm64
+          path: tests/network/output/
+          if-no-files-found: ignore
