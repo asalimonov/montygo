@@ -8,6 +8,19 @@ package buildinfo
 
 import "sync/atomic"
 
+// Upstream pins. The root package re-exports them; scripts/check-pins.sh keeps
+// every copy of these values in step.
+const (
+	// MontyVersion is the Monty release this binding tracks.
+	MontyVersion = "0.0.23"
+	// UpstreamRev is the upstream commit the protocol and tests were taken from.
+	UpstreamRev = "f8acf4fa"
+	// ProtocolVersion is the wire protocol version this parent speaks.
+	ProtocolVersion uint32 = 3
+	// MaxValueDepth is the deepest list-like nesting a value may have on the wire.
+	MaxValueDepth = 48
+)
+
 var version atomic.Value // string
 
 // Set records the binding version. The root package calls it during init.

@@ -144,7 +144,7 @@ Let `OLD` be the current pin (`proto/PROTO_REV`) and `NEW` the target tag or com
    - Read `git -C ../monty log --oneline OLD..NEW` and the release notes.
    - Diff every source in the table above, for example `git -C ../monty diff OLD NEW --stat -- crates/monty-proto crates/monty-pool crates/monty-fs crates/monty-js crates/monty-python examples docs/server.md`.
    - List the changes per area before editing. Protocol changes come first, because everything else depends on them.
-2. **Move the pins.** `scripts/check-pins.sh` is the authority: it reads `proto/PROTO_REV` and `MontyVersion` and names every file that disagrees. Update `proto/PROTO_REV` (full 40-character SHA) and `montygo.go` (`MontyVersion`, `UpstreamRev`) first, then run `make check-pins` and fix each reported file:
+2. **Move the pins.** `scripts/check-pins.sh` is the authority: it reads `proto/PROTO_REV` and `MontyVersion` and names every file that disagrees. Update `proto/PROTO_REV` (full 40-character SHA) and `internal/buildinfo/buildinfo.go` (`MontyVersion`, `UpstreamRev`) first, then run `make check-pins` and fix each reported file:
    - `worker-wasm/Cargo.toml`: package version and the three git `rev` values, then `cargo update` in `worker-wasm/`
    - `server/Cargo.toml`: the three git `rev` values, then `cargo update` in `server/`; the package version is the server's own fallback and does not track Monty
    - `server/src/version.rs`: `MONTY_REV`, as a full SHA; `monty_rev_matches_lockfile` checks it against `server/Cargo.lock`

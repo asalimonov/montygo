@@ -86,7 +86,7 @@ Two files are the sources of the upstream pins:
 | Source | Value | Repeated in |
 |---|---|---|
 | `proto/PROTO_REV` | full 40-character upstream SHA | `montygo.UpstreamRev` (first 8 characters), the three `rev` values in `worker-wasm/Cargo.toml` and in `server/Cargo.toml`, `MONTY_REV` in `server/src/version.rs`, `ARG MONTY_REV` in both Dockerfiles, `MONTY_REV` in `.github/workflows/ci.yml` |
-| `MontyVersion` in `montygo.go` | upstream release | `DefaultUserAgent` in `internal/worker/websocket.go`, `version` in `worker-wasm/Cargo.toml` |
+| `MontyVersion` in `internal/buildinfo/buildinfo.go` | upstream release | `DefaultUserAgent` in `internal/worker/websocket.go`, `version` in `worker-wasm/Cargo.toml` |
 
 `scripts/check-pins.sh` greps every copy and fails with `<file>: expected <value>` for each mismatch. `make check-pins` runs it, and it MUST pass before a release. `scripts/check_pins_test.sh` checks that a drifted copy fails.
 
