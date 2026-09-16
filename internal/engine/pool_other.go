@@ -1,6 +1,6 @@
 //go:build !unix
 
-package montygo
+package engine
 
 import (
 	"context"

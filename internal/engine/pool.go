@@ -1,4 +1,4 @@
-package montygo
+package engine
 
 import (
 	"context"
@@ -178,8 +178,8 @@ func newPool(ctx context.Context, opts Options, spawner worker.Spawner, backend 
 		GraceDisabled:         opts.DurationLimitGrace == NoDurationLimitGrace,
 		MaxCheckoutsPerWorker: opts.MaxCheckoutsPerWorker,
 		SingleUse:             singleUse,
-		MontyVersion:          MontyVersion,
-		ProtocolVersion:       ProtocolVersion,
+		MontyVersion:          montyVersion,
+		ProtocolVersion:       protocolVersion,
 		Metrics:               metrics,
 	}
 	inner, err := pool.New(ctx, cfg)

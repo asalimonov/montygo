@@ -1,6 +1,6 @@
 //go:build unix
 
-package montygo
+package engine
 
 import (
 	"context"
@@ -111,7 +111,7 @@ func fakeServer(t *testing.T, protocol uint32, healthy *bool) *httptest.Server {
 		fmt.Fprintf(w, `{"version":"0.3.0","monty_rev":%q,"protocol_version":%d,
 			"limits":{"idle_timeout_s":0,"keepalive_s":5,"session_timeout_s":3600,"turn_timeout_s":300,
 			"max_duration_s":0,"max_memory_bytes":0,"max_recursion_depth":1000,
-			"max_sessions":8,"max_sessions_per_client":0}}`, UpstreamRev, protocol)
+			"max_sessions":8,"max_sessions_per_client":0}}`, upstreamRev, protocol)
 	})
 	s := httptest.NewServer(mux)
 	t.Cleanup(s.Close)
@@ -130,7 +130,7 @@ func testDockerOptions(f *fakeDocker) DockerOptions {
 }
 
 func TestDockerSupervisorStartsAContainer(t *testing.T) {
-	server := fakeServer(t, ProtocolVersion, nil)
+	server := fakeServer(t, protocolVersion, nil)
 	f := newFakeDocker(t, server)
 	t.Setenv("FAKE_DOCKER_LOCAL", "example.test/monty-server:test")
 
@@ -143,7 +143,7 @@ func TestDockerSupervisorStartsAContainer(t *testing.T) {
 	require.Equal(t, "ws://127.0.0.1:"+serverPort(t, server)+"/", ep.URL)
 	require.Equal(t, "example.test/monty-server:test", sup.Image())
 	require.NotEmpty(t, sup.ContainerID())
-	require.Equal(t, ProtocolVersion, sup.ServerInfo().ProtocolVersion)
+	require.Equal(t, protocolVersion, sup.ServerInfo().ProtocolVersion)
 
 	calls := f.calls(t)
 	require.Contains(t, calls, "--read-only")
@@ -159,7 +159,7 @@ func TestDockerSupervisorStartsAContainer(t *testing.T) {
 }
 
 func TestDockerSupervisorPullsWhenTheImageIsAbsent(t *testing.T) {
-	server := fakeServer(t, ProtocolVersion, nil)
+	server := fakeServer(t, protocolVersion, nil)
 	f := newFakeDocker(t, server)
 	t.Setenv("FAKE_DOCKER_PULLABLE", "example.test/monty-server:test")
 
@@ -170,7 +170,7 @@ func TestDockerSupervisorPullsWhenTheImageIsAbsent(t *testing.T) {
 }
 
 func TestDockerSupervisorTriesEveryCandidate(t *testing.T) {
-	server := fakeServer(t, ProtocolVersion, nil)
+	server := fakeServer(t, protocolVersion, nil)
 	f := newFakeDocker(t, server)
 	// Neither candidate exists locally; only the base release can be pulled.
 	t.Setenv("FAKE_DOCKER_PULLABLE", "example.test/monty-server:0.3.0")
@@ -186,7 +186,7 @@ func TestDockerSupervisorTriesEveryCandidate(t *testing.T) {
 }
 
 func TestDockerSupervisorReportsEveryFailedCandidate(t *testing.T) {
-	server := fakeServer(t, ProtocolVersion, nil)
+	server := fakeServer(t, protocolVersion, nil)
 	f := newFakeDocker(t, server)
 	cli, err := newDockerCLI(f.command, nil)
 	require.NoError(t, err)
@@ -198,7 +198,7 @@ func TestDockerSupervisorReportsEveryFailedCandidate(t *testing.T) {
 
 func TestDockerSupervisorRemovesAContainerThatNeverGetsHealthy(t *testing.T) {
 	healthy := false
-	server := fakeServer(t, ProtocolVersion, &healthy)
+	server := fakeServer(t, protocolVersion, &healthy)
 	f := newFakeDocker(t, server)
 	t.Setenv("FAKE_DOCKER_LOCAL", "example.test/monty-server:test")
 	opts := testDockerOptions(f)
@@ -211,7 +211,7 @@ func TestDockerSupervisorRemovesAContainerThatNeverGetsHealthy(t *testing.T) {
 }
 
 func TestDockerSupervisorRefusesAnotherProtocolVersion(t *testing.T) {
-	server := fakeServer(t, ProtocolVersion+1, nil)
+	server := fakeServer(t, protocolVersion+1, nil)
 	f := newFakeDocker(t, server)
 	t.Setenv("FAKE_DOCKER_LOCAL", "example.test/monty-server:test")
 
@@ -221,7 +221,7 @@ func TestDockerSupervisorRefusesAnotherProtocolVersion(t *testing.T) {
 }
 
 func TestDockerSupervisorEnvOverridesTheDefaults(t *testing.T) {
-	server := fakeServer(t, ProtocolVersion, nil)
+	server := fakeServer(t, protocolVersion, nil)
 	f := newFakeDocker(t, server)
 	t.Setenv("FAKE_DOCKER_LOCAL", "example.test/monty-server:test")
 	opts := testDockerOptions(f)
@@ -239,7 +239,7 @@ func TestDockerSupervisorEnvOverridesTheDefaults(t *testing.T) {
 }
 
 func TestDockerSupervisorRestartRebindsTheEndpoint(t *testing.T) {
-	first := fakeServer(t, ProtocolVersion, nil)
+	first := fakeServer(t, protocolVersion, nil)
 	f := newFakeDocker(t, first)
 	t.Setenv("FAKE_DOCKER_LOCAL", "example.test/monty-server:test")
 
@@ -250,7 +250,7 @@ func TestDockerSupervisorRestartRebindsTheEndpoint(t *testing.T) {
 	require.NoError(t, err)
 
 	// A restart publishes a new port, as Docker does.
-	second := fakeServer(t, ProtocolVersion, nil)
+	second := fakeServer(t, protocolVersion, nil)
 	f.setPort(t, second)
 	require.NoError(t, sup.Restart(context.Background(), before))
 
@@ -261,7 +261,7 @@ func TestDockerSupervisorRestartRebindsTheEndpoint(t *testing.T) {
 }
 
 func TestDockerSupervisorIgnoresARestartOfAStaleEndpoint(t *testing.T) {
-	server := fakeServer(t, ProtocolVersion, nil)
+	server := fakeServer(t, protocolVersion, nil)
 	f := newFakeDocker(t, server)
 	t.Setenv("FAKE_DOCKER_LOCAL", "example.test/monty-server:test")
 
@@ -274,7 +274,7 @@ func TestDockerSupervisorIgnoresARestartOfAStaleEndpoint(t *testing.T) {
 }
 
 func TestDockerSupervisorCloseStopsAndRemoves(t *testing.T) {
-	server := fakeServer(t, ProtocolVersion, nil)
+	server := fakeServer(t, protocolVersion, nil)
 	f := newFakeDocker(t, server)
 	t.Setenv("FAKE_DOCKER_LOCAL", "example.test/monty-server:test")
 

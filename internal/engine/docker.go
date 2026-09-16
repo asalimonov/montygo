@@ -1,4 +1,4 @@
-package montygo
+package engine
 
 import (
 	"context"
@@ -134,7 +134,7 @@ func NewDockerSupervisor(ctx context.Context, opts DockerOptions) (*DockerSuperv
 	if err := reaper.Reap(ctx); err != nil {
 		return nil, fmt.Errorf("reap orphaned monty-server containers: %w", err)
 	}
-	candidates, err := dockerImageCandidates(opts.Image, opts.Version, BindingVersion(), os.Getenv)
+	candidates, err := dockerImageCandidates(opts.Image, opts.Version, bindingVersion(), os.Getenv)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +145,7 @@ func NewDockerSupervisor(ctx context.Context, opts DockerOptions) (*DockerSuperv
 	d.image = ref
 	d.labels = map[string]string{
 		"io.montygo.supervisor": randomHex(16),
-		"io.montygo.version":    BindingVersion(),
+		"io.montygo.version":    bindingVersion(),
 		"io.montygo.pid":        strconv.Itoa(os.Getpid()),
 	}
 	if err := d.start(ctx); err != nil {
@@ -305,8 +305,8 @@ func (d *DockerSupervisor) waitReady(ctx context.Context, ep ServerEndpoint) (*S
 	if err != nil {
 		return nil, err
 	}
-	if info.ProtocolVersion != ProtocolVersion {
-		return nil, fmt.Errorf("monty-server speaks protocol version %d, this montygo speaks %d", info.ProtocolVersion, ProtocolVersion)
+	if info.ProtocolVersion != protocolVersion {
+		return nil, fmt.Errorf("monty-server speaks protocol version %d, this montygo speaks %d", info.ProtocolVersion, protocolVersion)
 	}
 	return info, nil
 }

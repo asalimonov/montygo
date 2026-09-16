@@ -19,6 +19,11 @@ const (
 	ProtocolVersion uint32 = 3
 	// MaxValueDepth is the deepest list-like nesting a value may have on the wire.
 	MaxValueDepth = 48
+
+	// ModulePath is this module's import path, as recorded in build info.
+	ModulePath = "github.com/asalimonov/montygo"
+	// UnknownVersion is reported when no release version can be resolved.
+	UnknownVersion = "0.0.0-unknown"
 )
 
 var version atomic.Value // string
@@ -35,5 +40,5 @@ func Version() string {
 	if v, ok := version.Load().(string); ok {
 		return v
 	}
-	return "0.0.0-unknown"
+	return UnknownVersion
 }
