@@ -5,7 +5,10 @@
 use std::{
     fmt::Debug,
     future::Future,
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -35,6 +38,7 @@ pub struct Retrying<E> {
     inner: E,
     signal: &'static str,
     last_failure_log: Mutex<Option<Instant>>,
+    established: AtomicBool,
 }
 
 impl<E> Retrying<E> {
@@ -43,6 +47,7 @@ impl<E> Retrying<E> {
             inner,
             signal,
             last_failure_log: Mutex::new(None),
+            established: AtomicBool::new(false),
         }
     }
 
@@ -56,7 +61,12 @@ impl<E> Retrying<E> {
         let mut failures = 0;
         loop {
             let err = match attempt().await {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    if !self.established.swap(true, Ordering::Relaxed) {
+                        logline::info("otlp_export_established", &[("signal", &self.signal), ("attempts", &(failures + 1))]);
+                    }
+                    return Ok(());
+                }
                 Err(err) => err,
             };
             if failures == RETRY_DELAYS.len() {

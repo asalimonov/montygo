@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -32,6 +34,8 @@ var otlpReceiverScript string
 type otlpReceiver struct {
 	container testcontainers.Container
 	ip        string
+	// hostURL reaches the receiver from the test process, for GET /requests.
+	hostURL string
 }
 
 func startOTLPReceiver(t *testing.T) *otlpReceiver {
@@ -43,9 +47,10 @@ func startOTLPReceiver(t *testing.T) *otlpReceiver {
 	ctx := testCtx(t)
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			Image:  image,
-			Cmd:    []string{"python", "-u", "/receiver.py"},
-			Labels: map[string]string{testLabelKey: testLabelValue},
+			Image:        image,
+			Cmd:          []string{"python", "-u", "/receiver.py"},
+			ExposedPorts: []string{"4318/tcp"},
+			Labels:       map[string]string{testLabelKey: testLabelValue},
 			Files: []testcontainers.ContainerFile{{
 				Reader:            strings.NewReader(otlpReceiverScript),
 				ContainerFilePath: "/receiver.py",
@@ -61,7 +66,11 @@ func startOTLPReceiver(t *testing.T) *otlpReceiver {
 	require.NoError(t, err)
 	ip, err := c.ContainerIP(ctx)
 	require.NoError(t, err)
-	return &otlpReceiver{container: c, ip: ip}
+	host, err := c.Host(ctx)
+	require.NoError(t, err)
+	port, err := c.MappedPort(ctx, "4318/tcp")
+	require.NoError(t, err)
+	return &otlpReceiver{container: c, ip: ip, hostURL: "http://" + net.JoinHostPort(host, port.Port())}
 }
 
 // Endpoint is the collector base URL as seen from another container.
@@ -112,7 +121,8 @@ func (r *otlpReceiver) WaitSpan(t *testing.T, name string, timeout time.Duration
 			names = append(names, span.GetName())
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("span %q not exported within %s; got %v\nreceiver requests: %s", name, timeout, names, r.requests(t))
+			t.Fatalf("span %q not exported within %s; got %v\nreceiver %s at %s (%s)\nrequests seen in its log: %s\nrequests it reports over HTTP: %s",
+				name, timeout, names, r.container.GetContainerID()[:12], r.ip, r.hostURL, r.requests(t), r.requestsOverHTTP())
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
@@ -144,4 +154,24 @@ func (r *otlpReceiver) requests(t *testing.T) string {
 		return "none"
 	}
 	return strings.Join(seen, ", ")
+}
+
+// requestsOverHTTP asks the receiver itself what it received.
+func (r *otlpReceiver) requestsOverHTTP() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.hostURL+"/requests", nil)
+	if err != nil {
+		return err.Error()
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err.Error()
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err.Error()
+	}
+	return string(body)
 }
