@@ -5,13 +5,13 @@ on:
     branches: ["ci/**"]
   workflow_dispatch:
 
-env:
-  ITERATIONS: "6"
-
 permissions:
   contents: read
+
+env:
   GOTOOLCHAIN: local
   MONTY_REV: f8acf4fa8fff78dfd11dc5a2042e4fdf0ab36c28
+  ITERATIONS: "6"
 
 jobs:
   arm64:
@@ -36,11 +36,12 @@ jobs:
         run: make docker-build PLATFORMS=linux/arm64 MONTY_SRC=monty-src
       - name: Network tests in a loop
         run: |
+          mkdir -p tests/network/output
           fails=0
-          for i in $(seq 1 $ITERATIONS); do
+          for i in $(seq 1 "$ITERATIONS"); do
             echo "::group::iteration $i"
-            if ! make test-network 2>&1 | tee "tests/network/output/run-$i.log" | grep -E "^(ok|FAIL|---|\s+\S+_test.go:|\s+server log|\s+receiver)"; then :; fi
-            grep -q "^FAIL" "tests/network/output/run-$i.log" && fails=$((fails+1))
+            make test-network 2>&1 | tee "tests/network/output/run-$i.log" | grep -E "^(ok|FAIL|---|\s+\S+_test.go:|\s+server log|\s+receiver)" || true
+            if grep -q "^FAIL" "tests/network/output/run-$i.log"; then fails=$((fails+1)); fi
             echo "::endgroup::"
           done
           echo "failed iterations: $fails"
