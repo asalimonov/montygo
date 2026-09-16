@@ -114,6 +114,14 @@ session. These additions change no wire or server protocol.
 | `OrphanReaper` | removes containers left by a process that died; the default reaps nothing |
 | `*RotationError` | a session that could not move to a fresh connection; `Dump` restores it elsewhere; matches `ErrSessionLost` |
 | `ErrSupervisorClosed` | a supervisor that no longer serves endpoints |
+| `montygo/supervisor/native` (`New`, `NewPool`, `Options`, `Supervisor`) | runs `monty-server` as a child process on an ephemeral loopback port; the same limit policy as the container supervisor |
+| `montygo/supervisor/docker` (`New`, `NewPool`, `Options`, `Supervisor`) | the container supervisor; `montygo.NewDocker` and `montygo.DockerOptions` remain as aliases |
+
+The implementation is split by concern: `runtime` and `runtime/host` hold the
+Python value model and host objects, `supervisor` the server contract,
+`telemetry` the OpenTelemetry surface, and `internal/engine` the pool and
+session machinery. The root package is a facade over them, so a program that
+imports only `montygo` sees the same API as before.
 
 Rotation is off unless it is asked for: `NewWebSocket` keeps upstream behaviour
 until `RotateSessions` is set, and `BackendAuto` never contacts Docker.

@@ -24,7 +24,16 @@ type ServerSupervisor interface {
 - `Restart` receives the endpoint that failed. A supervisor that has already replaced that server MUST return nil.
 - A supervisor that replaces a server MUST keep its dump key. A rotated session's dump is signed, and another key rejects it with `ValueError: invalid session dump signature`.
 - A pool with a fixed `URL` uses an internal static supervisor. Its `Restart` always fails, so `RecoveryPolicy.RestartServer` has no effect there.
-- montygo ships `DockerSupervisor`. An application MAY implement its own, for servers on other hosts.
+- montygo ships two implementations, and an application MAY add its own for servers on other hosts:
+
+| Package | Server | Endpoint | Restart |
+|---|---|---|---|
+| `montygo/supervisor/docker` | a container on the local Docker daemon | `ws://127.0.0.1:<published port>/` | `docker restart`, or a new container when it is gone; the dump key survives |
+| `montygo/supervisor/native` | a `monty-server` child process | `ws://127.0.0.1:<ephemeral port>/`, read from the line the server prints once bound | the process is drained with SIGTERM and respawned; the dump key survives |
+
+- Both disable the server's idle timeout and its memory and duration ceilings, so `CheckoutOptions.Limits` governs as on the local backends, and both size the server at `2 × MaxProcesses` sessions with the per-client quota off.
+- `docker.NewPool` and `native.NewPool` return a pool that owns its supervisor; `docker.New` and `native.New` return the supervisor alone, for a caller that wants to share it.
+- The root package re-exports the Docker spellings (`montygo.NewDocker`, `montygo.DockerOptions`) for compatibility; the native supervisor is reached through its own package.
 
 ## Recovery
 

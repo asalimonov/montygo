@@ -2,7 +2,7 @@
 
 montygo is a Go parent for [Monty](https://github.com/pydantic/monty) workers. It runs untrusted Python in a child process, inside a WebAssembly sandbox, or on a remote host, never as host code. It has no native in-process interpreter and no cgo.
 
-The public surface is two packages: `montygo` (pools, sessions, snapshots, host objects, mounts, telemetry) and `osaccess` (in-memory OS helpers). Everything else is internal.
+The public surface is a facade and the packages behind it. `montygo` re-exports the API: pools, sessions, snapshots, options and errors. `runtime` holds the Python value model, print targets and mounts; `runtime/host` the host objects and class wrappers; `runtime/osaccess` the in-memory OS helpers. `supervisor` is the contract for owning a `monty-server`, with `supervisor/docker` and `supervisor/native` as its implementations. `telemetry` is the OpenTelemetry surface. The implementation lives in `internal/engine`; everything under `internal/` is closed.
 
 The repository also builds `monty-server`, a WebSocket server for Monty workers, and its Docker image.
 
@@ -10,7 +10,7 @@ The repository also builds `monty-server`, a WebSocket server for Monty workers,
 
 | Artifact | Built by | Contents |
 |---|---|---|
-| Go module `github.com/asalimonov/montygo` | `go build` | packages `montygo` and `osaccess`, internal packages, the embedded wasm worker |
+| Go module `github.com/asalimonov/montygo` | `go build` | the `montygo` facade, `runtime`, `runtime/host`, `runtime/osaccess`, `supervisor` with `supervisor/docker` and `supervisor/native`, `telemetry`, the internal packages, and the embedded wasm worker |
 | `internal/wasmblob/monty.wasm.zst` | `make build-wasm` | the worker for `wasm32-wasip1`, zstd-compressed and checked in |
 | `examples` module | `make examples` | ports of the upstream examples and the REPL |
 | `monty-server` binary | `cargo build` in `server/` | WebSocket server that runs one `monty subprocess` per session |

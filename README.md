@@ -247,6 +247,23 @@ Applications remain responsible for transaction and idempotency policy. To
 reuse a session, check `Stopped.SessionKept()` or `Session.Err() == nil` and
 handle a concurrent `ErrSessionBusy` admission result.
 
+## Packages
+
+| Import | Holds |
+|---|---|
+| `github.com/asalimonov/montygo` | the API: pools, sessions, snapshots, options, errors |
+| `montygo/runtime` | the Python value model, print targets, mounts, exception types |
+| `montygo/runtime/host` | host objects, class wrappers, host functions, futures |
+| `montygo/runtime/osaccess` | in-memory OS helpers |
+| `montygo/supervisor` | the `ServerSupervisor` contract an application implements |
+| `montygo/supervisor/docker` | a supervisor that runs `monty-server` in a container |
+| `montygo/supervisor/native` | a supervisor that runs `monty-server` as a child process |
+| `montygo/telemetry` | the OpenTelemetry components and instrumentation |
+
+The root package re-exports the types most programs need, so a single import is
+usually enough; reach for a subpackage to implement a supervisor or to name a
+runtime type directly.
+
 ## Backends
 
 `Options.Backend` selects the transport:

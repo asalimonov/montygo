@@ -12,8 +12,17 @@ montygo is a Go binding for [Monty](https://github.com/pydantic/monty), a sandbo
 
 | Path | Contents |
 |---|---|
-| `*.go` (package `montygo`) | public API: pools, sessions, snapshots, host objects, value conversion, print, mounts, errors, telemetry |
-| `osaccess/` | in-memory OS helpers, a port of `pydantic_monty/os_access.py` |
+| `*.go` (package `montygo`) | public facade: aliases over the packages below, the upstream pins, and `BindingVersion` |
+| `runtime/` | Python value model, conversion, print targets, mounts, exception types |
+| `runtime/host/` | host objects, class wrappers, host functions, futures |
+| `runtime/osaccess/` | in-memory OS helpers, a port of `pydantic_monty/os_access.py` |
+| `supervisor/` | `ServerSupervisor` contract, endpoints, recovery policy |
+| `supervisor/docker/` | supervisor that runs `monty-server` in a container |
+| `supervisor/native/` | supervisor that runs `monty-server` as a child process |
+| `telemetry/` | OpenTelemetry components and instrumentation |
+| `internal/engine` | pool, session, transports, rotation: the implementation behind the facade |
+| `internal/buildinfo` | upstream pins and the binding version, for packages that cannot import the root |
+| `internal/telemetryhooks` | recorder plumbing shared by the engine and the supervisors |
 | `internal/wire` | framing and the hand-written `monty.v1` protobuf codec |
 | `internal/value` | Go model of Python values |
 | `internal/pool` | worker pool and per-checkout turn engine |

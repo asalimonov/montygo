@@ -26,6 +26,8 @@ These need no Docker daemon:
 - `docker_supervisor_test.go` drives `DockerSupervisor` against a fake `docker` script and an `httptest` server: the start sequence, hardening flags, labels, the dump key passed by name only, image fallback, protocol refusal, restart with a new port, and close.
 - `recovery_test.go` covers the attempt loop, non-retryable errors, restart only when enabled, and single-flight restarts.
 - `rotation_test.go` drives real sessions over `wsRelay`, which serves `GET /info` with short timeouts and can refuse upgrades: state survives a rotation, an idle session rotates on its timer, a refused reconnect yields `RotationError` whose dump restores, and unusable limits leave rotation off.
+
+Tests live with the code they cover: the image resolver and the fake-CLI supervisor tests in `supervisor/docker`, the recovery loop in `supervisor`, the host internals in `runtime/host`, the driver transitions in `internal/engine`, and the ported upstream suites in the root package against the facade. `supervisor/native` tests spawn a real `monty-server`; they skip when the server binary or the worker is missing.
 - Adaptations for this backend are listed in `docs/parity/tests.md`.
 
 ## Lifecycle regressions

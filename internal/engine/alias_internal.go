@@ -18,8 +18,7 @@ var (
 
 // Supervisor plumbing the engine uses under its old names.
 type (
-	recoverer  = supervisor.Recoverer
-	noopReaper = supervisor.NoopReaper
+	recoverer = supervisor.Recoverer
 )
 
 var (
