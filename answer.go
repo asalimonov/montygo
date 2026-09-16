@@ -18,13 +18,6 @@ type hostFailure struct{ err error }
 func (h *hostFailure) Error() string { return h.err.Error() }
 func (h *hostFailure) Unwrap() error { return h.err }
 
-func panicError(r any) error {
-	if err, ok := r.(error); ok {
-		return err
-	}
-	return fmt.Errorf("%v", r)
-}
-
 type answerer struct {
 	s      *Session
 	exec   *execution
@@ -51,7 +44,7 @@ func (a *answerer) lookupEntry(name string) (any, bool) {
 	if a.host == nil {
 		return nil, false
 	}
-	return a.host.lookupEntry(name)
+	return a.host.LookupEntry(name)
 }
 
 // callHost runs one host call under a cancellable context registered with the
@@ -265,11 +258,11 @@ func (a *answerer) answerFunctionCall(ctx, cbCtx context.Context, fc *wire.Funct
 }
 
 func (a *answerer) answerMethodCall(ctx, cbCtx context.Context, fc *wire.FunctionCall) (*wire.Event, error) {
-	w, found := a.s.store.get(fc.ObjectID)
+	w, found := a.s.store.Get(fc.ObjectID)
 	if strings.HasPrefix(fc.FunctionName, "_") && fc.FunctionName != "__call__" {
 		name := "object"
 		if found {
-			name = w.wrapperName()
+			name = wrapperName(w)
 		}
 		return a.resumeError(ctx, "AttributeError", fmt.Sprintf("'%s' object has no attribute '%s'", name, fc.FunctionName))
 	}
@@ -286,7 +279,7 @@ func (a *answerer) answerMethodCall(ctx, cbCtx context.Context, fc *wire.Functio
 	if err != nil {
 		var ae *attrError
 		if errors.As(err, &ae) {
-			return a.resumeError(ctx, "AttributeError", ae.msg)
+			return a.resumeError(ctx, "AttributeError", ae.Error())
 		}
 		excType, msg := exceptionParts(err)
 		return a.resumeError(ctx, excType, msg)
@@ -300,12 +293,12 @@ func safeMethod(ctx context.Context, w wrapper, name string, args []any, kwargs 
 			result, err = nil, panicError(r)
 		}
 	}()
-	return w.callMethod(ctx, name, args, kwargs)
+	return callWrapperMethod(ctx, w, name, args, kwargs)
 }
 
 func (a *answerer) answerObjectLookup(ctx context.Context, nl *wire.NameLookup) (*wire.Event, error) {
 	undefined := wire.ResumeNameLookup{Kind: wire.LookupUndefined}
-	w, found := a.s.store.get(nl.ObjectID)
+	w, found := a.s.store.Get(nl.ObjectID)
 	if !found || strings.HasPrefix(nl.Name, "_") {
 		return a.resumeLookup(ctx, undefined)
 	}
@@ -336,7 +329,7 @@ func safeLazy(w wrapper, name string) (result any, err error) {
 			result, err = nil, panicError(r)
 		}
 	}()
-	return w.lazyAttr(name)
+	return wrapperLazyAttr(w, name)
 }
 
 func (a *answerer) answerNameLookup(ctx context.Context, nl *wire.NameLookup) (*wire.Event, error) {
@@ -439,24 +432,13 @@ func (a *answerer) answerResolveFutures(ctx context.Context, ids []uint32) (*wir
 	var results []wire.FutureResult
 	for _, id := range ids {
 		f := futures[id]
-		if f.settled() {
+		if f.IsSettled() {
 			a.s.life.mu.Lock()
 			delete(a.exec.pending, id)
 			a.s.life.mu.Unlock()
-			results = append(results, a.settledResult(id, f.value, f.err))
+			value, ferr := f.Result()
+			results = append(results, a.settledResult(id, value, ferr))
 		}
 	}
 	return a.resumeFutures(ctx, ids, results)
-}
-
-func hostTypeName(v any) string {
-	switch x := v.(type) {
-	case *ClassInstance:
-		return x.Name()
-	case *ClassType:
-		return "type"
-	case *ClassProxy:
-		return x.Name
-	}
-	return value.PyTypeName(v)
 }

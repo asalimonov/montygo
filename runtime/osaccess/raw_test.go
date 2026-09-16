@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/asalimonov/montygo"
-	"github.com/asalimonov/montygo/osaccess"
+	"github.com/asalimonov/montygo/runtime/osaccess"
 )
 
 type testOS struct {

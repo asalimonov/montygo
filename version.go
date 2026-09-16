@@ -4,8 +4,14 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"github.com/asalimonov/montygo/internal/buildinfo"
 	"github.com/asalimonov/montygo/internal/worker"
 )
+
+// Packages that must not import the root package read the binding version from
+// internal/buildinfo, because the release stamp targets this package's
+// buildVersion variable.
+func init() { buildinfo.Set(BindingVersion()) }
 
 // buildVersion is stamped by -ldflags "-X github.com/asalimonov/montygo.buildVersion=<version>".
 var buildVersion string

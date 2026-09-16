@@ -6,15 +6,14 @@ import (
 	"fmt"
 	"io"
 	"runtime"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/asalimonov/montygo/internal/pool"
-	"github.com/asalimonov/montygo/internal/wire"
 	"github.com/asalimonov/montygo/internal/telemetry"
 	"github.com/asalimonov/montygo/internal/wasmblob"
+	"github.com/asalimonov/montygo/internal/wire"
 	"github.com/asalimonov/montygo/internal/worker"
 )
 
@@ -249,6 +248,17 @@ func (s *poolWasmSpawner) Spawn(ctx context.Context) (worker.Worker, error) {
 	return s.SpawnWith(ctx, s.stderr, s.pending, s.observe)
 }
 
+// observe builds this pool's per-checkout telemetry observer.
+func (p *Pool) observe(parent context.Context) func(pid int, hasPID bool) pool.Observer {
+	rec, metered := p.rec, p.metered
+	return func(pid int, hasPID bool) pool.Observer {
+		if o := telemetry.NewCheckout(rec, parent, pid, hasPID, metered); o != nil {
+			return o
+		}
+		return nil
+	}
+}
+
 // Backend reports the transport the pool uses.
 func (p *Pool) Backend() Backend { return p.backend }
 
@@ -384,7 +394,7 @@ func (p *Pool) Checkout(ctx context.Context, opts CheckoutOptions) (*Session, er
 	}
 	s.attach(co, dialStart)
 	if opts.Host != nil {
-		if err := opts.Host.register(s.store); err != nil {
+		if err := opts.Host.Register(s.store); err != nil {
 			_ = s.Close(ctx, KillNow)
 			return nil, err
 		}
@@ -440,7 +450,7 @@ func (p *Pool) dial(ctx context.Context, cfg wire.Configure) (*pool.Checkout, ti
 // state, or a rotated one carrying its dump.
 func (p *Pool) bind(ctx context.Context, res *pool.Reservation, cfg wire.Configure, state []byte) (*pool.Checkout, time.Time, error) {
 	var dialStart time.Time
-	co, attempts, err := p.recovery.do(ctx, func(actx context.Context, _ ServerEndpoint) (*pool.Checkout, error) {
+	co, attempts, err := p.recovery.Do(ctx, func(actx context.Context, _ ServerEndpoint) (*pool.Checkout, error) {
 		dialStart = time.Now()
 		return p.inner.Bind(actx, res, cfg, state, pool.CheckoutOptions{Observe: p.observe(ctx)})
 	})
@@ -458,15 +468,6 @@ func (p *Pool) closeOwned(ctx context.Context) error {
 	var err error
 	p.ownedOnce.Do(func() { err = p.owned.Close(ctx) })
 	return err
-}
-
-func sortedHeaders(headers map[string]string) [][2]string {
-	pairs := make([][2]string, 0, len(headers))
-	for k, v := range headers {
-		pairs = append(pairs, [2]string{k, v})
-	}
-	sort.Slice(pairs, func(i, j int) bool { return pairs[i][0] < pairs[j][0] })
-	return pairs
 }
 
 func spawnError(err error) error {

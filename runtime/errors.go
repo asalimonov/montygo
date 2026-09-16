@@ -1,4 +1,4 @@
-package montygo
+package runtime
 
 import (
 	"errors"
@@ -59,6 +59,10 @@ type RuntimeError struct {
 }
 
 func (e *RuntimeError) Is(target error) bool { return e.lost && target == ErrSessionLost }
+
+// MarkSessionLost records that the worker died with this exception, so the
+// error also matches ErrSessionLost.
+func (e *RuntimeError) MarkSessionLost() { e.lost = true }
 
 func (e *RuntimeError) Error() string            { return typeMsg(e.TypeName, e.Message) }
 func (e *RuntimeError) Exception() ExceptionInfo { return ExceptionInfo{e.TypeName, e.Message} }
@@ -204,6 +208,11 @@ type ProtocolError struct {
 func (e *ProtocolError) Error() string        { return e.Message }
 func (e *ProtocolError) Unwrap() error        { return e.cause }
 func (e *ProtocolError) Is(target error) bool { return target == ErrSessionLost }
+
+// NewProtocolError reports a protocol violation or misuse wrapping cause.
+func NewProtocolError(message string, cause error) *ProtocolError {
+	return &ProtocolError{Message: message, cause: cause}
+}
 
 // ResourceError reports a host-side limit the sandbox reached; it raises a
 // RuntimeError inside the sandbox and leaves the session usable.
@@ -383,7 +392,7 @@ func itoa(i int) string {
 	return string(buf[pos:])
 }
 
-func errorFromException(exc *wire.Exception) error {
+func ErrorFromException(exc *wire.Exception) error {
 	if exc.ExcType == "SyntaxError" {
 		return &SyntaxError{Message: exc.MessageText(), Traceback: exc.Render()}
 	}
@@ -401,8 +410,8 @@ func errorFromException(exc *wire.Exception) error {
 	return &RuntimeError{TypeName: exc.ExcType, Message: exc.MessageText(), Frames: frames, Traceback: exc.Render()}
 }
 
-// exceptionParts maps a host error to the Python exception the sandbox raises.
-func exceptionParts(err error) (string, string) {
+// ExceptionParts maps a host error to the Python exception the sandbox raises.
+func ExceptionParts(err error) (string, string) {
 	var raised *RaisedError
 	if errors.As(err, &raised) {
 		if _, ok := knownExceptions[raised.ExcType]; ok {

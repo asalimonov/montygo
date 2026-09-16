@@ -1,4 +1,4 @@
-package montygo
+package host
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/asalimonov/montygo/internal/value"
+	pyrt "github.com/asalimonov/montygo/runtime"
 )
 
 // Kwargs are the keyword arguments of a sandbox call.
@@ -55,7 +56,7 @@ func Func(fn any) (Function, error) {
 	}
 	rv := reflect.ValueOf(fn)
 	if rv.Kind() != reflect.Func || rv.IsNil() {
-		return nil, &ValueError{Message: fmt.Sprintf("Func expects a function, got %T", fn)}
+		return nil, &pyrt.ValueError{Message: fmt.Sprintf("Func expects a function, got %T", fn)}
 	}
 	rt := rv.Type()
 	rf := &reflectFunction{fv: rv, ft: rt, name: funcName(rv)}
@@ -71,7 +72,7 @@ func Func(fn any) (Function, error) {
 	}
 	rf.positional = last - first
 	if rt.NumOut() > 2 || (rt.NumOut() == 2 && rt.Out(1) != errorType) {
-		return nil, &ValueError{Message: fmt.Sprintf("%s: results must be (T), (error) or (T, error)", rf.name)}
+		return nil, &pyrt.ValueError{Message: fmt.Sprintf("%s: results must be (T), (error) or (T, error)", rf.name)}
 	}
 	return rf, nil
 }
@@ -110,7 +111,7 @@ func funcName(rv reflect.Value) string {
 }
 
 func typeErr(format string, args ...any) error {
-	return &RaisedError{ExcType: "TypeError", Message: fmt.Sprintf(format, args...)}
+	return &pyrt.RaisedError{ExcType: "TypeError", Message: fmt.Sprintf(format, args...)}
 }
 
 func (r *reflectFunction) Call(ctx context.Context, args []any, kwargs Kwargs) (any, error) {

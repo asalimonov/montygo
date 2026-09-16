@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"unicode/utf8"
 
-	"github.com/asalimonov/montygo"
+	pyrt "github.com/asalimonov/montygo/runtime"
 )
 
 // File is a file registered with OSAccess. ReadContent returns a string or []byte.
 type File interface {
-	Path() montygo.Path
-	SetPath(montygo.Path)
+	Path() pyrt.Path
+	SetPath(pyrt.Path)
 	Name() string
 	Permissions() int64
 	Deleted() bool
@@ -21,7 +21,7 @@ type File interface {
 
 // MemoryFile is a file whose content lives in memory.
 type MemoryFile struct {
-	path        montygo.Path
+	path        pyrt.Path
 	name        string
 	content     any
 	permissions int64
@@ -31,11 +31,11 @@ type MemoryFile struct {
 // NewMemoryFile creates an in-memory file; permissions default to 0o644.
 func NewMemoryFile(path string, content any, permissions ...int64) *MemoryFile {
 	p := parsePath(path)
-	return &MemoryFile{path: montygo.Path(p.String()), name: p.name(), content: cloneContent(content), permissions: perms(permissions)}
+	return &MemoryFile{path: pyrt.Path(p.String()), name: p.name(), content: cloneContent(content), permissions: perms(permissions)}
 }
 
-func (f *MemoryFile) Path() montygo.Path        { return f.path }
-func (f *MemoryFile) SetPath(p montygo.Path)    { f.path = p }
+func (f *MemoryFile) Path() pyrt.Path           { return f.path }
+func (f *MemoryFile) SetPath(p pyrt.Path)       { f.path = p }
 func (f *MemoryFile) Name() string              { return f.name }
 func (f *MemoryFile) Permissions() int64        { return f.permissions }
 func (f *MemoryFile) Deleted() bool             { return f.deleted }
@@ -57,22 +57,22 @@ func (f *MemoryFile) String() string {
 
 // CallbackFile delegates reads and writes to host callbacks, which run with full host access.
 type CallbackFile struct {
-	path        montygo.Path
+	path        pyrt.Path
 	name        string
-	read        func(montygo.Path) (any, error)
-	write       func(montygo.Path, any) error
+	read        func(pyrt.Path) (any, error)
+	write       func(pyrt.Path, any) error
 	permissions int64
 	deleted     bool
 }
 
 // NewCallbackFile creates a callback-backed file; permissions default to 0o644.
-func NewCallbackFile(path string, read func(montygo.Path) (any, error), write func(montygo.Path, any) error, permissions ...int64) *CallbackFile {
+func NewCallbackFile(path string, read func(pyrt.Path) (any, error), write func(pyrt.Path, any) error, permissions ...int64) *CallbackFile {
 	p := parsePath(path)
-	return &CallbackFile{path: montygo.Path(p.String()), name: p.name(), read: read, write: write, permissions: perms(permissions)}
+	return &CallbackFile{path: pyrt.Path(p.String()), name: p.name(), read: read, write: write, permissions: perms(permissions)}
 }
 
-func (f *CallbackFile) Path() montygo.Path             { return f.path }
-func (f *CallbackFile) SetPath(p montygo.Path)         { f.path = p }
+func (f *CallbackFile) Path() pyrt.Path                { return f.path }
+func (f *CallbackFile) SetPath(p pyrt.Path)            { f.path = p }
 func (f *CallbackFile) Name() string                   { return f.name }
 func (f *CallbackFile) Permissions() int64             { return f.permissions }
 func (f *CallbackFile) Deleted() bool                  { return f.deleted }
@@ -129,7 +129,7 @@ func contentSize(c any) (int64, error) {
 }
 
 func contentTypeError(c any) error {
-	return montygo.Raise("TypeError", fmt.Sprintf("file content must be str or bytes, got %T", c))
+	return pyrt.Raise("TypeError", fmt.Sprintf("file content must be str or bytes, got %T", c))
 }
 
 func decodeUTF8(b []byte) (string, error) {
@@ -147,7 +147,7 @@ func decodeUTF8(b []byte) (string, error) {
 					reason = "unexpected end of data"
 				}
 			}
-			return "", montygo.Raise("UnicodeDecodeError", fmt.Sprintf("'utf-8' codec can't decode byte 0x%02x in position %d: %s", c, i, reason))
+			return "", pyrt.Raise("UnicodeDecodeError", fmt.Sprintf("'utf-8' codec can't decode byte 0x%02x in position %d: %s", c, i, reason))
 		}
 		i += size
 	}

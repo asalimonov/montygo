@@ -9,30 +9,6 @@ import (
 	"github.com/asalimonov/montygo/internal/wire"
 )
 
-// StopPolicy says how an execution is ended. Zero fields inherit from the
-// level above: call, then CheckoutOptions.Stop, Options.Stop and DefaultStopPolicy.
-type StopPolicy struct {
-	// Drain waits this long for the run to end on its own before the request.
-	Drain time.Duration
-	// Timeout runs from the request until the worker is killed when the run
-	// has not ended. A negative value kills at once (see KillNow).
-	Timeout time.Duration
-	// Join bounds, after a kill, the wait for a host callback that ignores
-	// its context.
-	Join time.Duration
-	// Reason is raised in the sandbox; nil means KeyboardInterrupt.
-	Reason error
-	// Catchable delivers Reason as an ordinary exception at the next host
-	// call or await instead of AbortFeed, so Python can catch it.
-	Catchable bool
-}
-
-// DefaultStopPolicy is the process-wide default. Set it before creating pools.
-var DefaultStopPolicy = StopPolicy{Timeout: 3 * time.Second, Join: 3 * time.Second}
-
-// KillNow ends an execution without a request phase.
-var KillNow = StopPolicy{Timeout: -1}
-
 // StopKind classifies how a stop ended.
 type StopKind uint8
 
@@ -74,51 +50,9 @@ func (s Stopped) SessionKept() bool { return s.SessionErr == nil }
 var ErrCallbackDetached = errors.New("montygo: host callback still running after kill")
 
 var (
-	keyboardInterrupt       = Raise("KeyboardInterrupt", "")
 	errExecutionInterrupted = errors.New("execution interruption requested")
 	errDeliverStop          = errors.New("stop reason to deliver")
 )
-
-func (p StopPolicy) over(base StopPolicy) StopPolicy {
-	out := base
-	if p.Drain != 0 {
-		out.Drain = p.Drain
-	}
-	if p.Timeout != 0 {
-		out.Timeout = p.Timeout
-	}
-	if p.Join != 0 {
-		out.Join = p.Join
-	}
-	if p.Reason != nil {
-		out.Reason = p.Reason
-	}
-	if p.Catchable {
-		out.Catchable = true
-	}
-	return out
-}
-
-func (p StopPolicy) validate() error {
-	if p.Drain < 0 || p.Join < 0 {
-		return &OptionError{Message: "stop policy: Drain and Join must be non-negative"}
-	}
-	return nil
-}
-
-func effectivePolicy(base StopPolicy, policy []StopPolicy) (StopPolicy, error) {
-	if len(policy) > 1 {
-		return StopPolicy{}, &OptionError{Message: "at most one stop policy"}
-	}
-	out := base
-	if len(policy) == 1 {
-		out = policy[0].over(base)
-	}
-	if out.Reason == nil {
-		out.Reason = keyboardInterrupt
-	}
-	return out, out.validate()
-}
 
 // stopRequest is the one stop of an execution; later callers can only shorten it.
 type stopRequest struct {
@@ -436,7 +370,7 @@ func (s *Session) abortExecution(ctx context.Context, e *execution, pt *printTar
 	}
 	err = s.mapError(err)
 	if s.Err() == nil {
-		err = &ProtocolError{Message: "failed to abort suspended feed: " + err.Error(), cause: err}
+		err = newProtocolError("failed to abort suspended feed: "+err.Error(), err)
 	}
 	err = s.terminateSession(err)
 	s.life.mu.Lock()

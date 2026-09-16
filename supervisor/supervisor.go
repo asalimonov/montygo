@@ -1,17 +1,29 @@
-package montygo
+package supervisor
 
 import (
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/asalimonov/montygo/internal/pool"
 	"github.com/asalimonov/montygo/internal/telemetry"
+	"github.com/asalimonov/montygo/internal/telemetryhooks"
 	"github.com/asalimonov/montygo/internal/worker"
 )
+
+// SortedHeaders orders a header map so an upgrade sends them deterministically.
+func SortedHeaders(headers map[string]string) [][2]string {
+	pairs := make([][2]string, 0, len(headers))
+	for k, v := range headers {
+		pairs = append(pairs, [2]string{k, v})
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i][0] < pairs[j][0] })
+	return pairs
+}
 
 // ErrSupervisorClosed reports a supervisor that no longer serves endpoints.
 var ErrSupervisorClosed = errors.New("montygo: server supervisor closed")
@@ -70,22 +82,22 @@ type OrphanReaper interface {
 	Reap(ctx context.Context) error
 }
 
-type noopReaper struct{}
+type NoopReaper struct{}
 
-func (noopReaper) Reap(context.Context) error {
+func (NoopReaper) Reap(context.Context) error {
 	// TODO: NotImplemented: list containers labelled io.montygo.supervisor, skip
 	// those whose io.montygo.pid is still alive on this host, remove the rest.
 	return nil
 }
 
-// staticSupervisor serves a pool configured with a fixed URL.
-type staticSupervisor struct {
+// Static serves a pool configured with a fixed URL.
+type Static struct {
 	url     string
 	tls     *tls.Config
 	headers func(ctx context.Context) (map[string]string, error)
 }
 
-func (s staticSupervisor) Endpoint(ctx context.Context) (ServerEndpoint, error) {
+func (s Static) Endpoint(ctx context.Context) (ServerEndpoint, error) {
 	ep := ServerEndpoint{URL: s.url, TLSConfig: s.tls}
 	if s.headers == nil {
 		return ep, nil
@@ -98,13 +110,13 @@ func (s staticSupervisor) Endpoint(ctx context.Context) (ServerEndpoint, error) 
 	return ep, nil
 }
 
-func (staticSupervisor) Restart(context.Context, ServerEndpoint) error {
+func (Static) Restart(context.Context, ServerEndpoint) error {
 	return errors.New("montygo: this pool has no server supervisor that can restart")
 }
 
-// recoverer runs one supervised dial: attempts against the current endpoint,
+// Recoverer runs one supervised dial: attempts against the current endpoint,
 // then at most one server restart, then the same attempts again.
-type recoverer struct {
+type Recoverer struct {
 	sup      ServerSupervisor
 	policy   RecoveryPolicy
 	rec      *telemetry.Recorder
@@ -118,14 +130,14 @@ type restartFlight struct {
 	completed time.Time
 }
 
-func newRecoverer(sup ServerSupervisor, policy RecoveryPolicy, rec *telemetry.Recorder) *recoverer {
-	return &recoverer{sup: sup, policy: policy, rec: rec, restarts: map[string]*restartFlight{}}
+func NewRecoverer(sup ServerSupervisor, policy RecoveryPolicy, rec *telemetry.Recorder) *Recoverer {
+	return &Recoverer{sup: sup, policy: policy, rec: rec, restarts: map[string]*restartFlight{}}
 }
 
 type bindFunc func(ctx context.Context, ep ServerEndpoint) (*pool.Checkout, error)
 
 // do returns the checkout, the number of attempts made, and the last failure.
-func (r *recoverer) do(ctx context.Context, bind bindFunc) (*pool.Checkout, int, error) {
+func (r *Recoverer) Do(ctx context.Context, bind bindFunc) (*pool.Checkout, int, error) {
 	var (
 		last     error
 		lastEP   ServerEndpoint
@@ -173,11 +185,11 @@ func (r *recoverer) do(ctx context.Context, bind bindFunc) (*pool.Checkout, int,
 }
 
 // withEndpoint carries the endpoint's URL, TLS config and headers to the dialer.
-func (r *recoverer) withEndpoint(ctx context.Context, ep ServerEndpoint) context.Context {
+func (r *Recoverer) withEndpoint(ctx context.Context, ep ServerEndpoint) context.Context {
 	ctx = worker.WithEndpoint(ctx, worker.Endpoint{URL: ep.URL, TLSConfig: ep.TLSConfig})
-	headers := traceContextHeaders(r.rec, ctx)
+	headers := telemetryhooks.TraceContextHeaders(r.rec, ctx)
 	if len(ep.Headers) > 0 {
-		headers = append(headers[:len(headers):len(headers)], sortedHeaders(ep.Headers)...)
+		headers = append(headers[:len(headers):len(headers)], SortedHeaders(ep.Headers)...)
 	}
 	if len(headers) > 0 {
 		ctx = pool.WithConnectHeaders(ctx, headers)
@@ -187,7 +199,7 @@ func (r *recoverer) withEndpoint(ctx context.Context, ep ServerEndpoint) context
 
 // restartOnce restarts the server behind failed at most once per incident: a
 // restart that completed after this caller's failure already covers it.
-func (r *recoverer) restartOnce(ctx context.Context, failed ServerEndpoint, failedAt time.Time) error {
+func (r *Recoverer) restartOnce(ctx context.Context, failed ServerEndpoint, failedAt time.Time) error {
 	r.mu.Lock()
 	f, ok := r.restarts[failed.URL]
 	switch {
@@ -234,4 +246,10 @@ func retryableDialError(parent context.Context, err error) bool {
 		return true
 	}
 	return false
+}
+
+// NewStatic returns a supervisor for a pool configured with a fixed URL: the
+// endpoint never moves, and Restart always fails.
+func NewStatic(url string, tlsConfig *tls.Config, headers func(ctx context.Context) (map[string]string, error)) ServerSupervisor {
+	return Static{url: url, tls: tlsConfig, headers: headers}
 }

@@ -1,8 +1,9 @@
-package montygo
+package host
 
 import (
 	"errors"
 	"fmt"
+	pyrt "github.com/asalimonov/montygo/runtime"
 	"reflect"
 	"sort"
 	"strings"
@@ -39,7 +40,7 @@ func NewHost() *Host {
 
 func validHostName(name string) error {
 	if name == "" {
-		return &ValueError{Message: "host name must not be empty"}
+		return &pyrt.ValueError{Message: "host name must not be empty"}
 	}
 	switch name {
 	case "False", "None", "True", "and", "as", "assert", "async", "await",
@@ -47,14 +48,14 @@ func validHostName(name string) error {
 		"finally", "for", "from", "global", "if", "import", "in", "is",
 		"lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try",
 		"while", "with", "yield":
-		return &ValueError{Message: fmt.Sprintf("host name %q is a Python keyword", name)}
+		return &pyrt.ValueError{Message: fmt.Sprintf("host name %q is a Python keyword", name)}
 	}
 	for i, r := range name {
 		switch {
 		case r == '_', r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
 		case r >= '0' && r <= '9' && i > 0:
 		default:
-			return &ValueError{Message: fmt.Sprintf("host name %q is not a Python identifier", name)}
+			return &pyrt.ValueError{Message: fmt.Sprintf("host name %q is not a Python identifier", name)}
 		}
 	}
 	return nil
@@ -63,7 +64,7 @@ func validHostName(name string) error {
 // Func registers fn under name; the signature is validated now.
 func (h *Host) Func(name string, fn any, opts ...HostFuncOptions) error {
 	if len(opts) > 1 {
-		return &ValueError{Message: "Host.Func accepts at most one options value"}
+		return &pyrt.ValueError{Message: "Host.Func accepts at most one options value"}
 	}
 	if err := validHostName(name); err != nil {
 		return err
@@ -83,7 +84,7 @@ func (h *Host) Func(name string, fn any, opts ...HostFuncOptions) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.taken(name) {
-		return &ValueError{Message: fmt.Sprintf("host name %q is already registered", name)}
+		return &pyrt.ValueError{Message: fmt.Sprintf("host name %q is already registered", name)}
 	}
 	h.funcs[name] = hostFunc{fn: f, sig: sig, parameterNames: append([]string(nil), names...)}
 	return nil
@@ -110,7 +111,7 @@ func (h *Host) Object(name string, v any, opts ClassInstanceOptions) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.taken(name) {
-		return &ValueError{Message: fmt.Sprintf("host name %q is already registered", name)}
+		return &pyrt.ValueError{Message: fmt.Sprintf("host name %q is already registered", name)}
 	}
 	h.objects[name] = ci
 	return nil
@@ -170,7 +171,7 @@ func (h *Host) sortedFuncs() []string {
 	return names
 }
 
-func (h *Host) lookupEntry(name string) (any, bool) {
+func (h *Host) LookupEntry(name string) (any, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if f, ok := h.funcs[name]; ok {
@@ -181,7 +182,15 @@ func (h *Host) lookupEntry(name string) (any, bool) {
 }
 
 // register puts every object into the session's store under its ID.
-func (h *Host) register(store *instanceStore) error {
+// BlockRegistration holds the host's registration lock and returns its release.
+// It is a test seam: it lets a caller stall Register deterministically while
+// another goroutine races a checkout.
+func BlockRegistration(h *Host) func() {
+	h.mu.Lock()
+	return h.mu.Unlock
+}
+
+func (h *Host) Register(store *InstanceStore) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, name := range h.sortedObjects() {
@@ -325,11 +334,11 @@ func validateParameterNames(sig reflect.Type, method bool, names []string) error
 		if len(names) == 0 {
 			return nil
 		}
-		return &ValueError{Message: "parameter names require a reflected Go function"}
+		return &pyrt.ValueError{Message: "parameter names require a reflected Go function"}
 	}
 	first, last, kwargs := paramSpan(sig, method)
 	if len(names) != last-first {
-		return &ValueError{Message: fmt.Sprintf("expected %d parameter names, got %d", last-first, len(names))}
+		return &pyrt.ValueError{Message: fmt.Sprintf("expected %d parameter names, got %d", last-first, len(names))}
 	}
 	seen := make(map[string]bool, len(names))
 	for _, name := range names {
@@ -337,7 +346,7 @@ func validateParameterNames(sig reflect.Type, method bool, names []string) error
 			return fmt.Errorf("parameter name: %w", err)
 		}
 		if seen[name] || (kwargs && name == "kwargs") {
-			return &ValueError{Message: fmt.Sprintf("duplicate parameter name %q", name)}
+			return &pyrt.ValueError{Message: fmt.Sprintf("duplicate parameter name %q", name)}
 		}
 		seen[name] = true
 	}

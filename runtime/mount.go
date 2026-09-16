@@ -1,4 +1,4 @@
-package montygo
+package runtime
 
 import (
 	"context"
@@ -89,7 +89,7 @@ func (m mountTable) HandleOsCall(ctx context.Context, call *wire.OsCall) (bool, 
 	return out.Handled, out.Value, out.Exception
 }
 
-func buildMounts(mounts []*MountDir) (pool.MountTable, string, error) {
+func BuildMounts(mounts []*MountDir) (pool.MountTable, string, error) {
 	if len(mounts) == 0 {
 		return nil, "", nil
 	}

@@ -1,4 +1,4 @@
-package montygo
+package supervisor
 
 import (
 	"context"
@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/asalimonov/montygo/internal/pool"
+	"github.com/asalimonov/montygo/internal/telemetryhooks"
+	pyrt "github.com/asalimonov/montygo/runtime"
 )
 
 // fakeSupervisor counts endpoint and restart calls and renames its endpoint on
@@ -67,9 +69,9 @@ func fastPolicy(restart bool) RecoveryPolicy {
 
 func TestRecovererRetriesUntilAttemptsAreSpent(t *testing.T) {
 	sup := &fakeSupervisor{}
-	r := newRecoverer(sup, fastPolicy(false), resolveRecorder(nil))
+	r := NewRecoverer(sup, fastPolicy(false), telemetryhooks.ResolveRecorder(nil))
 	var calls atomic.Int32
-	_, attempts, err := r.do(context.Background(), func(context.Context, ServerEndpoint) (*pool.Checkout, error) {
+	_, attempts, err := r.Do(context.Background(), func(context.Context, ServerEndpoint) (*pool.Checkout, error) {
 		calls.Add(1)
 		return nil, spawnFailure()
 	})
@@ -81,9 +83,9 @@ func TestRecovererRetriesUntilAttemptsAreSpent(t *testing.T) {
 }
 
 func TestRecovererSucceedsOnALaterAttempt(t *testing.T) {
-	r := newRecoverer(&fakeSupervisor{}, fastPolicy(false), resolveRecorder(nil))
+	r := NewRecoverer(&fakeSupervisor{}, fastPolicy(false), telemetryhooks.ResolveRecorder(nil))
 	var calls atomic.Int32
-	_, attempts, err := r.do(context.Background(), func(context.Context, ServerEndpoint) (*pool.Checkout, error) {
+	_, attempts, err := r.Do(context.Background(), func(context.Context, ServerEndpoint) (*pool.Checkout, error) {
 		if calls.Add(1) < 3 {
 			return nil, spawnFailure()
 		}
@@ -94,9 +96,9 @@ func TestRecovererSucceedsOnALaterAttempt(t *testing.T) {
 }
 
 func TestRecovererStopsAtANonRetryableError(t *testing.T) {
-	r := newRecoverer(&fakeSupervisor{}, fastPolicy(true), resolveRecorder(nil))
-	stop := &OptionError{Message: "bad option"}
-	_, attempts, err := r.do(context.Background(), func(context.Context, ServerEndpoint) (*pool.Checkout, error) {
+	r := NewRecoverer(&fakeSupervisor{}, fastPolicy(true), telemetryhooks.ResolveRecorder(nil))
+	stop := &pyrt.OptionError{Message: "bad option"}
+	_, attempts, err := r.Do(context.Background(), func(context.Context, ServerEndpoint) (*pool.Checkout, error) {
 		return nil, stop
 	})
 	require.ErrorIs(t, err, error(stop))
@@ -105,9 +107,9 @@ func TestRecovererStopsAtANonRetryableError(t *testing.T) {
 
 func TestRecovererRestartsOnceThenRetries(t *testing.T) {
 	sup := &fakeSupervisor{}
-	r := newRecoverer(sup, fastPolicy(true), resolveRecorder(nil))
+	r := NewRecoverer(sup, fastPolicy(true), telemetryhooks.ResolveRecorder(nil))
 	var seen []string
-	_, attempts, err := r.do(context.Background(), func(_ context.Context, ep ServerEndpoint) (*pool.Checkout, error) {
+	_, attempts, err := r.Do(context.Background(), func(_ context.Context, ep ServerEndpoint) (*pool.Checkout, error) {
 		seen = append(seen, ep.URL)
 		return nil, spawnFailure()
 	})
@@ -120,8 +122,8 @@ func TestRecovererRestartsOnceThenRetries(t *testing.T) {
 
 func TestRecovererReportsAFailedRestart(t *testing.T) {
 	sup := &fakeSupervisor{restartErr: errors.New("daemon refused")}
-	r := newRecoverer(sup, fastPolicy(true), resolveRecorder(nil))
-	_, attempts, err := r.do(context.Background(), func(context.Context, ServerEndpoint) (*pool.Checkout, error) {
+	r := NewRecoverer(sup, fastPolicy(true), telemetryhooks.ResolveRecorder(nil))
+	_, attempts, err := r.Do(context.Background(), func(context.Context, ServerEndpoint) (*pool.Checkout, error) {
 		return nil, spawnFailure()
 	})
 	require.ErrorContains(t, err, "restart server")
@@ -132,7 +134,7 @@ func TestRecovererReportsAFailedRestart(t *testing.T) {
 func TestRecovererRestartsOncePerIncident(t *testing.T) {
 	release := make(chan struct{})
 	sup := &fakeSupervisor{restartHook: func() { <-release }}
-	r := newRecoverer(sup, fastPolicy(true), resolveRecorder(nil))
+	r := NewRecoverer(sup, fastPolicy(true), telemetryhooks.ResolveRecorder(nil))
 	failed := ServerEndpoint{URL: "ws://127.0.0.1:a/"}
 	failedAt := time.Now()
 
@@ -166,8 +168,8 @@ func TestRecovererRestartsOncePerIncident(t *testing.T) {
 
 func TestRecovererCountsAnEndpointErrorAsAnAttempt(t *testing.T) {
 	sup := &fakeSupervisor{endpointErr: errors.New("no endpoint")}
-	r := newRecoverer(sup, fastPolicy(false), resolveRecorder(nil))
-	_, attempts, err := r.do(context.Background(), func(context.Context, ServerEndpoint) (*pool.Checkout, error) {
+	r := NewRecoverer(sup, fastPolicy(false), telemetryhooks.ResolveRecorder(nil))
+	_, attempts, err := r.Do(context.Background(), func(context.Context, ServerEndpoint) (*pool.Checkout, error) {
 		t.Fatal("bind must not run without an endpoint")
 		return nil, nil
 	})
@@ -176,9 +178,9 @@ func TestRecovererCountsAnEndpointErrorAsAnAttempt(t *testing.T) {
 }
 
 func TestRecovererStopsWhenTheCallerContextEnds(t *testing.T) {
-	r := newRecoverer(&fakeSupervisor{}, fastPolicy(true), resolveRecorder(nil))
+	r := NewRecoverer(&fakeSupervisor{}, fastPolicy(true), telemetryhooks.ResolveRecorder(nil))
 	ctx, cancel := context.WithCancel(context.Background())
-	_, _, err := r.do(ctx, func(context.Context, ServerEndpoint) (*pool.Checkout, error) {
+	_, _, err := r.Do(ctx, func(context.Context, ServerEndpoint) (*pool.Checkout, error) {
 		cancel()
 		return nil, spawnFailure()
 	})

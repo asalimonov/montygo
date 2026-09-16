@@ -1,10 +1,18 @@
-package montygo
+package host
 
 import (
 	"context"
 	"fmt"
 	"sync"
 )
+
+// panicError turns a recovered panic value into the error a host call reports.
+func panicError(r any) error {
+	if err, ok := r.(error); ok {
+		return err
+	}
+	return fmt.Errorf("%v", r)
+}
 
 // Future is the asynchronous result of a host call: returning one from a host
 // function lets other sandbox tasks run while it settles.
@@ -14,6 +22,10 @@ type Future struct {
 	value any
 	err   error
 }
+
+// Result returns a settled future's value and error. It does not wait: callers
+// that collect settled futures check IsSettled first.
+func (f *Future) Result() (any, error) { return f.value, f.err }
 
 // NewFuture returns an unsettled future and the function that settles it.
 func NewFuture() (*Future, func(value any, err error)) {
@@ -61,7 +73,7 @@ func (f *Future) Wait(ctx context.Context) (any, error) {
 	}
 }
 
-func (f *Future) settled() bool {
+func (f *Future) IsSettled() bool {
 	select {
 	case <-f.done:
 		return true

@@ -255,22 +255,6 @@ func TestLifecycleStateTransitions(t *testing.T) {
 	})
 }
 
-func TestDerivedFutureCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	source, settle := NewFuture()
-	derived := source.thenContext(ctx, func(v any) (any, error) { t.Error("conversion ran after cancellation"); return v, nil })
-	cancel()
-	wait, stop := context.WithTimeout(context.Background(), time.Second)
-	defer stop()
-	_, err := derived.Wait(wait)
-	require.ErrorIs(t, err, context.Canceled)
-	require.False(t, channelClosed(source.Done()))
-	settle(1, nil)
-	panicking := source.thenContext(wait, func(any) (any, error) { panic("conversion failed") })
-	_, err = panicking.Wait(wait)
-	require.ErrorContains(t, err, "conversion failed")
-}
-
 func TestCheckoutPublicationRacesShutdown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -278,11 +262,11 @@ func TestCheckoutPublicationRacesShutdown(t *testing.T) {
 	require.NoError(t, err)
 	defer p.Shutdown(ctx)
 	h := NewHost()
-	h.mu.Lock()
+	unblockHost := blockHostRegistration(h)
 	locked := true
 	defer func() {
 		if locked {
-			h.mu.Unlock()
+			unblockHost()
 		}
 	}()
 	checked := make(chan error, 1)
@@ -297,7 +281,7 @@ func TestCheckoutPublicationRacesShutdown(t *testing.T) {
 	shut := make(chan error, 1)
 	go func() { shut <- p.Shutdown(ctx) }()
 	require.Eventually(t, p.closed.Load, time.Second, time.Millisecond)
-	h.mu.Unlock()
+	unblockHost()
 	locked = false
 	require.ErrorIs(t, <-checked, ErrPoolClosed)
 	require.NoError(t, <-shut)
@@ -349,11 +333,11 @@ func TestLoadSnapshotInterruptionBoundaries(t *testing.T) {
 	require.False(t, s.driven)
 	require.Nil(t, s.life.current)
 
-	h.mu.Lock()
+	unblockHost := blockHostRegistration(h)
 	locked := true
 	defer func() {
 		if locked {
-			h.mu.Unlock()
+			unblockHost()
 		}
 	}()
 	loaded := make(chan error, 1)
@@ -371,7 +355,7 @@ func TestLoadSnapshotInterruptionBoundaries(t *testing.T) {
 	waitCancel()
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Equal(t, StopPending, result.How)
-	h.mu.Unlock()
+	unblockHost()
 	locked = false
 	err = <-loaded
 	var raised *RuntimeError

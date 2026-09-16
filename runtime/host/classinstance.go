@@ -1,10 +1,11 @@
-package montygo
+package host
 
 import (
 	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"regexp"
 	"sort"
@@ -13,7 +14,25 @@ import (
 	"unicode"
 
 	"github.com/asalimonov/montygo/internal/value"
+	pyrt "github.com/asalimonov/montygo/runtime"
 )
+
+// unlimitedObjects is the instance store's disabled limit. CheckoutOptions
+// passes montygo.Unlimited, which has the same value.
+const unlimitedObjects = uint64(math.MaxUint64)
+
+// TypeName is the sandbox-visible type name of a host value.
+func TypeName(v any) string {
+	switch x := v.(type) {
+	case *ClassInstance:
+		return x.Name()
+	case *ClassType:
+		return "type"
+	case *ClassProxy:
+		return x.Name
+	}
+	return value.PyTypeName(v)
+}
 
 // AttrPolicy says which names a wrapper exposes. The zero value exposes none.
 type AttrPolicy struct {
@@ -80,10 +99,10 @@ type MethodProvider interface {
 // ErrAttrNotExposed is returned by providers for an absent attribute or method.
 var ErrAttrNotExposed = errors.New("attribute not exposed")
 
-type attrError struct{ msg string }
+type AttrError struct{ msg string }
 
-func (e *attrError) Error() string        { return e.msg }
-func (e *attrError) Is(target error) bool { return target == ErrAttrNotExposed }
+func (e *AttrError) Error() string        { return e.msg }
+func (e *AttrError) Is(target error) bool { return target == ErrAttrNotExposed }
 
 // ClassInstanceOptions configure a ClassInstance.
 type ClassInstanceOptions struct {
@@ -124,7 +143,7 @@ func newUUID() string {
 
 func normalizeID(kind, id string) (string, error) {
 	if !uuidPattern.MatchString(id) {
-		return "", &ValueError{Message: fmt.Sprintf("%s id must be a canonical uuid string, got %q", kind, id)}
+		return "", &pyrt.ValueError{Message: fmt.Sprintf("%s id must be a canonical uuid string, got %q", kind, id)}
 	}
 	return strings.ToLower(id), nil
 }
@@ -140,7 +159,7 @@ func classOf(instance any) reflect.Type {
 // NewClassInstance wraps a host object.
 func NewClassInstance(instance any, opts ClassInstanceOptions) (*ClassInstance, error) {
 	if instance == nil {
-		return nil, &ValueError{Message: "ClassInstance expects an object instance"}
+		return nil, &pyrt.ValueError{Message: "ClassInstance expects an object instance"}
 	}
 	c := &ClassInstance{instance: instance, opts: opts}
 	c.opts.ParameterNames = copyParameterNames(opts.ParameterNames)
@@ -156,10 +175,10 @@ func NewClassInstance(instance any, opts ClassInstanceOptions) (*ClassInstance, 
 	goType := classOf(instance)
 	if opts.ClassType != nil {
 		if opts.ClassType.goType != goType {
-			return nil, &ValueError{Message: "classType does not match the instance's class"}
+			return nil, &pyrt.ValueError{Message: "classType does not match the instance's class"}
 		}
 		if opts.Name != "" {
-			return nil, &ValueError{Message: "pass name on the ClassType wrapper, not alongside classType"}
+			return nil, &pyrt.ValueError{Message: "pass name on the ClassType wrapper, not alongside classType"}
 		}
 		c.classType = opts.ClassType
 	} else {
@@ -186,7 +205,7 @@ func (c *ClassInstance) validateParameterNames() error {
 	for _, name := range sortedKeys(c.opts.ParameterNames) {
 		sig, ok := sigs[name]
 		if !ok {
-			return &ValueError{Message: fmt.Sprintf("parameter names: unknown method %q", name)}
+			return &pyrt.ValueError{Message: fmt.Sprintf("parameter names: unknown method %q", name)}
 		}
 		if err := validateMethodParameterNames(name, sig, true, c.opts.ParameterNames[name]); err != nil {
 			return err
@@ -237,7 +256,7 @@ func (c *ClassInstance) wrapperName() string { return c.Name() }
 func (c *ClassInstance) identity() any       { return c.instance }
 
 func (c *ClassInstance) attrErr(name string) error {
-	return &attrError{msg: fmt.Sprintf("'%s' object has no attribute '%s'", c.Name(), name)}
+	return &AttrError{msg: fmt.Sprintf("'%s' object has no attribute '%s'", c.Name(), name)}
 }
 
 func (c *ClassInstance) convert(name string, v any) (any, error) {
@@ -343,7 +362,7 @@ func (c *ClassInstance) callMethod(ctx context.Context, name string, args []any,
 	}
 	if fut, ok := result.(*Future); ok {
 		if fut == nil {
-			return nil, &ValueError{Message: "host returned a nil Future"}
+			return nil, &pyrt.ValueError{Message: "host returned a nil Future"}
 		}
 		return fut.thenContext(ctx, func(v any) (any, error) { return c.convert(name, v) }), nil
 	}
@@ -416,7 +435,7 @@ func MustClassType[T any](opts ClassTypeOptions) *ClassType {
 
 func newClassType(t reflect.Type, opts ClassTypeOptions) (*ClassType, error) {
 	if t == nil {
-		return nil, &ValueError{Message: "ClassType expects a class (constructor function)"}
+		return nil, &pyrt.ValueError{Message: "ClassType expects a class (constructor function)"}
 	}
 	c := &ClassType{goType: t, opts: opts}
 	c.opts.ParameterNames = copyParameterNames(opts.ParameterNames)
@@ -449,7 +468,7 @@ func (c *ClassType) validateParameterNames() error {
 		sig, isMethod := sigs[name]
 		static, isStatic := c.staticMethod(name)
 		if !isMethod && !isStatic {
-			return &ValueError{Message: fmt.Sprintf("parameter names: unknown method %q", name)}
+			return &pyrt.ValueError{Message: fmt.Sprintf("parameter names: unknown method %q", name)}
 		}
 		if isMethod {
 			if err := validateMethodParameterNames(name, sig, true, names); err != nil {
@@ -496,7 +515,7 @@ func (c *ClassType) wrapperName() string { return c.Name() }
 func (c *ClassType) identity() any       { return c.goType }
 
 func (c *ClassType) attrErr(name string) error {
-	return &attrError{msg: fmt.Sprintf("type object '%s' has no attribute '%s'", c.Name(), name)}
+	return &AttrError{msg: fmt.Sprintf("type object '%s' has no attribute '%s'", c.Name(), name)}
 }
 
 func (c *ClassType) convert(name string, v any) (any, error) {
@@ -561,7 +580,7 @@ func (c *ClassType) callMethod(ctx context.Context, name string, args []any, kwa
 	}
 	fn, err := Func(entry)
 	if err != nil {
-		return nil, typeErr("'%s' object is not callable", hostTypeName(entry))
+		return nil, typeErr("'%s' object is not callable", TypeName(entry))
 	}
 	result, err := fn.Call(ctx, args, kwargs)
 	if err != nil {
@@ -569,7 +588,7 @@ func (c *ClassType) callMethod(ctx context.Context, name string, args []any, kwa
 	}
 	if fut, ok := result.(*Future); ok {
 		if fut == nil {
-			return nil, &ValueError{Message: "host returned a nil Future"}
+			return nil, &pyrt.ValueError{Message: "host returned a nil Future"}
 		}
 		return fut.thenContext(ctx, func(v any) (any, error) { return c.convert(name, v) }), nil
 	}
@@ -658,7 +677,7 @@ type ClassProxy struct {
 	Name        string
 	ID          string
 	IsDataclass bool
-	Attributes  *Dict
+	Attributes  *pyrt.Dict
 	typ         value.Type
 }
 
@@ -666,7 +685,7 @@ func (p *ClassProxy) String() string {
 	return fmt.Sprintf("MontyClassProxy(name=%s, id=%s, attributes=%s)", value.StringRepr(p.Name), value.StringRepr(p.ID), value.Repr(p.Attributes))
 }
 
-type wrapper interface {
+type Wrapper interface {
 	wrapperID() string
 	wrapperName() string
 	identity() any
@@ -675,18 +694,35 @@ type wrapper interface {
 	callMethod(ctx context.Context, name string, args []any, kwargs Kwargs) (any, error)
 }
 
-type instanceStore struct {
+// CallWrapperMethod calls an exposed method of a stored wrapper. It is a
+// function rather than an exported interface method, so wrappers do not
+// accidentally satisfy MethodProvider.
+func CallWrapperMethod(ctx context.Context, w Wrapper, name string, args []any, kwargs Kwargs) (any, error) {
+	return w.callMethod(ctx, name, args, kwargs)
+}
+
+// WrapperLazyAttr reads a lazily exposed attribute of a stored wrapper.
+func WrapperLazyAttr(w Wrapper, name string) (any, error) {
+	return w.lazyAttr(name)
+}
+
+// WrapperName is the sandbox-visible name of a stored wrapper.
+func WrapperName(w Wrapper) string {
+	return w.wrapperName()
+}
+
+type InstanceStore struct {
 	mu    sync.Mutex
-	m     map[string]wrapper
+	m     map[string]Wrapper
 	limit uint64
 	peak  int
 }
 
-func newInstanceStore(limit uint64) *instanceStore {
-	return &instanceStore{m: map[string]wrapper{}, limit: limit}
+func NewInstanceStore(limit uint64) *InstanceStore {
+	return &InstanceStore{m: map[string]Wrapper{}, limit: limit}
 }
 
-func (s *instanceStore) stats() (count, peak int) {
+func (s *InstanceStore) Stats() (count, peak int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.m), s.peak
@@ -711,12 +747,12 @@ func sameObject(a, b any) bool {
 	return reflect.DeepEqual(a, b)
 }
 
-func (s *instanceStore) put(w wrapper, onlyIfAbsent bool) error {
+func (s *InstanceStore) put(w Wrapper, onlyIfAbsent bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing, ok := s.m[w.wrapperID()]; ok {
 		if !sameObject(existing.identity(), w.identity()) {
-			return &ConversionError{Message: fmt.Sprintf("wrapper id '%s' already identifies a different object in this session", w.wrapperID())}
+			return &pyrt.ConversionError{Message: fmt.Sprintf("wrapper id '%s' already identifies a different object in this session", w.wrapperID())}
 		}
 		if onlyIfAbsent {
 			return nil
@@ -724,8 +760,8 @@ func (s *instanceStore) put(w wrapper, onlyIfAbsent bool) error {
 		s.m[w.wrapperID()] = w
 		return nil
 	}
-	if s.limit != Unlimited && uint64(len(s.m)) >= s.limit {
-		return &ResourceError{Resource: "host object", Limit: s.limit}
+	if s.limit != unlimitedObjects && uint64(len(s.m)) >= s.limit {
+		return &pyrt.ResourceError{Resource: "host object", Limit: s.limit}
 	}
 	s.m[w.wrapperID()] = w
 	if len(s.m) > s.peak {
@@ -734,7 +770,7 @@ func (s *instanceStore) put(w wrapper, onlyIfAbsent bool) error {
 	return nil
 }
 
-func (s *instanceStore) get(id string) (wrapper, bool) {
+func (s *InstanceStore) Get(id string) (Wrapper, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	w, ok := s.m[id]

@@ -74,7 +74,7 @@ type SessionStats struct {
 
 // Stats reports the session's host-side counters.
 func (s *Session) Stats() SessionStats {
-	count, peak := s.store.stats()
+	count, peak := s.store.Stats()
 	return SessionStats{HostObjects: count, PeakHostObjects: peak, PendingFutures: s.pendingCount()}
 }
 
@@ -139,7 +139,7 @@ func (s *Session) mapError(err error) error {
 		result := errorFromException(perr.Exception)
 		if perr.WorkerLost {
 			if re, ok := result.(*RuntimeError); ok {
-				re.lost = true
+				re.MarkSessionLost()
 			}
 			return s.poison(result)
 		}
@@ -156,9 +156,9 @@ func (s *Session) mapError(err error) error {
 		return s.poison(&ShutdownError{Message: perr.Error(), Dump: perr.Dump})
 	case pool.KindCancelled:
 		if perr.Cause != nil {
-			return s.poison(&ProtocolError{Message: perr.Error(), cause: errors.Join(ErrTurnCancelled, perr.Cause)})
+			return s.poison(newProtocolError(perr.Error(), errors.Join(ErrTurnCancelled, perr.Cause)))
 		}
-		return s.poison(&ProtocolError{Message: perr.Error(), cause: ErrTurnCancelled})
+		return s.poison(newProtocolError(perr.Error(), ErrTurnCancelled))
 	}
 	return s.poison(&ProtocolError{Message: perr.Error()})
 }

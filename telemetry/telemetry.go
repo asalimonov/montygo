@@ -1,4 +1,4 @@
-package montygo
+package telemetry
 
 import (
 	"context"
@@ -11,17 +11,19 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/asalimonov/montygo/internal/telemetry"
+	"github.com/asalimonov/montygo/internal/buildinfo"
+	itel "github.com/asalimonov/montygo/internal/telemetry"
+	pyrt "github.com/asalimonov/montygo/runtime"
 )
 
 const instrumentationName = "github.com/asalimonov/montygo"
 
 var errNoTelemetryComponents = errors.New("at least one OpenTelemetry component is required")
 
-// TelemetryComponents are the OpenTelemetry components Monty records into.
+// Components are the OpenTelemetry components Monty records into.
 // Installing them opts in to recording fed code, inputs, call arguments,
 // results, exceptions and print output.
-type TelemetryComponents struct {
+type Components struct {
 	Tracer trace.Tracer
 	Meter  metric.Meter
 	Logger log.Logger
@@ -34,16 +36,16 @@ var (
 
 // Instrument installs components process-wide; pools created afterwards
 // record into them. Each signal is optional.
-func Instrument(c TelemetryComponents) error {
+func Instrument(c Components) error {
 	teleMu.Lock()
 	defer teleMu.Unlock()
-	if telemetry.Installed() {
-		return ErrTelemetryPresent
+	if itel.Installed() {
+		return pyrt.ErrTelemetryPresent
 	}
 	if c.Tracer == nil && c.Meter == nil && c.Logger == nil {
 		return errNoTelemetryComponents
 	}
-	telemetry.Install(teleDirectOwner, telemetry.Components(c), false)
+	itel.Install(teleDirectOwner, itel.Components(c), false)
 	return nil
 }
 
@@ -99,7 +101,7 @@ func NewInstrumentation(cfg InstrumentationConfig) (*Instrumentation, error) {
 func (i *Instrumentation) Name() string { return instrumentationName }
 
 // Version is the instrumentation scope version.
-func (i *Instrumentation) Version() string { return BindingVersion() }
+func (i *Instrumentation) Version() string { return buildinfo.Version() }
 
 // Enable installs the instrumentation; it fails when other telemetry is installed.
 func (i *Instrumentation) Enable() error {
@@ -120,7 +122,7 @@ func (i *Instrumentation) Disable() {
 	i.active = false
 	teleMu.Lock()
 	defer teleMu.Unlock()
-	telemetry.Uninstall(i)
+	itel.Uninstall(i)
 }
 
 // SetTracerProvider replaces the tracer provider; nil records no spans.
@@ -198,8 +200,8 @@ func (i *Instrumentation) refreshLocked() error {
 	if !i.active {
 		return nil
 	}
-	var c telemetry.Components
-	version := BindingVersion()
+	var c itel.Components
+	version := buildinfo.Version()
 	if teleOn(i.cfg.Traces) && i.tracerProvider != nil {
 		c.Tracer = i.tracerProvider.Tracer(instrumentationName, trace.WithInstrumentationVersion(version))
 	}
@@ -211,8 +213,8 @@ func (i *Instrumentation) refreshLocked() error {
 	}
 	teleMu.Lock()
 	defer teleMu.Unlock()
-	if !telemetry.Install(i, c, true) {
-		return ErrTelemetryPresent
+	if !itel.Install(i, c, true) {
+		return pyrt.ErrTelemetryPresent
 	}
 	return nil
 }

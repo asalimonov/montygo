@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/asalimonov/montygo/internal/worker"
+	"github.com/asalimonov/montygo/supervisor"
 )
 
 // NoRequestTimeout disables the per-turn deadline of a WebSocket pool.
@@ -70,7 +71,7 @@ func (o WebSocketOptions) supervisor() ServerSupervisor {
 	if o.Supervisor != nil {
 		return o.Supervisor
 	}
-	return staticSupervisor{url: o.URL, tls: o.TLSConfig, headers: o.ConnectHeaders}
+	return supervisor.NewStatic(o.URL, o.TLSConfig, o.ConnectHeaders)
 }
 
 // resolve inlines a supervisor's current endpoint, so the HTTP helpers reach the

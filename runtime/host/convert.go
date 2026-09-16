@@ -1,4 +1,4 @@
-package montygo
+package host
 
 import (
 	"fmt"
@@ -8,17 +8,18 @@ import (
 	"sort"
 
 	"github.com/asalimonov/montygo/internal/value"
+	pyrt "github.com/asalimonov/montygo/runtime"
 )
 
 const maxInputDepth = 48
 
-func prepareValue(v any, store *instanceStore) (any, error) {
+func PrepareValue(v any, store *InstanceStore) (any, error) {
 	return prepareInner(v, store, 0)
 }
 
-func depthError() error { return &ConversionError{Message: "Max input depth exceeded"} }
+func depthError() error { return &pyrt.ConversionError{Message: "Max input depth exceeded"} }
 
-func prepareInner(v any, store *instanceStore, depth int) (any, error) {
+func prepareInner(v any, store *InstanceStore, depth int) (any, error) {
 	if depth > maxInputDepth {
 		return nil, depthError()
 	}
@@ -29,12 +30,12 @@ func prepareInner(v any, store *instanceStore, depth int) (any, error) {
 		return v, nil
 	case value.Time:
 		if x.TimezoneName != nil && x.OffsetSeconds == nil {
-			return nil, &ConversionError{Message: "MontyTime timezoneName requires offsetSeconds"}
+			return nil, &pyrt.ConversionError{Message: "MontyTime timezoneName requires offsetSeconds"}
 		}
 		return x, nil
 	case value.DateTime:
 		if x.TimezoneName != nil && x.OffsetSeconds == nil {
-			return nil, &ConversionError{Message: "MontyDateTime timezoneName requires offsetSeconds"}
+			return nil, &pyrt.ConversionError{Message: "MontyDateTime timezoneName requires offsetSeconds"}
 		}
 		return x, nil
 	case []byte:
@@ -88,14 +89,14 @@ func prepareInner(v any, store *instanceStore, depth int) (any, error) {
 		typ.Attrs = nil
 		return value.Instance{Type: typ, ID: x.ID, Attrs: attrs}, nil
 	case value.Instance, *value.Instance:
-		return nil, &ConversionError{Message: "raw ClassInstance markers are not accepted — wrap the object in ClassInstance(...)"}
+		return nil, &pyrt.ConversionError{Message: "raw ClassInstance markers are not accepted — wrap the object in ClassInstance(...)"}
 	case value.Type:
 		if x.Origin != value.OriginBuiltin {
-			return nil, &ConversionError{Message: "raw Type markers are not accepted — pass the class through ClassType(...)"}
+			return nil, &pyrt.ConversionError{Message: "raw Type markers are not accepted — pass the class through ClassType(...)"}
 		}
 		return x, nil
 	case value.Cycle:
-		return nil, &ConversionError{Message: "Cannot convert cycle marker to Monty value"}
+		return nil, &pyrt.ConversionError{Message: "Cannot convert cycle marker to Monty value"}
 	case value.NamedTuple:
 		out := x
 		out.Values = make([]any, len(x.Values))
@@ -217,24 +218,24 @@ func prepareInner(v any, store *instanceStore, depth int) (any, error) {
 	case reflect.String:
 		return rv.String(), nil
 	}
-	return nil, &ConversionError{Message: fmt.Sprintf("Cannot convert Go %T to Monty value", v)}
+	return nil, &pyrt.ConversionError{Message: fmt.Sprintf("Cannot convert Go %T to Monty value", v)}
 }
 
 // AsNamedTuple converts a struct to a named tuple of its exported fields, in
 // declaration order, named by their `monty` tags or snake_case names.
-func AsNamedTuple(v any) (NamedTuple, error) {
+func AsNamedTuple(v any) (pyrt.NamedTuple, error) {
 	rv := reflect.ValueOf(v)
 	for rv.Kind() == reflect.Pointer {
 		if rv.IsNil() {
-			return NamedTuple{}, &ConversionError{Message: "AsNamedTuple expects a struct, got nil"}
+			return pyrt.NamedTuple{}, &pyrt.ConversionError{Message: "AsNamedTuple expects a struct, got nil"}
 		}
 		rv = rv.Elem()
 	}
 	if rv.Kind() != reflect.Struct {
-		return NamedTuple{}, &ConversionError{Message: fmt.Sprintf("AsNamedTuple expects a struct, got %T", v)}
+		return pyrt.NamedTuple{}, &pyrt.ConversionError{Message: fmt.Sprintf("AsNamedTuple expects a struct, got %T", v)}
 	}
 	members := memberIndex(rv.Type())
-	out := NamedTuple{TypeName: rv.Type().Name(), FieldNames: append([]string(nil), members.fieldNames...)}
+	out := pyrt.NamedTuple{TypeName: rv.Type().Name(), FieldNames: append([]string(nil), members.fieldNames...)}
 	if out.TypeName == "" {
 		out.TypeName = "NamedTuple"
 	}
@@ -246,19 +247,19 @@ func AsNamedTuple(v any) (NamedTuple, error) {
 }
 
 // NewNamedTuple builds a named tuple from field pairs; keys MUST be unique non-empty strings.
-func NewNamedTuple(typeName string, pairs ...Pair) (NamedTuple, error) {
+func NewNamedTuple(typeName string, pairs ...pyrt.Pair) (pyrt.NamedTuple, error) {
 	if typeName == "" {
-		return NamedTuple{}, &ValueError{Message: "NewNamedTuple: type name must not be empty"}
+		return pyrt.NamedTuple{}, &pyrt.ValueError{Message: "NewNamedTuple: type name must not be empty"}
 	}
-	out := NamedTuple{TypeName: typeName, FieldNames: make([]string, 0, len(pairs)), Values: make([]any, 0, len(pairs))}
+	out := pyrt.NamedTuple{TypeName: typeName, FieldNames: make([]string, 0, len(pairs)), Values: make([]any, 0, len(pairs))}
 	seen := map[string]struct{}{}
 	for _, p := range pairs {
 		name, ok := p.Key.(string)
 		if !ok || name == "" {
-			return NamedTuple{}, &ValueError{Message: fmt.Sprintf("NewNamedTuple: field name must be a non-empty string, got %v", p.Key)}
+			return pyrt.NamedTuple{}, &pyrt.ValueError{Message: fmt.Sprintf("NewNamedTuple: field name must be a non-empty string, got %v", p.Key)}
 		}
 		if _, dup := seen[name]; dup {
-			return NamedTuple{}, &ValueError{Message: fmt.Sprintf("NewNamedTuple: duplicate field %q", name)}
+			return pyrt.NamedTuple{}, &pyrt.ValueError{Message: fmt.Sprintf("NewNamedTuple: duplicate field %q", name)}
 		}
 		seen[name] = struct{}{}
 		out.FieldNames = append(out.FieldNames, name)
@@ -272,7 +273,7 @@ func wrapHint(t reflect.Type) error {
 	if name == "" {
 		name = "object"
 	}
-	return &ConversionError{Message: fmt.Sprintf("Cannot convert %s instance to a Monty value — wrap it in ClassInstance(...)", name)}
+	return &pyrt.ConversionError{Message: fmt.Sprintf("Cannot convert %s instance to a Monty value — wrap it in ClassInstance(...)", name)}
 }
 
 func uintValue(x uint64) any {
@@ -311,7 +312,7 @@ func sortKeys(keys []reflect.Value) {
 	})
 }
 
-func classTypeMarker(c *ClassType, store *instanceStore, depth int) (value.Type, error) {
+func classTypeMarker(c *ClassType, store *InstanceStore, depth int) (value.Type, error) {
 	pairs, err := c.eagerAttrs()
 	if err != nil {
 		return value.Type{}, err
@@ -330,7 +331,7 @@ func classTypeMarker(c *ClassType, store *instanceStore, depth int) (value.Type,
 	return value.Type{Name: c.Name(), ID: c.ID(), Origin: value.OriginHost, Attrs: attrs}, nil
 }
 
-func instanceMarker(ci *ClassInstance, store *instanceStore, depth int) (value.Instance, error) {
+func instanceMarker(ci *ClassInstance, store *InstanceStore, depth int) (value.Instance, error) {
 	if err := store.put(ci, false); err != nil {
 		return value.Instance{}, err
 	}
@@ -356,47 +357,47 @@ func instanceMarker(ci *ClassInstance, store *instanceStore, depth int) (value.I
 	return value.Instance{Type: typ, ID: ci.id, Attrs: attrs}, nil
 }
 
-func restoreValue(v any, store *instanceStore) any {
+func RestoreValue(v any, store *InstanceStore) any {
 	switch x := v.(type) {
 	case []any:
 		out := make([]any, len(x))
 		for i, it := range x {
-			out[i] = restoreValue(it, store)
+			out[i] = RestoreValue(it, store)
 		}
 		return out
 	case value.Tuple:
 		out := make(value.Tuple, len(x))
 		for i, it := range x {
-			out[i] = restoreValue(it, store)
+			out[i] = RestoreValue(it, store)
 		}
 		return out
 	case *value.Dict:
 		out := &value.Dict{}
 		for _, p := range x.Pairs() {
-			out.Append(restoreValue(p.Key, store), restoreValue(p.Value, store))
+			out.Append(RestoreValue(p.Key, store), RestoreValue(p.Value, store))
 		}
 		return out
 	case *value.Set:
 		out := &value.Set{}
 		for _, it := range x.Items() {
-			out.Append(restoreValue(it, store))
+			out.Append(RestoreValue(it, store))
 		}
 		return out
 	case *value.FrozenSet:
 		out := &value.FrozenSet{}
 		for _, it := range x.Items() {
-			out.Append(restoreValue(it, store))
+			out.Append(RestoreValue(it, store))
 		}
 		return out
 	case value.NamedTuple:
 		out := x
 		out.Values = make([]any, len(x.Values))
 		for i, it := range x.Values {
-			out.Values[i] = restoreValue(it, store)
+			out.Values[i] = RestoreValue(it, store)
 		}
 		return out
 	case value.Instance:
-		if w, ok := store.get(x.ID); ok {
+		if w, ok := store.Get(x.ID); ok {
 			if ci, ok := w.(*ClassInstance); ok {
 				return ci.instance
 			}
@@ -404,13 +405,13 @@ func restoreValue(v any, store *instanceStore) any {
 		attrs := &value.Dict{}
 		for _, p := range x.Attrs.Pairs() {
 			if key, ok := p.Key.(string); ok {
-				attrs.Append(key, restoreValue(p.Value, store))
+				attrs.Append(key, RestoreValue(p.Value, store))
 			}
 		}
 		return &ClassProxy{Name: x.Type.Name, ID: x.ID, IsDataclass: x.Type.IsDataclass, Attributes: attrs, typ: x.Type}
 	case value.Type:
 		if x.Origin == value.OriginHost {
-			if w, ok := store.get(x.ID); ok {
+			if w, ok := store.Get(x.ID); ok {
 				if ct, ok := w.(*ClassType); ok {
 					return ct
 				}
@@ -421,11 +422,11 @@ func restoreValue(v any, store *instanceStore) any {
 	return v
 }
 
-func kwargsRecord(pairs []value.Pair, store *instanceStore) Kwargs {
+func KwargsRecord(pairs []value.Pair, store *InstanceStore) Kwargs {
 	kw := Kwargs{}
 	for _, p := range pairs {
 		if key, ok := p.Key.(string); ok && key != "__proto__" {
-			kw[key] = restoreValue(p.Value, store)
+			kw[key] = RestoreValue(p.Value, store)
 		}
 	}
 	return kw
