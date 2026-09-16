@@ -16,7 +16,8 @@ pub fn error(event: &str, fields: &[(&str, &dyn Display)]) {
     log("error", event, fields);
 }
 
-/// One logfmt line on stderr; no global tracing subscriber is installed.
+/// One logfmt line on stderr. Server events never go through tracing; the
+/// subscriber telemetry installs carries only OpenTelemetry's own warnings.
 fn log(level: &str, event: &str, fields: &[(&str, &dyn Display)]) {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)

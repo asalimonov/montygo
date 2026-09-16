@@ -1210,6 +1210,8 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.27.0",
  "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1317,6 +1319,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9966929966d17620d7c316c643ba62631826e10021409357772d5eea84f62c35"
 dependencies = [
  "http",
+ "httpdate",
  "opentelemetry",
  "opentelemetry-http",
  "opentelemetry-proto",
@@ -1324,6 +1327,7 @@ dependencies = [
  "prost",
  "reqwest",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

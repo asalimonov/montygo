@@ -11,7 +11,7 @@ permissions:
 env:
   GOTOOLCHAIN: local
   MONTY_REV: f8acf4fa8fff78dfd11dc5a2042e4fdf0ab36c28
-  ITERATIONS: "6"
+  ITERATIONS: "12"
 
 jobs:
   arm64:
