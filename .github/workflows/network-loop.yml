@@ -1,9 +1,13 @@
 name: network-loop
 
+# Flake hunting: builds the arm64 image once and runs tests/network repeatedly,
+# keeping every container log as an artifact.
 on:
-  push:
-    branches: ["ci/**"]
   workflow_dispatch:
+    inputs:
+      iterations:
+        description: how many times to run make test-network
+        default: "12"
 
 permissions:
   contents: read
@@ -11,7 +15,7 @@ permissions:
 env:
   GOTOOLCHAIN: local
   MONTY_REV: f8acf4fa8fff78dfd11dc5a2042e4fdf0ab36c28
-  ITERATIONS: "12"
+  ITERATIONS: ${{ inputs.iterations }}
 
 jobs:
   arm64:
