@@ -2,15 +2,22 @@ package montygo
 
 import mtel "github.com/asalimonov/montygo/telemetry"
 
-// Types.
-type Components = mtel.Components
+// The OpenTelemetry surface. The implementation lives in montygo/telemetry.
+
+// TelemetryComponents are the OpenTelemetry components Monty records into.
+type TelemetryComponents = mtel.Components
+
+// Instrumentation is the otel Instrumentation implementation of this binding.
 type Instrumentation = mtel.Instrumentation
+
+// InstrumentationConfig configures an Instrumentation.
 type InstrumentationConfig = mtel.InstrumentationConfig
 
-// Functions.
-var Flush = mtel.Flush
+// Instrument installs the process-wide telemetry components.
 var Instrument = mtel.Instrument
-var NewInstrumentation = mtel.NewInstrumentation
 
-// TelemetryComponents is the pre-0.4 name of telemetry.Components.
-type TelemetryComponents = mtel.Components
+// Flush is a no-op kept for API compatibility with the TypeScript package.
+var Flush = mtel.Flush
+
+// NewInstrumentation builds an Instrumentation from a config.
+var NewInstrumentation = mtel.NewInstrumentation

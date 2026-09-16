@@ -10,7 +10,7 @@ import (
 
 	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/examples/internal/pyargs"
-	"github.com/asalimonov/montygo/osaccess"
+	"github.com/asalimonov/montygo/runtime/osaccess"
 )
 
 // ExternalFunctions read files through the same OSAccess the sandbox sees.

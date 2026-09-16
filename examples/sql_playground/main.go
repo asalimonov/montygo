@@ -18,7 +18,7 @@ import (
 
 	"github.com/asalimonov/montygo"
 	"github.com/asalimonov/montygo/examples/internal/montyenv"
-	"github.com/asalimonov/montygo/osaccess"
+	"github.com/asalimonov/montygo/runtime/osaccess"
 )
 
 //go:embed sandbox_code.py
